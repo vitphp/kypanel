@@ -1,11 +1,62 @@
 # kypanel（开猿运维）
 
-Linux 服务器管理面板。
+[![官网](https://img.shields.io/badge/官网-panel.apihot.cn-blue)](https://panel.apihot.cn/)
+[![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
-- **后端**：Go (Gin) — 单二进制，SQLite 存储
-- **前端**：Vue 3 + Vite，构建产物输出到 `webui/dist`（支持 `go:embed` 内嵌或前后端分离部署）
-- **目标系统**：Linux（Ubuntu / Debian / CentOS / Rocky，x86_64 + ARM64）
-- **AI 原生**：内置 [MCP Server](docs/mcp.md)，支持 Claude Code / Codex / Cursor 等 AI 工具远程运维
+**kypanel（开猿运维）** 是一款开源、免费、自托管的 Linux 服务器管理面板。提供网站管理、数据库、文件管理、安全中心、Web 终端、Docker、WAF 应用防护、监控告警等一站式能力，让服务器运维像使用图形界面一样轻松。
+
+- 🏠 **官网**：https://panel.apihot.cn/
+- 📖 **在线文档**：本仓库 `docs/` 目录（[API](docs/api.md) / [MCP](docs/mcp.md)）
+- 🐳 **内置 AI 运维**：原生支持 MCP 协议，可直接接入 Claude Code / Codex / Cursor
+
+## 快速开始
+
+### 一键安装（官方脚本）
+
+```bash
+curl -fsSL https://panel.apihot.cn/sh/i.sh | bash
+```
+
+> 适用于 Ubuntu / Debian / CentOS / Rocky（x86_64 + ARM64）。
+> 安装完成后终端会输出访问地址、随机端口、安全入口、管理员账号与随机密码（仅显示一次）。
+
+指定端口安装：
+
+```bash
+curl -fsSL https://panel.apihot.cn/sh/i.sh | bash -s -- --port 9999
+```
+
+首次访问（安装脚本默认启用 HTTPS 自签名证书，浏览器提示不安全属正常，点「高级 → 继续访问」即可）：
+
+```
+https://<服务器IP>:<随机端口>/<安全入口>/
+```
+
+> **安全入口**：6 位随机串，相当于面板的「隐形门牌」，未知入口则访问返回 404，可有效防止密码爆破与扫描攻击。
+
+## 功能特性
+
+| 功能模块 | 说明 |
+|---|---|
+| 🌐 **网站管理** | 支持静态、PHP、Node.js、Python、Go、反向代理等站点类型；一键创建、SSL 证书申请（Let's Encrypt / DNS 验证 / 自动续签）、访问日志分析、站点访问统计、目录树管理、单站点安全防护 |
+| 🗄️ **数据库管理** | MySQL / MariaDB / SQLServer / MongoDB / Redis 多引擎管理；建库建账号、账号授权、导入导出、定时备份与一键恢复、网页版 phpMyAdmin |
+| 🐳 **Docker 管理** | 容器 / 镜像 / 网络 / 数据卷直观管理；容器日志实时查看、一键启停重启；内置 Docker 应用商店，常用应用一键部署 |
+| 📁 **文件管理** | 在线文件浏览、上传下载（GB 级大文件断点续传）、远程下载 URL、压缩解压、在线编辑（内置代码高亮）、图片 / 视频 / 音乐在线预览、目录「终端」一键直达、删除进回收站可随时找回 |
+| 🛡️ **安全中心** | 防火墙（firewalld / nftables / iptables）端口放行与 IP 拉黑、按城市 / 国家离线封锁（内置 ip2region 库）、IP 归属地查询、登录 IP 白名单、安全入口、双因素认证（2FA） |
+| ⚔️ **WAF 应用防护** | 全局 + 单站点两级防护；内置 34 条攻击规则（10 大类）、自定义规则、IP 黑白名单、CC 防护（Nginx limit_req）、UA 过滤、防盗链、攻击日志与统计，Nginx / Apache 双支持 |
+| 🖥️ **Web 终端** | 浏览器内直接打开 SSH 终端（WebSocket），文件管理任意目录一键进入对应终端 |
+| 📈 **监控与进程** | CPU / 内存 / 磁盘 / 网络实时曲线与历史数据；进程列表与一键结束、服务器负载总览 |
+| ⏰ **计划任务 & 备份** | Cron 定时任务可视化配置（访问 URL / 备份网站 / 备份数据库 / 执行命令）；集中备份中心，多存储可配 |
+| 🔄 **网站搬家** | 支持同面板 / 跨面板（含宝塔）站点一键导出迁移，远程站点自动打包下载导入 |
+| 🔑 **多用户与审计** | 子账号、角色权限（内置运维 / 只读角色，可自定义）、操作日志全量审计、在线会话管理与踢下线、登录失败自动验证码 |
+| 🤖 **AI 原生运维** | 内置 MCP Server，Claude Code / Codex / Cursor 等 AI 工具可直连面板完成查询状态、部署网站、排查故障 |
+
+## 项目特性
+
+- 💎 **开箱即用**：单二进制部署（前后端内嵌），内置 SQLite 数据库，零外部依赖，支持 x86_64 与 ARM64
+- 🔐 **安全可靠**：JWT 认证（HttpOnly Cookie）、密码 bcrypt 加密存储、操作审计、安全入口防爆破、防火墙默认拒绝（default-drop）、敏感文件权限 600 收紧、明文密码自动清除
+- 🚀 **持续迭代**：活跃维护，支持在线升级（`--update` 保留数据）、系统服务自注册与开机自启、HTTPS 证书自动续签
+- ⚙️ **内置 CLI**：`ky` 命令行菜单，忘记密码 / 改端口 / 磁盘清理 / 配置 HTTPS 不依赖面板
 
 ## 功能截图
 
@@ -21,39 +72,144 @@ Linux 服务器管理面板。
 |---|
 | ![应用商店](docs/screenshots/appstore.png) |
 
-## 主要功能
-
-- **网站**：静态 / PHP / Node / Python / Go / 反向代理，SSL 证书（Let's Encrypt、DNS 验证）、日志分析、访问统计
-- **数据库**：MySQL / SQLServer / MongoDB / Redis 管理，备份恢复、phpMyAdmin
-- **Docker**：容器 / 镜像 / 网络管理，Docker 应用商店
-- **FTP**：账号管理与启停
-- **运行环境**：PHP 版本与扩展、php.ini / FPM 配置、Node / Python / Go 环境
-- **安全**：防火墙规则、WAF（全局 + 单站点）、CC 防护、封禁 IP、网站安全
-- **运维**：监控、计划任务、备份中心、进程管理、文件管理（断点续传、回收站）、WebSocket 终端
-- **多用户**：子账号、角色权限、操作日志、双因素认证（2FA）
-- **AI 运维**：MCP 接口接入 Claude Code / Codex / Cursor
-
 ## 文档
 
-- [API 接口文档](docs/api.md) — 全部 REST API 路由、鉴权方式与示例
-- [MCP 接口文档](docs/mcp.md) — AI 工具接入 MCP 的方法与工具说明
+| 文档 | 说明 |
+|---|---|
+| [API 接口文档](docs/api.md) | 全部 REST API 路由（约 200 个）、鉴权体系（JWT / API 令牌 / 临时令牌）、安全入口规则、请求示例 |
+| [MCP 接口文档](docs/mcp.md) | MCP 协议说明、9 个内置工具参数表、Claude Code / Cursor 接入配置示例 |
+| [技术架构](#技术架构) | 前后端技术栈、目录结构与部署形态 |
 
-## 构建
+## 技术架构
 
-### 1. 构建前端
+| 层 | 技术 |
+|---|---|
+| 后端 | Go + Gin，单二进制（`go:embed` 内嵌前端） |
+| 数据库 | SQLite（WAL 模式，零运维） |
+| 前端 | Vue 3 + Vite + Element Plus + Pinia + Vue Router |
+| 终端 | @xterm/xterm（WebSocket） |
+| 鉴权 | JWT（HttpOnly Cookie）+ API 令牌（36 位随机）+ 临时访问令牌，三层体系 |
+| 防火墙 | firewalld → nftables → iptables 自动适配 |
+| IP 归属 | 纯 Go 实现 ip2region.xdb 离线解析，零第三方依赖 |
+| 监控 | 后台采集协程 + 历史数据入库（SQLite） |
+
+```
+kypanel/
+├── cmd/panel/           # 后端入口（含 CLI / 自动续签 / 应用导出等子命令）
+├── internal/
+│   ├── cli/             # ky 命令行管理菜单
+│   ├── config/          # 配置加载与持久化
+│   ├── logger/          # 日志（文件 + 控制台，按天滚动）
+│   ├── model/           # GORM 数据模型（含 AutoMigrate）
+│   ├── middleware/      # JWT / API 令牌 / 权限 / 安全守卫中间件
+│   ├── router/          # 全部 API 路由（按模块拆分 27 个文件）
+│   ├── service/         # 业务逻辑（站点/数据库/Docker/WAF/安全/迁移…）
+│   └── utils/           # 通用工具（JWT/加密/响应封装）
+├── web/                 # Vue 3 前端源码
+├── webui/               # 前端构建产物（go:embed 目标目录）
+├── docs/                # 文档（API / MCP / 截图）
+├── scripts/             # 构建 / 安装 / 卸载 / 证书续签脚本
+└── data/                # 运行时数据（SQLite、日志、IP 库，不提交）
+```
+
+## 安装
+
+### 方式一：官方一键脚本（推荐）
+
+```bash
+curl -fsSL https://panel.apihot.cn/sh/i.sh | bash
+```
+
+### 方式二：指定端口 / 自定义资源源
+
+```bash
+# 指定端口
+curl -fsSL https://panel.apihot.cn/sh/i.sh | bash -s -- --port 9999
+
+# 自定义资源目录（二进制 + ip2region.xdb 与 i.sh 同目录）
+curl -fsSL https://你的域名/sh/i.sh | bash -s -- --base-url https://你的域名/sh
+```
+
+### 方式三：离线 / 本地安装
+
+把 `kypanel_amd64`（后端）与 `i.sh` 放在同一目录：
+
+```bash
+bash install.sh                          # 自动识别同目录二进制
+bash install.sh --port 9999              # 指定端口
+```
+
+### 方式四：手动部署（前后端分离）
+
+1. 上传 `bin/kypanel_amd64` 与 `bin/panel-web.tar.gz` 到服务器
+2. 解压前端包到面板数据目录的 `web/` 文件夹
+3. 启动：`/opt/kypanel/panel -config /opt/kypanel/config.json`
+
+> 后端启动时磁盘前端优先（存在 `index.html` 时优先托管磁盘前端），
+> 前端可单独替换、刷新即生效，无需重新编译后端。
+
+### 环境变量（首次启动初始化）
+
+| 变量 | 说明 |
+|---|---|
+| `PANEL_ADMIN_USER` | 初始管理员用户名（默认 `admin`） |
+| `PANEL_ADMIN_PASS` | 初始密码（不设置则随机生成强密码并打印；创建后自动从磁盘清除明文） |
+| `PANEL_DATA_DIR` | 数据目录覆盖（开发/测试用） |
+| `PANEL_PORT` | 安装脚本指定端口 |
+
+### 命令行参数
+
+```bash
+./panel -config /opt/kypanel/config.json   # 指定配置启动
+./panel -version                            # 版本信息
+./panel -renew-ssl                          # 自动续签 2 天内到期证书后退出（供计划任务每日调用）
+./panel -export-apps apps.json              # 导出内置应用数据
+```
+
+## 命令行管理（ky）
+
+安装后自动创建 `ky` 命令（软链接到面板二进制），以 root 身份运行即可进入管理菜单：
+
+```
+============== kypanel 命令行 ==============
+(1) 启动面板        (2) 停止面板       (3) 重启面板
+(4) 修改面板端口    (5) 修改面板用户名  (6) 修改面板密码
+(7) 查看面板信息    (8) 磁盘清理工具   (9) 配置 HTTPS
+(0) 退出
+=============================================
+```
+
+忘记密码时：SSH 登录服务器，输入 `ky` → 选择 6 重置密码，无需登录面板。
+
+## 升级 / 卸载
+
+```bash
+# 升级面板（保留数据与配置）
+bash <(curl -fsSL https://panel.apihot.cn/sh/i.sh) -- --update
+
+# 全新重装（删除全部数据）
+bash <(curl -fsSL https://panel.apihot.cn/sh/i.sh) -- --reinstall
+
+# 卸载面板（停止服务并删除全部文件）
+bash <(curl -fsSL https://panel.apihot.cn/sh/i.sh) -- --uninstall
+```
+
+## 开发
+
+### 构建前端
 
 ```bash
 cd web
 npm install
-npm run build   # 产物输出到 webui/dist
+npm run build     # 产物输出到 webui/dist
 ```
 
-### 2. 构建后端（交叉编译）
+### 构建后端（交叉编译）
 
 Linux：
 
 ```bash
-./scripts/build.sh amd64   # 或 arm64
+./scripts/build.sh amd64    # 或 arm64
 ```
 
 Windows（PowerShell）：
@@ -66,31 +222,42 @@ powershell -File scripts/cross-build.ps1
 
 | 产物 | 说明 |
 |---|---|
-| `bin/kypanel_amd64` | 后端二进制（交叉编译，内嵌前端） |
+| `bin/kypanel_amd64` | 后端二进制（交叉编译，内嵌前端，strip 后约 31MB） |
 | `bin/panel-web.tar.gz` | 前端独立包（可单独替换部署） |
 | `bin/ip2region.xdb` | IP 归属离线库（约 11MB，独立部署） |
 | `bin/i.sh` | 服务器安装脚本 |
 
-## 部署
+## 常见问题
 
-前后端分离部署：上传后端二进制 + 前端包到服务器，前端解压到数据目录的 `web/` 文件夹。
+| 问题 | 解决 |
+|---|---|
+| 浏览器提示证书不受信任 | 安装脚本默认启用 HTTPS 自签名证书，点「高级 → 继续访问」即可；可后续在面板设置或 `ky → (9) 配置 HTTPS` 更换 |
+| 面板打不开 | 检查云服务器安全组是否放行面板端口（腾讯云 / 阿里云控制台 → 安全组） |
+| 忘记面板密码 | SSH 登录服务器执行 `ky` → 选择 6「修改面板密码」 |
+| 登录显示需要验证码 | 密码错误 1 次后触发验证码，属正常防爆破机制；输入正确验证码即可 |
+| HTTPS 证书失效 | 执行 `bash <(curl -fsSL https://panel.apihot.cn/sh/i.sh) -- --fix-https` 一键修复 |
+| 网站证书到期 | 面板内置每日自动续签（`-renew-ssl`），也可在网站 SSL 设置中手动续签 |
 
-- 后端启动时磁盘前端优先（存在 `index.html` 时优先托管磁盘前端）
-- 前端可单独替换、刷新即生效，无需重新编译后端
+## AI 运维（MCP）
 
-## 目录结构
+kypanel 内置 MCP Server（`POST /api/mcp`，Streamable HTTP），提供 9 个运维工具：
 
+`system_info`、`process_list`、`service_status`、`website_list`、`website_create`、`database_list`、`app_list`、`file_list`、`exec_command`
+
+```bash
+# Claude Code 接入
+claude mcp add kypanel \
+  --transport http \
+  --url https://<host>:<port>/api/mcp \
+  --header "Authorization: Bearer <mcp-token>"
 ```
-kypanel/
-├── cmd/panel/           # 后端入口
-├── internal/            # Go 后端（config/logger/model/service/router/middleware/utils）
-├── web/                 # Vue 3 前端源码
-├── webui/               # 前端构建产物（go:embed 目标目录）
-├── docs/                # 文档（API / MCP / 截图）
-├── scripts/             # 构建/安装/运维脚本
-└── data/                # 运行时数据（SQLite、日志、IP 库，不提交）
-```
+
+> 详细用法见 [MCP 接口文档](docs/mcp.md)。建议在面板「API 令牌」中为 AI 工具单独创建 `type=mcp` 令牌并设置 scopes。
 
 ## 许可
 
 Apache-2.0
+
+---
+
+**kypanel** · 开源的 Linux 服务器管理面板 · [官网](https://panel.apihot.cn/) · 让服务器运维如此简单
