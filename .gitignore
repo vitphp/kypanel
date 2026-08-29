@@ -1,0 +1,27 @@
+# 编译产物 / 构建缓存
+bin/
+webui/dist/*
+!webui/dist/.gitkeep
+
+# 前端依赖
+web/node_modules/
+web/dist/
+
+# 生产数据（含敏感信息：panel.db / 配置 / 日志）
+data/
+*.db
+*.db-journal
+
+# 运行时配置
+config.json
+.env
+.env.*
+*.local
+
+# IDE / 系统
+.codebuddy/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
