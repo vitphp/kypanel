@@ -24,14 +24,18 @@
                 <el-tag :type="row.totp_enabled ? 'success' : 'info'" size="small">{{ row.totp_enabled ? '已启用' : '未启用' }}</el-tag>
               </template>
             </el-table-column>
+            <el-table-column label="创建时间" width="170">
+              <template #default="{ row }">{{ fmtTimeISO(row.created_at) }}</template>
+            </el-table-column>
             <el-table-column label="操作" min-width="220">
               <template #default="{ row }">
                 <div class="ops-cell">
-                  <template v-if="row.role_id !== 0">
-                    <el-button link type="primary" size="small" @click="editRole(row)">改角色</el-button>
-                    <el-button link type="warning" size="small" @click="resetPwd(row)">重置密码</el-button>
+                  <template v-if="row.can_delete">
+                    <el-button v-if="row.role_id !== 0" link type="primary" size="small" @click="editRole(row)">改角色</el-button>
+                    <el-button v-if="row.role_id !== 0" link type="warning" size="small" @click="resetPwd(row)">重置密码</el-button>
                     <el-button link type="danger" size="small" @click="removeUser(row)">删除</el-button>
                   </template>
+                  <el-tag v-else-if="row.is_founder" type="success" size="small">创始用户</el-tag>
                   <span v-else class="super-tip">超级管理员</span>
                 </div>
               </template>
@@ -136,6 +140,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import { fmtTimeISO } from '../utils/format'
 
 const activeTab = ref('users')
 const users = ref([])
@@ -279,7 +284,7 @@ async function confirmUserEdit() {
 
 async function removeUser(row) {
   try {
-    await ElMessageBox.confirm(`确定删除子账号「${row.username}」吗？`, '删除子账号', { type: 'warning' })
+    await ElMessageBox.confirm(`确定删除用户「${row.username}」吗？此操作不可恢复。`, '删除用户', { type: 'warning' })
   } catch { return }
   await request.post('/users/delete', { id: row.id })
   ElMessage.success('已删除')

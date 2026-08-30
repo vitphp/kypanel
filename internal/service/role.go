@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"kypanel/internal/model"
 )
@@ -81,33 +82,56 @@ func DeleteRole(id uint) error {
 
 // AdminItem 用户列表项（不含密码哈希）
 type AdminItem struct {
-	ID       uint   `json:"id"`
-	Username string `json:"username"`
-	RoleID   uint   `json:"role_id"`
-	RoleName string `json:"role_name"`
-	TOTP     bool   `json:"totp_enabled"`
+	ID        uint      `json:"id"`
+	Username  string    `json:"username"`
+	RoleID    uint      `json:"role_id"`
+	RoleName  string    `json:"role_name"`
+	TOTP      bool      `json:"totp_enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	IsFounder bool      `json:"is_founder"` // 是否为创始用户（安装面板时创建的第一个账号）
+	CanDelete bool      `json:"can_delete"` // 当前操作者是否有权删除该用户
 }
 
-// ListAdmins 列出所有管理员（含角色名）
-func ListAdmins() []AdminItem {
+// founderAdmin 返回创始用户：id 最小的账号，即安装面板时创建的第一个用户。
+// 创始用户是特权账号，不可被任何人删除（包括其本人）。
+func founderAdmin() *model.Admin {
+	var founder model.Admin
+	if err := model.DB.Order("id asc").First(&founder).Error; err != nil {
+		return nil
+	}
+	return &founder
+}
+
+// ListAdmins 列出所有管理员（含角色名、创建时间、是否为创始用户及当前操作者可否删除）
+func ListAdmins(operatorID uint) []AdminItem {
 	var admins []model.Admin
 	model.DB.Order("id asc").Find(&admins)
 	roles := map[uint]string{}
 	for _, r := range ListRoles() {
 		roles[r.ID] = r.Name
 	}
+	founder := founderAdmin()
+	var founderID uint
+	if founder != nil {
+		founderID = founder.ID
+	}
 	var out []AdminItem
 	for _, a := range admins {
 		item := AdminItem{
-			ID:       a.ID,
-			Username: a.Username,
-			RoleID:   a.RoleID,
-			RoleName: "超级管理员",
-			TOTP:     a.TOTPSecret != "",
+			ID:        a.ID,
+			Username:  a.Username,
+			RoleID:    a.RoleID,
+			RoleName:  "超级管理员",
+			TOTP:      a.TOTPSecret != "",
+			CreatedAt: a.CreatedAt,
+			IsFounder: founder != nil && a.ID == founderID,
 		}
 		if a.RoleID != 0 {
 			item.RoleName = roles[a.RoleID]
 		}
+		// 允许删除：不能删自己，也不能删创始用户；
+		// 其余用户均可删（创始用户可删除任何其他用户，包括其他超级管理员）
+		item.CanDelete = a.ID != operatorID && !item.IsFounder
 		out = append(out, item)
 	}
 	return out
@@ -172,14 +196,23 @@ func ResetAdminPassword(adminID uint, password string) error {
 	return nil
 }
 
-// DeleteAdmin 删除子账号（超级管理员不可删）
-func DeleteAdmin(adminID uint) error {
+// DeleteAdmin 删除用户。
+// 规则：
+//   - 不能删除自己（包括创始用户）；
+//   - 创始用户（安装面板时创建的第一个账号）不可被任何人删除；
+//   - 其余用户可删除：创始用户可删除任何其他用户（包括超级管理员），
+//     其他超级管理员可删除创始用户以外的任何用户。
+func DeleteAdmin(operatorID, adminID uint) error {
+	if adminID == operatorID {
+		return errors.New("不能删除当前登录账号")
+	}
 	var admin model.Admin
 	if err := model.DB.First(&admin, adminID).Error; err != nil {
 		return errors.New("用户不存在")
 	}
-	if admin.RoleID == 0 {
-		return errors.New("超级管理员不可删除")
+	founder := founderAdmin()
+	if founder != nil && adminID == founder.ID {
+		return errors.New("创始用户不可删除")
 	}
 	return model.DB.Delete(&admin).Error
 }

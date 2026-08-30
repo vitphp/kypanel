@@ -1,6 +1,9 @@
 package service
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -795,18 +798,91 @@ func DownloadSiteSSL(siteID uint) (cert string, key string, err error) {
 	if err := model.DB.First(&s, siteID).Error; err != nil {
 		return "", "", errors.New("站点不存在")
 	}
-	if s.SslCertPath == "" || s.SslKeyPath == "" {
+	certPath, keyPath := s.SslCertPath, s.SslKeyPath
+	// 老站点/未记录路径时，回退到按站点名生成的默认证书路径
+	if certPath == "" || keyPath == "" {
+		certPath, keyPath = siteSSLPath(s.Name)
+	}
+	if certPath == "" || keyPath == "" {
 		return "", "", errors.New("站点未配置 SSL 证书")
 	}
-	certData, err := os.ReadFile(s.SslCertPath)
+	certData, err := os.ReadFile(certPath)
 	if err != nil {
 		return "", "", errors.New("读取证书失败: " + err.Error())
 	}
-	keyData, err := os.ReadFile(s.SslKeyPath)
+	keyData, err := os.ReadFile(keyPath)
 	if err != nil {
 		return "", "", errors.New("读取私钥失败: " + err.Error())
 	}
 	return string(certData), string(keyData), nil
+}
+
+// validCertPEM 校验字符串是否为可解析的 PEM 证书
+func validCertPEM(content string) bool {
+	block, _ := pem.Decode([]byte(content))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	_, err := x509.ParseCertificate(block.Bytes)
+	return err == nil
+}
+
+// validKeyPEM 校验字符串是否为可解析的 PEM 私钥（PKCS1 / SEC1 / PKCS8）
+func validKeyPEM(content string) bool {
+	block, _ := pem.Decode([]byte(content))
+	if block == nil {
+		return false
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return true
+	}
+	if _, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return true
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return true
+	}
+	return false
+}
+
+// certKeyMatch 校验证书与私钥是否属于同一对（公钥一致）
+func certKeyMatch(certPEM, keyPEM string) bool {
+	certBlock, _ := pem.Decode([]byte(certPEM))
+	keyBlock, _ := pem.Decode([]byte(keyPEM))
+	if certBlock == nil || keyBlock == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return false
+	}
+	var pub any
+	if k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
+		pub = &k.PublicKey
+	} else if k, err := x509.ParseECPrivateKey(keyBlock.Bytes); err == nil {
+		pub = &k.PublicKey
+	} else if k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
+		if signer, ok := k.(crypto.Signer); ok {
+			pub = signer.Public()
+		} else {
+			return false
+		}
+	} else {
+		return false
+	}
+	return pubKeysEqual(cert.PublicKey, pub)
+}
+
+func pubKeysEqual(a, b any) bool {
+	switch ka := a.(type) {
+	case *rsa.PublicKey:
+		kb, ok := b.(*rsa.PublicKey)
+		return ok && ka.N.Cmp(kb.N) == 0 && ka.E == kb.E
+	case *ecdsa.PublicKey:
+		kb, ok := b.(*ecdsa.PublicKey)
+		return ok && ka.Curve == kb.Curve && ka.X.Cmp(kb.X) == 0 && ka.Y.Cmp(kb.Y) == 0
+	}
+	return false
 }
 
 // SaveSiteSSL 保存 HTTPS 设置（写入证书文件并重建配置）
@@ -828,6 +904,30 @@ func SaveSiteSSL(req SiteSSLReq) error {
 		_, certErr := os.Stat(certPath)
 		if certErr != nil && cert == "" {
 			return errors.New("开启 HTTPS 需要提供证书（PEM 格式）")
+		}
+		// 防误填污染：证书/私钥内容非空时必须为合法 PEM，且相互匹配。
+		// 若不对内容做校验，占位符（如 1 个字节的 "1"）会被原样写入证书文件，
+		// 导致 nginx 全局配置校验失败、所有网站一起起不来。
+		if cert != "" && !validCertPEM(cert) {
+			return errors.New("证书内容无效：请输入完整 PEM 格式（以 -----BEGIN CERTIFICATE----- 开头）")
+		}
+		if key != "" && !validKeyPEM(key) {
+			return errors.New("私钥内容无效：请输入完整 PEM 格式（以 -----BEGIN PRIVATE KEY----- 开头）")
+		}
+		if cert != "" && key != "" && !certKeyMatch(cert, key) {
+			return errors.New("证书与私钥不匹配：请确认它们对应同一张证书")
+		}
+		if cert != "" && key == "" {
+			// 只填了证书：与现有私钥文件匹配校验
+			if keyData, err := os.ReadFile(keyPath); err == nil && validKeyPEM(string(keyData)) && !certKeyMatch(cert, string(keyData)) {
+				return errors.New("新证书与现有私钥不匹配：请同时提供对应的私钥")
+			}
+		}
+		if cert == "" && key != "" {
+			// 只填了私钥：与现有证书文件匹配校验
+			if certData, err := os.ReadFile(certPath); err == nil && validCertPEM(string(certData)) && !certKeyMatch(string(certData), key) {
+				return errors.New("新私钥与现有证书不匹配：请同时提供对应的证书")
+			}
 		}
 		if cert != "" {
 			if err := os.WriteFile(certPath, []byte(cert), 0o644); err != nil {

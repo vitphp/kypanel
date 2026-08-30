@@ -19,10 +19,20 @@
           <el-tag v-else type="info">HTTPS 未开启</el-tag>
         </el-form-item>
         <el-form-item label="PEM 证书">
-          <el-input v-model="customForm.cert" type="textarea" :rows="5" placeholder="-----BEGIN CERTIFICATE----- ..." />
+          <div class="cert-field">
+            <el-input v-model="customForm.cert" type="textarea" :rows="8" placeholder="-----BEGIN CERTIFICATE----- ..." />
+            <div class="cert-copy">
+              <el-button size="small" link type="primary" :disabled="!customForm.cert" @click="copyText(customForm.cert)">复制证书</el-button>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="KEY 私钥">
-          <el-input v-model="customForm.key" type="textarea" :rows="5" placeholder="-----BEGIN PRIVATE KEY----- ..." />
+          <div class="cert-field">
+            <el-input v-model="customForm.key" type="textarea" :rows="8" placeholder="-----BEGIN PRIVATE KEY----- ..." />
+            <div class="cert-copy">
+              <el-button size="small" link type="primary" :disabled="!customForm.key" @click="copyText(customForm.key)">复制私钥</el-button>
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="启用 HTTPS">
           <el-switch v-model="customForm.enabled" />
@@ -254,13 +264,13 @@ watch(() => props.modelValue, (v) => {
 })
 
 async function loadCurrentSSL() {
-  if (!props.site?.ssl_enabled || !props.site?.ssl_cert_path) return
+  if (!props.site?.ssl_enabled) return
   try {
     const res = await request.get('/site/ssl/cert/download', { params: { site_id: props.site.id } })
     customForm.value.cert = res.data?.cert || ''
     customForm.value.key = res.data?.key || ''
   } catch (e) {
-    // 静默失败，保持空值让用户手动填写
+    // 证书文件不存在/未部署时保持空值，让用户手动填写
   }
 }
 
@@ -473,6 +483,13 @@ function copyText(text) {
 </script>
 
 <style scoped>
+.cert-field {
+  width: 100%;
+}
+.cert-copy {
+  text-align: right;
+  margin-top: 4px;
+}
 .ssl-tip {
   color: #606266;
   font-size: 13px;

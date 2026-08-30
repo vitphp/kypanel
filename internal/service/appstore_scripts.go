@@ -37,32 +37,40 @@ var nodeVersions = []struct {
 	{Key: "node14", Ver: "14"},
 }
 
-// pythonVersions 可安装的 Python 多版本（通过 pyenv + 清华源编译）
+// pythonVersions 可安装的 Python 多版本（通过 pyenv + 预下载源码编译）
+// Full 为完整补丁版本号（镜像文件名必须带补丁号，如 Python-3.13.15.tgz），
+// 阿里云 python-release 为扁平结构（source/Python-X.Y.Z.tgz），
+// 清华/官方为带版本子目录结构（X.Y.Z/Python-X.Y.Z.tgz）。
 var pythonVersions = []struct {
 	Key   string
 	Ver   string
+	Full  string // 完整补丁版本号，用于镜像文件名与 pyenv install
 	Major string // 主版本号，用于二进制名（如 python3.12）
 }{
-	{Key: "python313", Ver: "3.13", Major: "3.13"},
-	{Key: "python312", Ver: "3.12", Major: "3.12"},
-	{Key: "python311", Ver: "3.11", Major: "3.11"},
-	{Key: "python310", Ver: "3.10", Major: "3.10"},
-	{Key: "python39", Ver: "3.9", Major: "3.9"},
-	{Key: "python38", Ver: "3.8", Major: "3.8"},
+	{Key: "python313", Ver: "3.13", Full: "3.13.15", Major: "3.13"},
+	{Key: "python312", Ver: "3.12", Full: "3.12.14", Major: "3.12"},
+	{Key: "python311", Ver: "3.11", Full: "3.11.16", Major: "3.11"},
+	{Key: "python310", Ver: "3.10", Full: "3.10.21", Major: "3.10"},
+	{Key: "python39", Ver: "3.9", Full: "3.9.25", Major: "3.9"},
+	{Key: "python38", Ver: "3.8", Full: "3.8.20", Major: "3.8"},
 }
 
 // goVersions 可安装的 Go 多版本（官方 tarball，历史版本均可用）
+// Ver 为主版本号（用于安装目录 /usr/local/go<ver> 与软链 go<verNoDot>），
+// Full 为官方 tarball 的完整补丁版本号——go.dev/dl 的文件名必须带补丁号，
+// 如 go1.25.14.linux-amd64.tar.gz；不带补丁号的 go1.25.linux-amd64.tar.gz 会 404。
 var goVersions = []struct {
-	Key string
-	Ver string
+	Key  string
+	Ver  string
+	Full string
 }{
-	{Key: "go125", Ver: "1.25"},
-	{Key: "go124", Ver: "1.24"},
-	{Key: "go123", Ver: "1.23"},
-	{Key: "go122", Ver: "1.22"},
-	{Key: "go121", Ver: "1.21"},
-	{Key: "go120", Ver: "1.20"},
-	{Key: "go119", Ver: "1.19"},
+	{Key: "go125", Ver: "1.25", Full: "1.25.14"},
+	{Key: "go124", Ver: "1.24", Full: "1.24.13"},
+	{Key: "go123", Ver: "1.23", Full: "1.23.12"},
+	{Key: "go122", Ver: "1.22", Full: "1.22.12"},
+	{Key: "go121", Ver: "1.21", Full: "1.21.13"},
+	{Key: "go120", Ver: "1.20", Full: "1.20.14"},
+	{Key: "go119", Ver: "1.19", Full: "1.19.13"},
 }
 
 // 常用 PHP 扩展（apt 包名后缀 / remi 包名后缀）
@@ -109,9 +117,9 @@ func init() {
 			Key: pv.Key, Name: "Python " + v, Category: CatRuntime, SubCategory: SubLangPython, Icon: "TrendCharts",
 			Description:     "Python " + v + " 运行时（含 pip），通过 pyenv 安装，可与其他 Python 版本共存",
 			Service:         "",
-			VersionCmd:      `[ -s "$HOME/.pyenv/bin/pyenv" ] && export PATH="$HOME/.pyenv/bin:$PATH" && eval "$(pyenv init -)" && pyenv versions --bare 2>/dev/null | grep -w "` + v + `" || /usr/local/python` + v + `/bin/python` + pv.Major + ` -V 2>/dev/null || true`,
-			InstallScript:   pythonInstallScript(v, pv.Major),
-			UninstallScript: pythonUninstallScript(v, pv.Major),
+			VersionCmd:      `[ -s "$HOME/.pyenv/bin/pyenv" ] && export PATH="$HOME/.pyenv/bin:$PATH" && eval "$(pyenv init -)" && pyenv versions --bare 2>/dev/null | grep -w "` + pv.Full + `" || /usr/local/python` + v + `/bin/python` + pv.Major + ` -V 2>/dev/null || true`,
+			InstallScript:   pythonInstallScript(v, pv.Full),
+			UninstallScript: pythonUninstallScript(pv.Full),
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Python 版本共存",
 		})
 	}
@@ -123,7 +131,7 @@ func init() {
 			Description:     "Go " + v + " 语言工具链（go + gofmt），通过官方包安装，可与其他 Go 版本共存",
 			Service:         "",
 			VersionCmd:      `/usr/local/go` + v + `/bin/go version 2>/dev/null || true`,
-			InstallScript:   goInstallScript(v),
+			InstallScript:   goInstallScript(v, gv.Full),
 			UninstallScript: goUninstallScript(v),
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Go 版本共存",
 		})
@@ -292,7 +300,11 @@ if [ ! -s "$NVM_DIR/nvm.sh" ]; then
         || curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.0/install.sh | bash
 fi
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# 优先阿里云镜像下载 Node 二进制，失败回退官方源，再切 npmmirror。
+# nvm 通过 NVM_NODEJS_ORG_MIRROR 决定下载源，目录结构与官方一致可直接使用。
+export NVM_NODEJS_ORG_MIRROR=https://mirrors.aliyun.com/nodejs-release
 nvm install ` + ver + ` \
+    || { echo "阿里云镜像下载失败，回退官方源 nodejs.org"; unset NVM_NODEJS_ORG_MIRROR; nvm install ` + ver + `; } \
     || { echo "官方源下载失败，切换 npmmirror 镜像重试"; export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node; nvm install ` + ver + `; }
 nvm alias default ` + ver + `
 echo "Node ` + ver + ` 安装完成"
@@ -310,8 +322,11 @@ echo "Node ` + ver + ` 已卸载"
 `
 }
 
-// pythonInstallScript 生成指定 Python 版本的一键安装脚本（通过 pyenv + 清华源）
-func pythonInstallScript(ver, major string) string {
+// pythonInstallScript 生成指定 Python 版本的一键安装脚本（通过 pyenv + 预下载源码编译）
+// ver 为主版本号（如 3.13），full 为完整补丁版本号（如 3.13.15）。
+// 源码预下载到 pyenv 缓存目录（$PYENV_ROOT/cache），pyenv 会优先复用缓存，
+// 从而避开 PYTHON_BUILD_MIRROR_URL 只支持"带版本子目录"结构、无法用阿里云扁平结构的问题。
+func pythonInstallScript(ver, full string) string {
 	return `#!/bin/bash
 set -e
 export PYENV_ROOT="$HOME/.pyenv"
@@ -339,32 +354,44 @@ if [ ! -d "$PYENV_ROOT" ]; then
     git -C "$PYENV_ROOT" submodule update --init --depth=1 || true
 fi
 
-# 3. 设置 Python 源码下载镜像（清华）
-export PYTHON_BUILD_MIRROR_URL="https://mirrors.tuna.tsinghua.edu.cn/python"
+# 3. 预下载 Python 源码到 pyenv 缓存（优先阿里云扁平结构，回退清华/官方带版本子目录）
+CACHE="$PYENV_ROOT/cache/Python-` + full + `.tgz"
+mkdir -p "$PYENV_ROOT/cache"
+if [ ! -f "$CACHE" ]; then
+    curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
+        "https://mirrors.aliyun.com/python-release/source/Python-` + full + `.tgz" \
+        || { echo "阿里云镜像下载失败，切换清华源"; curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
+            "https://mirrors.tuna.tsinghua.edu.cn/python/` + full + `/Python-` + full + `.tgz"; } \
+        || { echo "清华源下载失败，切换官方 python.org"; curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
+            "https://www.python.org/ftp/python/` + full + `/Python-` + full + `.tgz"; }
+    [ -s "$CACHE" ] || { echo "所有镜像下载失败，请检查网络"; exit 1; }
+fi
 export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 
 # 4. 安装并切换默认版本
-pyenv install -v ` + ver + `
-pyenv global ` + ver + `
-echo "Python ` + ver + ` 安装完成"
+pyenv install -v ` + full + `
+pyenv global ` + full + `
+echo "Python ` + full + ` 安装完成"
 `
 }
 
-// pythonUninstallScript 生成指定 Python 版本的卸载脚本
-func pythonUninstallScript(ver, major string) string {
+// pythonUninstallScript 生成指定 Python 版本的卸载脚本（full 为完整补丁版本号）
+func pythonUninstallScript(full string) string {
 	return `#!/bin/bash
 set -e
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)" 2>/dev/null || true
-pyenv uninstall -f ` + ver + ` 2>/dev/null || true
-echo "Python ` + ver + ` 已卸载"
+pyenv uninstall -f ` + full + ` 2>/dev/null || true
+echo "Python ` + full + ` 已卸载"
 `
 }
 
-// goInstallScript 生成指定 Go 版本的一键安装脚本（通过官方 tarball）
-func goInstallScript(ver string) string {
+// goInstallScript 生成指定 Go 版本的一键安装脚本（通过官方 tarball）。
+// ver 为主版本号（如 1.25，用于安装目录 /usr/local/go1.25 与软链 go125），
+// full 为官方 tarball 完整补丁版本号（如 1.25.14，go.dev/dl 文件名必须带补丁号否则 404）。
+func goInstallScript(ver, full string) string {
 	return `#!/bin/bash
 set -e
 ARCH=$(uname -m)
@@ -375,14 +402,24 @@ fi
 INSTALL_DIR="/usr/local/go` + ver + `"
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-# 优先官方源，失败回退国内镜像（golang.google.cn）
-URL="https://go.dev/dl/go` + ver + `.linux-${GOARCH}.tar.gz"
-curl -fsSL --retry 3 --connect-timeout 20 "$URL" | tar -C "$(dirname "$INSTALL_DIR")" -xzf - \
-    || { echo "官方源下载失败，切换 golang.google.cn 镜像"; URL="https://golang.google.cn/dl/go` + ver + `.linux-${GOARCH}.tar.gz"; curl -fsSL "$URL" | tar -C "$(dirname "$INSTALL_DIR")" -xzf -; }
-mv "$(dirname "$INSTALL_DIR")/go" "$INSTALL_DIR"
+# 国内服务器优先走阿里云镜像，失败回退 golang.google.cn，最后官方源 go.dev。
+# --strip-components=1 去掉 tarball 顶层 go/ 目录直接解压到 INSTALL_DIR，
+# 避免 mkdir 后 mv /usr/local/go 被嵌套成 /usr/local/go<ver>/go 导致探测不到。
+DL_OK=0
+for u in \
+    "https://mirrors.aliyun.com/golang/go` + full + `.linux-${GOARCH}.tar.gz" \
+    "https://golang.google.cn/dl/go` + full + `.linux-${GOARCH}.tar.gz" \
+    "https://go.dev/dl/go` + full + `.linux-${GOARCH}.tar.gz"; do
+    if curl -fsSL --retry 3 --connect-timeout 20 "$u" | tar -C "$INSTALL_DIR" --strip-components=1 -xzf -; then
+        DL_OK=1
+        break
+    fi
+    echo "源下载失败，切换下一镜像: $u"
+done
+[ "$DL_OK" = "1" ] || { echo "所有镜像下载失败，请检查网络"; exit 1; }
 ln -sf "$INSTALL_DIR/bin/go" /usr/local/bin/go` + strings.ReplaceAll(ver, ".", "") + `
 ln -sf "$INSTALL_DIR/bin/gofmt" /usr/local/bin/gofmt` + strings.ReplaceAll(ver, ".", "") + `
-echo "Go ` + ver + ` 安装完成"
+echo "Go ` + full + ` 安装完成"
 `
 }
 

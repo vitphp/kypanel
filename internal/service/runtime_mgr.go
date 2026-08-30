@@ -1004,7 +1004,8 @@ func RuntimeGlobalConfig(name string) (map[string]interface{}, error) {
 	cfg := map[string]string{}
 	switch lang {
 	case "python":
-		cfg["pip_index_url"] = "https://pypi.org/simple"
+		// 默认展示阿里云 pypi 镜像（国内速度快）；若服务器已配置 pip.conf 则以其实际值为准
+		cfg["pip_index_url"] = "https://mirrors.aliyun.com/pypi/simple"
 		for _, conf := range []string{
 			filepath.Join(homeDir(), ".pip/pip.conf"),
 			filepath.Join(homeDir(), ".config/pip/pip.conf"),
@@ -1022,7 +1023,8 @@ func RuntimeGlobalConfig(name string) (map[string]interface{}, error) {
 	case "node":
 		cfg["npm_registry"] = strings.TrimSpace(execOut("npm config get registry 2>/dev/null"))
 		if cfg["npm_registry"] == "" {
-			cfg["npm_registry"] = "https://registry.npmjs.org"
+			// 默认展示阿里云 npmmirror（npmmirror.com 为阿里巴巴出品的 npm 镜像）；若服务器已配置 .npmrc 则以其实际值为准
+			cfg["npm_registry"] = "https://registry.npmmirror.com"
 		}
 		cfg["node_options"] = strings.TrimSpace(execOut("echo $NODE_OPTIONS 2>/dev/null"))
 		return map[string]interface{}{"lang": "node", "config": cfg}, nil

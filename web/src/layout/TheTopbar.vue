@@ -51,7 +51,7 @@
 
       <el-dropdown trigger="click" @command="onCommand">
         <div class="lp-user">
-          <div class="lp-avatar">A</div>
+          <div class="lp-avatar">{{ userText.charAt(0).toUpperCase() }}</div>
           <div class="lp-user-meta">
             <span class="lp-user-name">{{ userText }}</span>
             <span class="lp-user-role">管理员</span>
@@ -98,10 +98,7 @@ function onTerminalClick() {
   floatTerm.toggle()
 }
 
-const userText = computed(() => {
-  const u = auth.user || {}
-  return u.username || 'admin'
-})
+const userText = computed(() => auth.username || 'admin')
 
 function openDocs() {
   window.open('https://panel.apihot.cn', '_blank')

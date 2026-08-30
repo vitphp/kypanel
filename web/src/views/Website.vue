@@ -15,6 +15,9 @@
             <el-button type="primary" :disabled="!nginxInstalled" @click="openCreate">
               <el-icon><Plus /></el-icon>&nbsp;创建网站
             </el-button>
+            <el-button :disabled="!nginxInstalled" @click="openDefaultPages">
+              <el-icon><Files /></el-icon>&nbsp;默认页面
+            </el-button>
           </div>
         </div>
       </template>
@@ -181,7 +184,7 @@
             <el-tag v-else size="small" type="info">未知</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="200" fixed="right">
+        <el-table-column label="操作" min-width="270" fixed="right">
           <template #default="{ row }">
             <div class="ops-cell">
               <el-button size="small" type="primary" link @click="openSettings(row)">设置</el-button>
@@ -203,6 +206,9 @@
       :versions="currentRuntimeVersions"
       @refresh="refreshEnvStatus"
     />
+
+    <!-- 默认页面抽屉（4 个全局默认页 + 默认站点设置） -->
+    <DefaultPagesDrawer ref="defaultPagesRef" @refresh="loadSites" />
 
     <!-- 创建网站对话框（按类型动态填参） -->
     <el-dialog v-model="createVisible" :title="`创建${typeMeta[form.type]?.label || ''}网站`" :width="dialogWidth" :top="isMobile ? '4vh' : '5vh'" class="site-create-dialog">
@@ -471,7 +477,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument } from '@element-plus/icons-vue'
+import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument, Files } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import SiteSettings from './SiteSettings.vue'
 import SiteStatDialog from '../components/SiteStatDialog.vue'
@@ -479,6 +485,7 @@ import SiteSecurityDialog from '../components/SiteSecurityDialog.vue'
 import SiteLogsDialog from '../components/SiteLogsDialog.vue'
 import SiteSSLDialog from '../components/SiteSSLDialog.vue'
 import EnvManagerDialog from '../components/EnvManagerDialog.vue'
+import DefaultPagesDrawer from '../components/DefaultPagesDrawer.vue'
 import DomainQrcode from '../components/DomainQrcode.vue'
 import { useNavStore } from '@/stores/nav'
 import { useInstallTrackerStore } from '../stores/installTracker'
@@ -1377,6 +1384,11 @@ async function openSSL(row) {
   sslVisible.value = true
 }
 
+// 默认页面抽屉
+const defaultPagesRef = ref()
+function openDefaultPages() {
+  defaultPagesRef.value?.open()
+}
 
 async function doStateAction(row, action) {
   try {

@@ -104,10 +104,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 升级自愈：若上次升级后新版本启动失败，先自动恢复旧二进制与数据备份再继续启动。
+	// 必须在数据库初始化之前执行，保证恢复后的旧数据被正确加载。
+	service.AutoRollbackUpgrade()
+
 	// 初始化数据库
 	if err := model.Init(cfg.DB.Path); err != nil {
 		slog.Error("初始化数据库失败", "err", err)
 		os.Exit(1)
+	}
+
+	// 初始化全局默认页面（index/404/停用/不存在页）+ default_server 兜底配置
+	if err := service.InitDefaultPages(); err != nil {
+		slog.Warn("初始化默认页面失败", "err", err)
 	}
 	// CLI 模式：自动续签 HTTPS 证书后退出（计划任务每天调用，防止证书到期网站打不开）
 	if *renewSSL {
@@ -240,6 +249,10 @@ func main() {
 
 	// 初始化 WAF（内置规则、全局配置、CC 防护协程）
 	service.InitWAF()
+
+	// 自愈 Web 服务器：启动时修复无效站点证书（自签兜底），配置通过且 nginx 未运行时自动拉起。
+	// 防止某个站点的坏证书导致 nginx 全局校验失败、所有网站起不来（升级/重启后尤为关键）
+	service.SelfHealWebServerOnBoot()
 
 	// 初始化单站安全后台协程（CC 自动封禁、攻击日志采集、geo 封禁）
 	service.InitSiteSecurity()

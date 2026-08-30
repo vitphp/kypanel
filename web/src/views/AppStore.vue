@@ -688,6 +688,9 @@ function onVisibilityChange() {
 }
 
 onMounted(async () => {
+  // 进入/刷新应用商店页：强制刷新一次官网远程列表缓存（官网后台变更后立即生效）。
+  // 刷新失败不阻塞页面加载，沿用上次已缓存的数据。
+  try { await request.post('/apps/refresh') } catch (e) { /* ignore */ }
   loadCategories()
   await loadApps()
   // 任务驱动：页面加载时已有安装/卸载在进行，或全局队列有活跃任务 → 开始轮询；否则不轮询

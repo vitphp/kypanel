@@ -1,5 +1,12 @@
+# 用法: .\scripts\cross-build.ps1 [-Version 0.31]  或  $env:VERSION='0.31'; .\scripts\cross-build.ps1
+param(
+  [string]$Version = $env:VERSION
+)
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
+
+if (-not $Version) { $Version = '0.30' }
+Write-Output ">> 构建版本 $Version"
 
 # 1) 同步 i.sh
 Copy-Item -Force scripts/install.sh bin/i.sh
@@ -8,7 +15,7 @@ Copy-Item -Force scripts/install.sh bin/i.sh
 $env:GOOS = 'linux'
 $env:GOARCH = 'amd64'
 $env:CGO_ENABLED = '0'
-$ldflags = "-s -w -X kypanel/internal/version.Version=0.30 -X kypanel/internal/version.Commit=dev -X kypanel/internal/version.Date=2026-08-27T16:30:00"
+$ldflags = "-s -w -X kypanel/internal/version.Version=$Version -X kypanel/internal/version.Commit=dev -X kypanel/internal/version.Date=2026-08-27T16:30:00"
 & go build -ldflags $ldflags -o bin/kypanel_amd64 ./cmd/panel
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

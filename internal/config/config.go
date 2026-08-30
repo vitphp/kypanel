@@ -96,7 +96,7 @@ func Default() *Config {
 	c.Log.Level = "info"
 	c.Log.File = filepath.Join(defaultDataDir, "logs", "panel.log")
 	c.Log.MaxDay = 30
-	c.Store.BaseURL = "http://panel.apihot.cn"
+	c.Store.BaseURL = "https://panel.apihot.cn"
 	return c
 }
 

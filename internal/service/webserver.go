@@ -70,10 +70,20 @@ func webServerAvailable() error {
 }
 
 // webConfigTest 校验 Web 服务器配置（nginx -t / apachectl configtest）
+// 校验失败时先自愈（修复无效站点证书），再重试一次，避免单个站点的坏证书
+// 导致 nginx 全局配置校验失败、拖垮所有网站。
 func webConfigTest() error {
 	if WebServerType() == webApache {
+		if err := apacheConfigTest(); err == nil {
+			return nil
+		}
+		_ = selfHealAllSiteCerts()
 		return apacheConfigTest()
 	}
+	if err := nginxTest(); err == nil {
+		return nil
+	}
+	_ = selfHealAllSiteCerts()
 	return nginxTest()
 }
 

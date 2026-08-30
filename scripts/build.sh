@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # 构建 kypanel：先构建前端（vite build -> webui/dist），再交叉编译后端并内嵌前端
-# 用法: ./scripts/build.sh [amd64|arm64]   (默认 amd64)
+# 用法: ./scripts/build.sh [amd64|arm64] [版本号]   (默认架构 amd64，默认版本 0.30)
+#       也可用环境变量 ARCH / VERSION 覆盖，例如: VERSION=0.31 ./scripts/build.sh arm64
 set -e
 
 cd "$(dirname "$0")/.."
 
-ARCH="${1:-amd64}"
-VERSION="0.30"
+ARCH="${1:-${ARCH:-amd64}}"
+VERSION="${2:-${VERSION:-0.30}}"
+echo ">> 构建架构 ${ARCH}，版本 ${VERSION}"
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
 DATE=$(date '+%Y-%m-%d %H:%M:%S')
 OUT="bin/kypanel-linux-${ARCH}"

@@ -1,10 +1,16 @@
 package service
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,6 +129,7 @@ type SiteItem struct {
 	Active    string `json:"active"`     // 服务运行状态
 	SSLStatus string `json:"ssl_status"` // SSL 状态描述
 	SSLDays   int    `json:"ssl_days"`   // 剩余天数，-1 表示未部署
+	IsDefault bool   `json:"is_default"` // 是否为默认站点（未绑定域名访问该站点）
 }
 
 // 站点名称允许字母、数字、点（域名）、下划线、中划线
@@ -158,6 +165,166 @@ func nginxReload() error {
 		return fmt.Errorf("nginx reload 失败: %s", strings.TrimSpace(res.Stderr+res.Stdout))
 	}
 	return nil
+}
+
+// ============================ 站点证书自愈 ============================
+//
+// 历史故障：某个站点的证书文件若缺失/损坏/被写成占位符（如 1 字节内容），
+// nginx -t 会全局失败，导致 nginx 起不来、所有网站一起挂掉，面板升级/重启后也起不来。
+// 自愈策略：任何配置校验前自动检测并修复无效证书（生成自签证书兜底），
+// 确保单个站点的坏证书不再拖垮整个 Web 服务器。
+
+// validCertKeyPair 校验证书与私钥文件是否构成有效的 PEM 证书对
+func validCertKeyPair(certPath, keyPath string) bool {
+	if certPath == "" || keyPath == "" {
+		return false
+	}
+	certData, err := os.ReadFile(certPath)
+	if err != nil || len(bytes.TrimSpace(certData)) == 0 {
+		return false
+	}
+	certBlock, _ := pem.Decode(certData)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return false
+	}
+	if _, err := x509.ParseCertificate(certBlock.Bytes); err != nil {
+		return false
+	}
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil || len(bytes.TrimSpace(keyData)) == 0 {
+		return false
+	}
+	keyBlock, _ := pem.Decode(keyData)
+	if keyBlock == nil {
+		return false
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
+		return true
+	}
+	if _, err := x509.ParseECPrivateKey(keyBlock.Bytes); err == nil {
+		return true
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
+		return true
+	}
+	return false
+}
+
+// writeSelfSignedCert 为站点生成自签证书（ECDSA P-256），覆盖写入证书与私钥文件
+func writeSelfSignedCert(certPath, keyPath string, names []string) error {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return errors.New("生成自签密钥失败: " + err.Error())
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+		return err
+	}
+	cn := "kypanel"
+	if len(names) > 0 {
+		cn = names[0]
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              names,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return errors.New("生成自签证书失败: " + err.Error())
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureSiteSSLCert 保证启用 HTTPS 的站点证书文件有效；无效时自动生成自签证书并落库路径。
+// 调用方持有 s 的内存指针，路径修复同样写回 s，保证后续生成配置时引用到有效路径。
+func ensureSiteSSLCert(s *model.Site) error {
+	if s == nil || !s.SslEnabled {
+		return nil
+	}
+	certPath, keyPath := s.SslCertPath, s.SslKeyPath
+	if certPath == "" || keyPath == "" {
+		cp, kp := siteSSLPath(s.Name)
+		if certPath == "" {
+			certPath = cp
+		}
+		if keyPath == "" {
+			keyPath = kp
+		}
+	}
+	if validCertKeyPair(certPath, keyPath) {
+		if s.SslCertPath != certPath || s.SslKeyPath != keyPath {
+			s.SslCertPath, s.SslKeyPath = certPath, keyPath
+			_ = model.DB.Model(s).Updates(map[string]any{"ssl_cert_path": certPath, "ssl_key_path": keyPath}).Error
+		}
+		return nil
+	}
+	if err := writeSelfSignedCert(certPath, keyPath, siteServerNames(s)); err != nil {
+		return err
+	}
+	s.SslCertPath, s.SslKeyPath = certPath, keyPath
+	return model.DB.Model(s).Updates(map[string]any{"ssl_cert_path": certPath, "ssl_key_path": keyPath}).Error
+}
+
+// selfHealAllSiteCerts 遍历所有启用 HTTPS 的站点，修复无效证书（自签兜底）
+func selfHealAllSiteCerts() error {
+	sites, err := model.ListSites()
+	if err != nil {
+		return err
+	}
+	for i := range sites {
+		if err := ensureSiteSSLCert(&sites[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureNginxRunning 若 nginx 未运行则尝试拉起（systemd 优先，无 systemd 时直接启动）
+func ensureNginxRunning() error {
+	res, err := ExecCommand("pgrep -x nginx >/dev/null 2>&1 && echo 1 || echo 0", 10*time.Second)
+	if err == nil && strings.Contains(res.Stdout, "1") {
+		return nil
+	}
+	cmd := "systemctl start nginx"
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		cmd = "nginx"
+	}
+	_, err = ExecCommand(cmd, 30*time.Second)
+	return err
+}
+
+// SelfHealWebServerOnBoot 面板启动时自愈 Web 服务器：
+//  1. 修复所有启用 HTTPS 站点的无效证书（防止坏证书导致 nginx 全局校验失败、网站全挂）
+//  2. 配置校验通过且 nginx 未运行时自动拉起，确保面板升级/重启后网站自动恢复
+func SelfHealWebServerOnBoot() {
+	if WebServerType() != webNginx && WebServerType() != webApache {
+		return
+	}
+	if err := selfHealAllSiteCerts(); err != nil {
+		return
+	}
+	if WebServerType() == webNginx {
+		if err := webConfigTest(); err == nil {
+			_ = ensureNginxRunning()
+		}
+	}
 }
 
 // siteConfPath 返回站点配置文件路径
@@ -231,17 +398,21 @@ func genSiteConf(s *model.Site) string {
 		sb.WriteString("# kypanel site: " + s.Name + " (HTTP)\n")
 		if s.SslForce {
 			sb.WriteString("server {\n")
-			fmt.Fprintf(&sb, "    listen %d;\n", 80)
+			fmt.Fprintf(&sb, "    listen %d", 80)
+			if isDefaultSite(s) {
+				sb.WriteString(" default_server")
+			}
+			sb.WriteString(";\n")
 			fmt.Fprintf(&sb, "    server_name %s;\n", strings.Join(siteServerNames(s), " "))
 			sb.WriteString("    return 301 https://$host$request_uri;\n")
 			sb.WriteString("}\n\n")
 		} else {
-			sb.WriteString(genSiteServerBlock(s, 80, false))
+			sb.WriteString(genSiteServerBlock(s, 80, false, isDefaultSite(s)))
 		}
 		sb.WriteString("# kypanel site: " + s.Name + " (HTTPS)\n")
-		sb.WriteString(genSiteServerBlock(s, 443, true))
+		sb.WriteString(genSiteServerBlock(s, 443, true, isDefaultSite(s)))
 	} else {
-		sb.WriteString(genSiteServerBlock(s, s.Port, false))
+		sb.WriteString(genSiteServerBlock(s, s.Port, false, isDefaultSite(s)))
 	}
 
 	// 带端口的绑定（IP:端口 / 域名:端口）生成独立 server 块，仅监听该端口
@@ -260,15 +431,25 @@ func genPortServerBlock(s *model.Site, host, port string) string {
 	cp := *s
 	cp.Domain = host
 	cp.Domains = ""
-	return genSiteServerBlock(&cp, p, false)
+	return genSiteServerBlock(&cp, p, false, false)
 }
 
-// genSiteServerBlock 生成单个 server 块
-func genSiteServerBlock(s *model.Site, port int, ssl bool) string {
+// isDefaultSite 站点是否为默认站点（未绑定域名请求落到该站点）
+func isDefaultSite(s *model.Site) bool {
+	return s.ID != 0 && DefaultSiteID() == s.ID
+}
+
+// genSiteServerBlock 生成单个 server 块；defaultSrv 为 true 时在 listen 加 default_server
+// （默认站点：未绑定域名请求落到该站点）
+func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) string {
 	var sb strings.Builder
 	sb.WriteString("server {\n")
 	if ssl {
-		sb.WriteString("    listen 443 ssl http2;\n")
+		line := "    listen 443 ssl http2"
+		if defaultSrv {
+			line += " default_server"
+		}
+		sb.WriteString(line + ";\n")
 		if s.SslCertPath != "" {
 			fmt.Fprintf(&sb, "    ssl_certificate %s;\n", s.SslCertPath)
 		}
@@ -280,7 +461,11 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool) string {
 		sb.WriteString("    ssl_session_cache shared:SSL:10m;\n")
 		sb.WriteString("    ssl_session_timeout 10m;\n\n")
 	} else {
-		fmt.Fprintf(&sb, "    listen %d;\n", port)
+		line := fmt.Sprintf("    listen %d", port)
+		if defaultSrv {
+			line += " default_server"
+		}
+		sb.WriteString(line + ";\n")
 	}
 	fmt.Fprintf(&sb, "    server_name %s;\n\n", strings.Join(siteServerNames(s), " "))
 
@@ -528,16 +713,28 @@ p{opacity:.85;font-size:16px}
 </html>
 `
 
-// writeDefaultPages 生成默认首页与 404 页面（目标文件已存在时不覆盖）
+// writeDefaultPages 生成默认首页与 404 页面（目标文件已存在时不覆盖）。
+// 优先复制全局默认页面模板（default_pages，仅影响新建站点），读取失败时回退内置模板。
 func writeDefaultPages(root, name string) {
-	indexFile := filepath.Join(root, "index.html")
-	if _, err := os.Stat(indexFile); os.IsNotExist(err) {
-		_ = os.WriteFile(indexFile, []byte(fmt.Sprintf(defaultSiteIndex, name, name)), 0o755)
+	writeDefaultPageIfMissing(root, "index.html", DefaultPageIndex, func() string {
+		return fmt.Sprintf(defaultSiteIndex, name, name)
+	})
+	writeDefaultPageIfMissing(root, "404.html", DefaultPage404, func() string {
+		return fmt.Sprintf(default404Page, name)
+	})
+}
+
+// writeDefaultPageIfMissing 目标文件不存在时写入：优先全局默认页面内容，其次内置模板
+func writeDefaultPageIfMissing(root, fileName, kind string, fallback func() string) {
+	dst := filepath.Join(root, fileName)
+	if _, err := os.Stat(dst); err == nil {
+		return
 	}
-	notFoundFile := filepath.Join(root, "404.html")
-	if _, err := os.Stat(notFoundFile); os.IsNotExist(err) {
-		_ = os.WriteFile(notFoundFile, []byte(fmt.Sprintf(default404Page, name)), 0o755)
+	content := fallback()
+	if b, err := os.ReadFile(defaultPagePath(kind)); err == nil && len(b) > 0 {
+		content = string(b)
 	}
+	_ = os.WriteFile(dst, []byte(content), 0o755)
 }
 
 // isRuntimeSite 是否为进程型站点（python/node/go，由 systemd 守护）
@@ -753,7 +950,81 @@ func siteServiceActive(name string) bool {
 }
 
 // writeSiteConf 写入站点配置并校验 Web 服务器，成功返回 nil
+// genStoppedSiteConf 生成站点「停止」后的占位配置（nginx）：
+// 保留 server_name 接管该域名请求，统一返回 503 并显示全局停用页 stop.html，
+// 让访问者明确知道「网站已停止」而非「网站不存在」。停止只是逻辑停用，
+// server 块仍占用域名，避免域名掉到 default_server 显示无关内容。
+func genStoppedSiteConf(s *model.Site) string {
+	names := strings.Join(siteServerNames(s), " ")
+	dir := DefaultPagesDir()
+	var sb strings.Builder
+	sb.WriteString("# kypanel site: " + s.Name + " (STOPPED)\n")
+	// HTTP 停用块
+	sb.WriteString("server {\n")
+	fmt.Fprintf(&sb, "    listen %d;\n", s.Port)
+	fmt.Fprintf(&sb, "    server_name %s;\n", names)
+	fmt.Fprintf(&sb, "    root %s;\n", dir)
+	// stop.html 精确匹配 + internal：error_page 内部跳转专用，防止与 location /
+	// 的 return 503 形成无限重定向循环（否则浏览器拿到的是 nginx 默认错误页而非 stop.html）
+	sb.WriteString("    location = /stop.html { internal; }\n")
+	sb.WriteString("    location / {\n")
+	sb.WriteString("        return 503;\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("    error_page 503 /stop.html;\n")
+	sb.WriteString("}\n")
+	// HTTPS 停用块（站点已部署证书时保留 443 接管，避免 https 请求落到其他站点）
+	if s.SslEnabled {
+		sb.WriteString("server {\n")
+		sb.WriteString("    listen 443 ssl;\n")
+		fmt.Fprintf(&sb, "    server_name %s;\n", names)
+		if s.SslCertPath != "" {
+			fmt.Fprintf(&sb, "    ssl_certificate %s;\n", s.SslCertPath)
+		}
+		if s.SslKeyPath != "" {
+			fmt.Fprintf(&sb, "    ssl_certificate_key %s;\n", s.SslKeyPath)
+		}
+		fmt.Fprintf(&sb, "    root %s;\n", dir)
+		sb.WriteString("    location = /stop.html { internal; }\n")
+		sb.WriteString("    location / {\n")
+		sb.WriteString("        return 503;\n")
+		sb.WriteString("    }\n")
+		sb.WriteString("    error_page 503 /stop.html;\n")
+		sb.WriteString("}\n")
+	}
+	return sb.String()
+}
+
+// writeStoppedSiteConf 写入站点停用配置（nginx），配置校验失败自动回滚
+func writeStoppedSiteConf(s *model.Site) error {
+	conf := genStoppedSiteConf(s)
+	path := siteConfPath(s.Name)
+	if err := os.MkdirAll(nginxConfDir, 0o755); err != nil {
+		return err
+	}
+	var backup []byte
+	if old, err := os.ReadFile(path); err == nil {
+		backup = old
+	}
+	if err := os.WriteFile(path, []byte(conf), 0o644); err != nil {
+		return err
+	}
+	if err := webConfigTest(); err != nil {
+		if backup != nil {
+			_ = os.WriteFile(path, backup, 0o644)
+		} else {
+			_ = os.Remove(path)
+		}
+		return err
+	}
+	return nil
+}
+
 func writeSiteConf(s *model.Site) error {
+	// 自愈：启用 HTTPS 的站点若证书文件缺失/无效（如被误写成占位符），
+	// 自动生成自签证书兜底，避免 nginx 全局配置校验失败拖垮所有网站
+	if s.SslEnabled {
+		_ = ensureSiteSSLCert(s)
+	}
 	conf := genSiteConf(s)
 	ws := WebServerType()
 
@@ -1004,6 +1275,8 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 	if err := writeSiteConfAndReload(s); err != nil {
 		return nil, err
 	}
+	// 更新 default_server 兜底（无默认站点时写入不存在页兜底块）
+	_ = applyDefaultServerConf()
 
 	// 进程型站点：启动 systemd 守护
 	if isRuntimeSite(s.Type) {
@@ -1028,7 +1301,7 @@ func ListSites() []SiteItem {
 	items := make([]SiteItem, 0, len(sites))
 	for _, s := range sites {
 		s.Remark = fixRemarkMojibake(s.Remark)
-		item := SiteItem{Site: s, Active: "unknown", SSLStatus: "未部署", SSLDays: -1}
+		item := SiteItem{Site: s, Active: "unknown", SSLStatus: "未部署", SSLDays: -1, IsDefault: DefaultSiteID() == s.ID}
 		if s.SslEnabled {
 			certPath := s.SslCertPath
 			if certPath == "" {
@@ -1139,10 +1412,22 @@ func SiteAction(req SiteActionReq) error {
 				return errors.New("停止进程服务失败: " + strings.TrimSpace(res.Stderr))
 			}
 		}
-		if err := removeSiteConfFile(s.Name); err != nil {
-			return err
+		if WebServerType() == webApache {
+			// Apache：删除站点配置（不适用停用页机制）
+			if err := removeSiteConfFile(s.Name); err != nil {
+				return err
+			}
+		} else {
+			// Nginx：写停用占位配置，访问域名显示「网站已停止」页面
+			if err := writeStoppedSiteConf(s); err != nil {
+				return err
+			}
+			// 默认站点被停止时自动取消默认标记（未绑定域名恢复走不存在页兜底）
+			if DefaultSiteID() == s.ID {
+				_ = model.SetSetting(settingDefaultSite, "")
+			}
 		}
-		if err := webReload(); err != nil {
+		if err := applyDefaultServerConf(); err != nil {
 			return err
 		}
 		s.Status = model.SiteStopped
@@ -1162,6 +1447,34 @@ type DeleteSiteReq struct {
 // DeleteSiteResult 删除网站结果（附加项删除失败不阻断主流程，仅在 warnings 中提示）
 type DeleteSiteResult struct {
 	Warnings []string `json:"warnings"`
+}
+
+// cleanupSiteFiles 删除站点关联文件（日志、SSL 证书、WAF/单站安全片段等）。
+// 日志文件按站点名命名（如 <name>.access.log），删除站点时必须清理，
+// 否则重建同名站点时 nginx 会继续追加写入旧日志。
+func cleanupSiteFiles(name string) {
+	// 1) 日志：nginx / apache 目录均清理（访问、错误、进程服务、WAF 日志及旋转备份）
+	for _, dir := range []string{"/var/log/nginx", "/var/log/apache2"} {
+		prefix := filepath.Join(dir, name)
+		for _, suffix := range []string{".access.log", ".error.log", ".service.log", ".waf.log"} {
+			_ = os.Remove(prefix + suffix)
+		}
+		if matches, err := filepath.Glob(prefix + ".*.log*"); err == nil {
+			for _, m := range matches {
+				_ = os.Remove(m)
+			}
+		}
+	}
+	// 2) SSL 证书（按当前 Web 服务器类型自动定位目录）
+	if cert, key := siteSSLPath(name); cert != "" {
+		_ = os.Remove(cert)
+		_ = os.Remove(key)
+	}
+	// 3) WAF 站点片段（nginx / apache）
+	_ = os.Remove(filepath.Join(wafSiteConfDir, "lp_"+name+".conf"))
+	_ = os.Remove(filepath.Join(apacheWafSiteConfDir, "lp_"+name+".conf"))
+	// 4) 单站安全片段
+	_ = os.Remove(siteSecSnippetPath(name))
 }
 
 // DeleteSite 删除网站
@@ -1208,6 +1521,23 @@ func DeleteSite(req DeleteSiteReq) (DeleteSiteResult, error) {
 	// 停止该站点 importer，并清理历史访问数据
 	StopSiteStatImport(s.ID)
 	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteStatVisit{}).Error
+
+	// 清理站点关联文件（日志、SSL 证书、WAF/单站安全片段等）。
+	// 日志按站点名命名，不清理的话重建同名站点会继续追加旧日志。
+	cleanupSiteFiles(s.Name)
+	// 清理站点关联数据（重定向 / 单站安全规则 / 站点级 IP 黑名单）
+	_ = model.DeleteSiteRedirects(s.ID)
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteSecurityConfig{}).Error
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteSecIpRule{}).Error
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteSecUaRule{}).Error
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteSecRefererRule{}).Error
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteSecCustomRule{}).Error
+	_ = model.DB.Where("site_id = ?", s.ID).Delete(&model.SiteBlockIP{}).Error
+	// 删除的是默认站点时清除默认标记，并刷新 default_server 兜底
+	if DefaultSiteID() == s.ID {
+		_ = model.SetSetting(settingDefaultSite, "")
+	}
+	_ = applyDefaultServerConf()
 	return result, model.DeleteSite(s)
 }
 

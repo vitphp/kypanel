@@ -15,3 +15,10 @@ export function upgradePanel(data) {
     data
   })
 }
+
+export function getUpgradeProgress() {
+  return request({
+    url: '/update/progress',
+    method: 'get'
+  })
+}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -244,7 +245,12 @@ if command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 if ! command -v docker >/dev/null 2>&1; then
-  echo "下载并执行 Docker 官方安装脚本 ..."
+  echo "下载并执行 Docker 官方安装脚本（阿里云镜像） ..."
+  # get.docker.com 支持 --mirror Aliyun，从 mirrors.aliyun.com/docker-ce 拉取，国内速度快
+  curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 20 https://get.docker.com | sh -s -- --mirror Aliyun || true
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker 官方脚本（阿里云镜像）安装失败，回退官方源重试"
   curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 20 https://get.docker.com | sh || true
 fi
 if ! command -v docker >/dev/null 2>&1; then
@@ -399,14 +405,27 @@ func splitAppCSV(s string) []string {
 
 var (
 	remoteAppsMu    sync.Mutex
-	remoteAppsCache []AppMeta // 最近一次成功拉取的结果（仅作网络抖动时的兜底，不做 TTL 缓存）
+	remoteAppsCache []AppMeta // 官网应用列表主缓存：成功拉取一次后永久缓存，不再请求官网
 )
 
-// fetchRemoteApps 从官网拉取应用列表并转成 AppMeta。
-// 每次调用都实时请求官网（面板侧不缓存，缓存统一由官网侧负责）。
-// 返回 (metas, ok)：ok=false 表示拉取失败（网络错/超时/接口异常/未配置 base_url），
-// 此时调用方应回退到本地内置应用兜底，不影响面板主流程。
+// fetchRemoteApps 返回官网应用列表。
+// 面板缓存策略：成功拉取一次后永久缓存（进程内存），后续请求直接返回缓存、不请求官网；
+// 需要刷新时由前端进入应用商店页调用 RefreshRemoteStore 强制重新拉取。
+// 返回 (metas, ok)：ok=false 表示无可用远程列表（从未拉取成功且本次拉取失败），
+// 此时调用方回退到本地内置应用兜底，不影响面板主流程。
 func fetchRemoteApps() ([]AppMeta, bool) {
+	remoteAppsMu.Lock()
+	if remoteAppsCache != nil {
+		cache := remoteAppsCache
+		remoteAppsMu.Unlock()
+		return cache, true
+	}
+	remoteAppsMu.Unlock()
+	return fetchRemoteAppsNow()
+}
+
+// fetchRemoteAppsNow 实际请求官网 /api/apps（无缓存保护），成功后写入内存缓存。
+func fetchRemoteAppsNow() ([]AppMeta, bool) {
 	base := strings.TrimRight(config.Get().Store.BaseURL, "/")
 	if base == "" {
 		return nil, false
@@ -417,18 +436,12 @@ func fetchRemoteApps() ([]AppMeta, bool) {
 	resp, err := client.Get(url)
 	if err != nil {
 		slog.Warn("拉取远程应用列表失败", "err", err)
-		remoteAppsMu.Lock()
-		last := remoteAppsCache
-		remoteAppsMu.Unlock()
-		return last, false
+		return nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		slog.Warn("远程应用接口返回异常状态", "status", resp.StatusCode)
-		remoteAppsMu.Lock()
-		last := remoteAppsCache
-		remoteAppsMu.Unlock()
-		return last, false
+		return nil, false
 	}
 	var body struct {
 		Code int         `json:"code"`
@@ -436,17 +449,11 @@ func fetchRemoteApps() ([]AppMeta, bool) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		slog.Warn("解析远程应用列表失败", "err", err)
-		remoteAppsMu.Lock()
-		last := remoteAppsCache
-		remoteAppsMu.Unlock()
-		return last, false
+		return nil, false
 	}
 	if body.Code != 0 {
 		slog.Warn("远程应用接口返回错误", "code", body.Code)
-		remoteAppsMu.Lock()
-		last := remoteAppsCache
-		remoteAppsMu.Unlock()
-		return last, false
+		return nil, false
 	}
 
 	metas := make([]AppMeta, 0, len(body.Data))
@@ -456,7 +463,7 @@ func fetchRemoteApps() ([]AppMeta, bool) {
 		}
 		metas = append(metas, a.toAppMeta())
 	}
-	// 记录最近一次成功结果，供下次网络抖动时兜底
+	// 拉取成功：替换主缓存（此后 fetchRemoteApps 直接走缓存，不再请求官网）
 	remoteAppsMu.Lock()
 	remoteAppsCache = metas
 	remoteAppsMu.Unlock()
@@ -487,13 +494,26 @@ type remoteGroup struct {
 
 var (
 	remoteCatsMu    sync.Mutex
-	remoteCatsCache []AppCategory // 最近一次成功拉取的结果（仅作网络抖动时的兜底，不做 TTL 缓存）
+	remoteCatsCache []AppCategory // 官网分类主缓存：成功拉取一次后永久缓存，不再请求官网
 )
 
-// fetchRemoteCategories 从官网拉取分类 + 分组。
-// 每次调用都实时请求官网（面板侧不缓存，缓存统一由官网侧负责）。
-// 失败时返回最近一次成功结果（若有），否则返回空（AppCategories 会回退到本地硬编码）。
+// fetchRemoteCategories 返回官网分类 + 分组。
+// 面板缓存策略与应用列表一致：成功拉取一次后永久缓存（进程内存），后续请求直接返回缓存；
+// 需要刷新时由前端进入应用商店页调用 RefreshRemoteStore 强制重新拉取。
+// 无缓存且拉取失败时返回空（AppCategories 会回退到本地硬编码分类）。
 func fetchRemoteCategories() ([]AppCategory, []AppSubCategory) {
+	remoteCatsMu.Lock()
+	if remoteCatsCache != nil {
+		cache := remoteCatsCache
+		remoteCatsMu.Unlock()
+		return cache, nil
+	}
+	remoteCatsMu.Unlock()
+	return fetchRemoteCategoriesNow()
+}
+
+// fetchRemoteCategoriesNow 实际请求官网 /api/app-categories（无缓存保护），成功后写入内存缓存。
+func fetchRemoteCategoriesNow() ([]AppCategory, []AppSubCategory) {
 	base := strings.TrimRight(config.Get().Store.BaseURL, "/")
 	if base == "" {
 		return nil, nil
@@ -502,18 +522,12 @@ func fetchRemoteCategories() ([]AppCategory, []AppSubCategory) {
 	resp, err := client.Get(base + "/api/app-categories")
 	if err != nil {
 		slog.Warn("拉取远程分类失败", "err", err)
-		remoteCatsMu.Lock()
-		last := remoteCatsCache
-		remoteCatsMu.Unlock()
-		return last, nil
+		return nil, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		slog.Warn("远程分类接口返回异常状态", "status", resp.StatusCode)
-		remoteCatsMu.Lock()
-		last := remoteCatsCache
-		remoteCatsMu.Unlock()
-		return last, nil
+		return nil, nil
 	}
 	var body struct {
 		Code int `json:"code"`
@@ -524,17 +538,11 @@ func fetchRemoteCategories() ([]AppCategory, []AppSubCategory) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		slog.Warn("解析远程分类失败", "err", err)
-		remoteCatsMu.Lock()
-		last := remoteCatsCache
-		remoteCatsMu.Unlock()
-		return last, nil
+		return nil, nil
 	}
 	if body.Code != 0 {
 		slog.Warn("远程分类接口返回错误", "code", body.Code)
-		remoteCatsMu.Lock()
-		last := remoteCatsCache
-		remoteCatsMu.Unlock()
-		return last, nil
+		return nil, nil
 	}
 
 	// 分类 → AppCategory（按分类 key 分组，下面的分组挂在各自的 sub_categories）
@@ -585,8 +593,22 @@ func fetchRemoteCategories() ([]AppCategory, []AppSubCategory) {
 	return cats, nil
 }
 
+// RefreshRemoteStore 强制重新拉取官网应用商店数据（应用列表 + 分类/分组），
+// 由前端进入应用商店页时调用（对应「面板每次刷新页面时缓存一次」，
+// 让官网后台的新增/修改/删除应用立即生效）。
+// 任一拉取失败都保留旧缓存不清空（官网抖动不丢面板已有远程数据），并返回错误由调用方提示。
+func RefreshRemoteStore() error {
+	if _, appsOK := fetchRemoteAppsNow(); appsOK {
+		fetchRemoteCategoriesNow()
+		slog.Info("远程应用商店缓存已刷新")
+		return nil
+	}
+	return errors.New("拉取官网应用商店列表失败，已保留上次缓存")
+}
+
 // allAppMetas 返回「本地 + 远程」合并后的应用列表。
-// 每次调用都实时拉取远程（面板侧不缓存远程数据，缓存统一由官网侧负责）。
+// 远程列表走面板侧永久缓存（成功拉取一次后不再请求官网），
+// 由前端进入应用商店页调用 RefreshRemoteStore 强制刷新。
 // 远程成功时以远程列表为准（官网下架/删除的应用不再出现）；
 // 远程失败时回退到本地内置应用兜底（保证面板 /apps 页面不空白）。
 func allAppMetas() []AppMeta {

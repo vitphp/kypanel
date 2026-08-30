@@ -17,6 +17,46 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, service.ListSites())
 	})
 
+	// 全局默认页面（4 个页面内容 + 当前默认站点）
+	g.GET("/site/default-pages", func(c *gin.Context) {
+		utils.Ok(c, service.GetDefaultPages())
+	})
+
+	// 保存某个全局默认页面 {kind, content}
+	g.POST("/site/default-pages/save", func(c *gin.Context) {
+		var req struct {
+			Kind    string `json:"kind" binding:"required"`
+			Content string `json:"content"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, 400, "参数错误: "+err.Error())
+			return
+		}
+		if err := service.SaveDefaultPage(req.Kind, req.Content); err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
+		recordOpForCtx(c, "site.default_page", "保存默认页面: "+req.Kind, "success")
+		utils.Ok(c, nil)
+	})
+
+	// 设置/清除默认站点 {id}（id=0 清除）
+	g.POST("/site/default-site", func(c *gin.Context) {
+		var req struct {
+			ID uint `json:"id"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, 400, "参数错误")
+			return
+		}
+		if err := service.SetDefaultSite(req.ID); err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
+		recordOpForCtx(c, "site.default_site", "设置默认站点 ID="+strconv.FormatUint(uint64(req.ID), 10), "success")
+		utils.Ok(c, nil)
+	})
+
 	// 创建网站
 	g.POST("/site/create", func(c *gin.Context) {
 		var req service.CreateSiteReq

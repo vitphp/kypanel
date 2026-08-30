@@ -25,3 +25,9 @@ config.json
 .DS_Store
 Thumbs.db
 *.log
+
+# 测试残留 / 本地产物（不上传）
+login.yaml
+panel.exe~
+webui/dist.tar.gz
+.playwright-cli/

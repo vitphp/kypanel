@@ -56,7 +56,7 @@ func setupUserRoutes(g *gin.RouterGroup) {
 
 	// ---- 用户 ----
 	admin.GET("/users", func(c *gin.Context) {
-		utils.Ok(c, service.ListAdmins())
+		utils.Ok(c, service.ListAdmins(c.GetUint("admin_id")))
 	})
 	admin.POST("/users", func(c *gin.Context) {
 		var req struct {
@@ -113,7 +113,7 @@ func setupUserRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, "参数错误")
 			return
 		}
-		if err := service.DeleteAdmin(req.ID); err != nil {
+		if err := service.DeleteAdmin(c.GetUint("admin_id"), req.ID); err != nil {
 			utils.Fail(c, 500, err.Error())
 			return
 		}

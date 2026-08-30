@@ -19,6 +19,16 @@ func setupAppRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, service.AppCategories())
 	})
 
+	// 刷新远程应用商店缓存（应用 + 分类），前端进入应用商店页时调用；
+	// 官网后台变更应用后，刷新面板页面即可生效。
+	g.POST("/apps/refresh", func(c *gin.Context) {
+		if err := service.RefreshRemoteStore(); err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
+		utils.Ok(c, nil)
+	})
+
 	// 已安装的 PHP 版本列表（供应用选择 PHP 版本）
 	g.GET("/apps/php-versions", func(c *gin.Context) {
 		utils.Ok(c, service.ListPhpVersions())

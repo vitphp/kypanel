@@ -11,6 +11,8 @@ export const usePanelStore = defineStore('panel', () => {
   const updateVersion = ref('')
   const updateChangelog = ref('')
   const updateDownloadURL = ref('')
+  const updateWebURL = ref('')
+  const updateXdbURL = ref('')
   const updateForce = ref(false)
   const checking = ref(false)
   const upgrading = ref(false)
@@ -31,6 +33,8 @@ export const usePanelStore = defineStore('panel', () => {
       updateVersion.value = data?.version || ''
       updateChangelog.value = data?.changelog || ''
       updateDownloadURL.value = data?.download_url || ''
+      updateWebURL.value = data?.web_url || ''
+      updateXdbURL.value = data?.xdb_url || ''
       updateForce.value = !!data?.force
       if (typeof data?.current_version === 'string' && data.current_version) {
         version.value = data.current_version
@@ -46,7 +50,11 @@ export const usePanelStore = defineStore('panel', () => {
     if (!updateDownloadURL.value || upgrading.value) return
     upgrading.value = true
     try {
-      await upgradePanel({ download_url: updateDownloadURL.value })
+      await upgradePanel({
+        download_url: updateDownloadURL.value,
+        web_url: updateWebURL.value,
+        xdb_url: updateXdbURL.value
+      })
       return true
     } finally {
       // 升级命令已发出，后端会重启；前端是否设为 false 取决于轮询结果
@@ -62,6 +70,8 @@ export const usePanelStore = defineStore('panel', () => {
     updateVersion,
     updateChangelog,
     updateDownloadURL,
+    updateWebURL,
+    updateXdbURL,
     updateForce,
     checking,
     upgrading,

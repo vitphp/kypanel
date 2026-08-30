@@ -73,12 +73,92 @@
       </div>
     </div>
   </aside>
+
+  <!-- 升级确认弹窗：告知新版本信息与更新内容，确认后进入升级进度弹窗 -->
+  <el-dialog
+    v-model="upgradeConfirmVisible"
+    class="lp-upgrade-confirm"
+    width="min(680px, 94vw)"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    align-center
+  >
+    <template #header>
+      <div class="lp-uc-head">
+        <div class="lp-uc-icon">
+          <el-icon :size="22"><Promotion /></el-icon>
+        </div>
+        <div class="lp-uc-head-text">
+          <div class="lp-uc-title">发现新版本 v{{ panel.updateVersion }}</div>
+          <div class="lp-uc-sub">当前版本 v{{ panel.version }} · 开猿运维面板</div>
+        </div>
+      </div>
+    </template>
+
+    <div class="lp-uc-body">
+      <div class="lp-uc-tags">
+        <span class="lp-uc-tag">后端程序</span>
+        <span v-if="panel.updateWebURL" class="lp-uc-tag">前端界面</span>
+        <span v-if="panel.updateXdbURL" class="lp-uc-tag">离线IP库</span>
+      </div>
+      <div class="lp-uc-log-head">更新日志</div>
+      <pre class="lp-uc-log">{{ panel.updateChangelog || '暂无更新日志' }}</pre>
+    </div>
+
+    <template #footer>
+      <div class="lp-uc-foot">
+        <span class="lp-uc-foot-tip">升级将自动备份数据，失败自动回滚恢复，期间请勿关闭页面</span>
+        <div class="lp-uc-btns">
+          <el-button @click="upgradeConfirmVisible = false">取消</el-button>
+          <el-button type="primary" :loading="panel.upgrading" @click="onUpgradeConfirm">立即升级</el-button>
+        </div>
+      </div>
+    </template>
+  </el-dialog>
+
+  <!-- 升级进度弹窗：升级过程中不可关闭，实时展示各阶段进度，完成后自动刷新 -->
+  <el-dialog
+    v-model="upgradeDialogVisible"
+    class="lp-upgrade-progress"
+    title="正在升级面板"
+    width="min(520px, 92vw)"
+    :show-close="upgradePhase === 'failed'"
+    :close-on-click-modal="upgradePhase === 'failed'"
+    :close-on-press-escape="upgradePhase === 'failed'"
+    :before-close="onUpgradeDialogClose"
+    align-center
+  >
+    <div class="lp-upgrade-body">
+      <el-progress
+        :percentage="upgradePercent ?? 0"
+        :indeterminate="upgradePercent === null"
+        :stroke-width="8"
+        :duration="1.2"
+        color="#10b981"
+      />
+      <p class="lp-upgrade-status" :class="{ 'is-error': upgradePhase === 'failed' }">
+        {{ upgradeMessage }}
+      </p>
+      <p v-if="upgradePhase === 'downloading'" class="lp-upgrade-sub">{{ upgradeDownloadInfo }}</p>
+      <p v-else-if="upgradePhase === 'rebooting'" class="lp-upgrade-sub">请勿关闭此窗口，面板重启完成后会自动刷新页面</p>
+      <p v-if="upgradePhase === 'failed' && upgradeError" class="lp-upgrade-error">{{ upgradeError }}</p>
+    </div>
+    <template #footer>
+      <template v-if="upgradePhase === 'failed'">
+        <el-button @click="copyUpgradeError">复制错误信息</el-button>
+        <el-button type="primary" @click="upgradeDialogVisible = false">知道了</el-button>
+      </template>
+      <span v-else class="lp-upgrade-tip">升级期间请保持页面打开，不要刷新或关闭</span>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
-import { ref, computed, h } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { Promotion } from '@element-plus/icons-vue'
+import { getUpgradeProgress } from '../api/update'
 import { useAuthStore } from '../stores/auth'
 import { usePanelStore } from '../stores/panel'
 
@@ -129,56 +209,151 @@ function toggleGroup(path) {
   else openGroups.value.push(path)
 }
 
-async function onUpdateClick() {
-  try {
-    await ElMessageBox.confirm(
-      h('div', { style: 'line-height:1.6' }, [
-        h('p', { style: 'margin:0 0 8px;font-weight:600' }, `发现新版本 v${panel.updateVersion}，是否立即升级？`),
-        h('pre', {
-          style: 'margin:0;padding:10px;background:#f8fafc;border-radius:6px;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:13px;color:#334155'
-        }, panel.updateChangelog || '暂无更新日志')
-      ]),
-      '面板升级确认',
-      {
-        confirmButtonText: '立即升级',
-        cancelButtonText: '取消',
-        type: 'warning',
-        closeOnClickModal: false
-      }
-    )
-  } catch {
-    return
-  }
+// ============ 升级确认弹窗状态 ============
+const upgradeConfirmVisible = ref(false)
 
-  ElMessage.info('正在下载更新包并准备重启，请稍候…')
+async function onUpgradeConfirm() {
+  if (panel.upgrading) return
   try {
+    upgradeConfirmVisible.value = false
     await panel.doUpgrade()
-    startPolling()
+    startUpgradeProgress()
   } catch (err) {
     ElMessage.error(err?.response?.data?.msg || err.message || '升级失败')
   }
 }
 
-function startPolling() {
-  let attempts = 0
-  const maxAttempts = 60
-  const timer = setInterval(async () => {
-    attempts++
+// ============ 升级进度弹窗状态 ============
+const upgradeDialogVisible = ref(false)
+const upgradePhase = ref('downloading') // downloading / applying / rebooting / done / failed
+const upgradeMessage = ref('正在启动升级…')
+const upgradePercent = ref(null) // null = 不确定进度（流动条），数字 = 下载百分比
+const upgradeDownloadInfo = ref('')
+const upgradeError = ref('')
+let upgradeTimer = null
+let upgradePollFails = 0
+
+function fmtSize(bytes) {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
+}
+
+// 升级过程中不允许关闭弹窗，仅失败时可关闭
+function onUpgradeDialogClose() {
+  return upgradePhase.value === 'failed'
+}
+
+// 复制失败错误信息，方便用户粘贴给客服/去社区求助
+async function copyUpgradeError() {
+  const text = upgradeError.value || upgradeMessage.value || ''
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('错误信息已复制')
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
     try {
-      // 轮询 /api/ping，通则面板已重启完成
-      await fetch('/api/ping', { method: 'GET' })
-      clearInterval(timer)
-      panel.upgrading = false
-      ElMessage.success('升级完成，页面即将刷新')
-      setTimeout(() => window.location.reload(), 1500)
+      document.execCommand('copy')
+      ElMessage.success('错误信息已复制')
     } catch {
-      if (attempts >= maxAttempts) {
-        clearInterval(timer)
+      ElMessage.error('复制失败，请长按手动复制')
+    }
+    document.body.removeChild(ta)
+  }
+}
+
+function onUpdateClick() {
+  upgradeConfirmVisible.value = true
+}
+
+// 更新进度 UI
+function updateUpgradeUI(d) {
+  if (d?.phase) upgradePhase.value = d.phase
+  if (d?.message) upgradeMessage.value = d.message
+  if (d?.phase === 'downloading') {
+    if (d.total > 0) {
+      upgradePercent.value = Math.min(100, Math.max(0, Math.round((d.downloaded / d.total) * 100)))
+      upgradeDownloadInfo.value = `${d.file || '文件'}  ${fmtSize(d.downloaded)} / ${fmtSize(d.total)}`
+    } else {
+      upgradePercent.value = null
+      upgradeDownloadInfo.value = `正在下载 ${d.file || '文件'}…`
+    }
+  } else {
+    upgradePercent.value = null
+    upgradeDownloadInfo.value = ''
+  }
+}
+
+// 打开升级进度弹窗并轮询后端进度，直到完成或失败
+function startUpgradeProgress() {
+  upgradeDialogVisible.value = true
+  upgradePhase.value = 'downloading'
+  upgradeMessage.value = '正在启动升级…'
+  upgradePercent.value = null
+  upgradeDownloadInfo.value = ''
+  upgradeError.value = ''
+  upgradePollFails = 0
+  clearInterval(upgradeTimer)
+
+  upgradeTimer = setInterval(async () => {
+    try {
+      const { data } = await getUpgradeProgress()
+      upgradePollFails = 0
+      updateUpgradeUI(data)
+
+      // 兜底：面板重启后新进程状态已重置（phase 为空/idle）。若此前已进入 rebooting
+      // 且后端不再报 running，说明重启已完成，直接刷新加载最新版本
+      if (
+        upgradePhase.value === 'rebooting' &&
+        data?.running === false &&
+        !['downloading', 'applying', 'rebooting', 'done', 'failed'].includes(data?.phase)
+      ) {
+        clearInterval(upgradeTimer)
+        upgradePhase.value = 'done'
+        upgradeMessage.value = data?.message || '面板已重启完成，正在刷新…'
         panel.upgrading = false
-        ElMessage.warning('升级状态未知，请手动刷新页面查看')
+        setTimeout(() => window.location.reload(), 800)
+        return
+      }
+
+      if (data?.phase === 'done') {
+        clearInterval(upgradeTimer)
+        upgradePhase.value = 'done'
+        upgradeMessage.value = data?.message || '更新完成！页面即将刷新'
+        panel.upgrading = false
+        setTimeout(() => window.location.reload(), 1500)
+        return
+      }
+      if (data?.phase === 'failed') {
+        clearInterval(upgradeTimer)
+        upgradePhase.value = 'failed'
+        upgradeMessage.value = data?.message || '升级失败'
+        upgradeError.value = data?.error || ''
+        panel.upgrading = false
+      }
+    } catch (e) {
+      // 请求失败通常意味着面板正在重启（连接断开），继续轮询等待恢复
+      upgradePollFails++
+      if (upgradePollFails > 2) {
+        upgradePhase.value = 'rebooting'
+        upgradeMessage.value = '面板正在重启，请稍候…'
+        upgradePercent.value = null
+      }
+      if (upgradePollFails >= 90) {
+        clearInterval(upgradeTimer)
+        upgradePhase.value = 'failed'
+        upgradeMessage.value = '等待面板恢复超时，请手动刷新页面查看'
+        panel.upgrading = false
       }
     }
-  }, 2000)
+  }, 1000)
 }
 </script>
 
@@ -346,5 +521,170 @@ function startPolling() {
 .lp-sidebar.is-collapsed .lp-version-text,
 .lp-sidebar.is-collapsed .lp-update-btn {
   display: none;
+}
+
+/* ============ 升级确认弹窗 ============ */
+.lp-upgrade-confirm {
+  border-radius: 14px;
+}
+.lp-upgrade-confirm :deep(.el-dialog__header) {
+  margin-right: 0;
+  padding: 20px 24px 0;
+}
+.lp-upgrade-confirm :deep(.el-dialog__body) {
+  padding: 16px 24px 0;
+}
+.lp-upgrade-confirm :deep(.el-dialog__footer) {
+  padding: 16px 24px 20px;
+}
+.lp-uc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.lp-uc-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.lp-uc-head-text {
+  min-width: 0;
+}
+.lp-uc-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.lp-uc-sub {
+  font-size: 12.5px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+.lp-uc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.lp-uc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.lp-uc-tag {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.lp-uc-log-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+}
+.lp-uc-log {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 14px 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.75;
+  color: #334155;
+}
+.lp-uc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.lp-uc-foot-tip {
+  font-size: 12px;
+  color: #94a3b8;
+}
+.lp-uc-btns {
+  display: flex;
+  gap: 10px;
+}
+@media (max-width: 599px) {
+  .lp-upgrade-confirm :deep(.el-dialog__header) {
+    padding: 16px 16px 0;
+  }
+  .lp-upgrade-confirm :deep(.el-dialog__body) {
+    padding: 12px 16px 0;
+  }
+  .lp-upgrade-confirm :deep(.el-dialog__footer) {
+    padding: 14px 16px 16px;
+  }
+  .lp-uc-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .lp-uc-foot-tip {
+    text-align: center;
+  }
+  .lp-uc-btns {
+    justify-content: flex-end;
+  }
+}
+.lp-upgrade-progress {
+  border-radius: 14px;
+}
+
+/* ============ 升级进度弹窗 ============ */
+.lp-upgrade-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 6px 2px 2px;
+}
+.lp-upgrade-status {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.5;
+}
+.lp-upgrade-status.is-error {
+  color: #dc2626;
+}
+.lp-upgrade-sub {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+}
+.lp-upgrade-error {
+  margin: 0;
+  padding: 8px 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #b91c1c;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+.lp-upgrade-tip {
+  font-size: 12px;
+  color: #94a3b8;
 }
 </style>
