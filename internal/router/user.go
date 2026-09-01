@@ -84,7 +84,7 @@ func setupUserRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, "参数错误")
 			return
 		}
-		if err := service.UpdateAdminRole(req.ID, req.RoleID); err != nil {
+		if err := service.UpdateAdminRole(c.GetUint("admin_id"), req.ID, req.RoleID); err != nil {
 			utils.Fail(c, 500, err.Error())
 			return
 		}

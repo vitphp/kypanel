@@ -73,6 +73,47 @@ var goVersions = []struct {
 	{Key: "go119", Ver: "1.19", Full: "1.19.13"},
 }
 
+// ===== 多源下载渠道（面板安装时先测速选最快源，下载失败自动切换下一个源）=====
+// 每项为下载地址模板，支持占位符：${VER}（可选版本）、${FULL}（完整补丁版本号）、
+// ${ARCH}（架构 amd64/arm64）、${OSBUILD}（发行版代号，如 debian12）。
+var (
+	// Go 官方 tarball（命名 go1.25.14.linux-amd64.tar.gz）
+	goChannels = []string{
+		"https://mirrors.aliyun.com/golang/go${FULL}.linux-${ARCH}.tar.gz",
+		"https://golang.google.cn/dl/go${FULL}.linux-${ARCH}.tar.gz",
+		"https://go.dev/dl/go${FULL}.linux-${ARCH}.tar.gz",
+	}
+	// Node base 镜像（目录结构与 nodejs.org/dist 一致，nvm 的 NVM_NODEJS_ORG_MIRROR 直接使用）
+	nodeChannels = []string{
+		"https://mirrors.aliyun.com/nodejs-release",
+		"https://npmmirror.com/mirrors/node",
+		"https://nodejs.org/dist",
+	}
+	// Python 完整源码 tarball（命名 Python-3.13.15.tar.xz）
+	pythonChannels = []string{
+		"https://mirrors.huaweicloud.com/python/${FULL}/Python-${FULL}.tar.xz",
+		"https://mirrors.aliyun.com/python-release/source/Python-${FULL}.tar.xz",
+		"https://npmmirror.com/mirrors/python/${FULL}/Python-${FULL}.tar.xz",
+		"https://mirrors.tuna.tsinghua.edu.cn/python/${FULL}/Python-${FULL}.tar.xz",
+		"https://www.python.org/ftp/python/${FULL}/Python-${FULL}.tar.xz",
+	}
+	// phpMyAdmin 完整包
+	pmaChannels = []string{
+		"https://files.phpmyadmin.net/phpMyAdmin/${VER}/phpMyAdmin-${VER}-all-languages.tar.gz",
+		"https://mirrors.tuna.tsinghua.edu.cn/phpmyadmin/phpMyAdmin-${VER}-all-languages.tar.gz",
+	}
+	// MongoDB linux tarball（命名 mongodb-linux-x86_64-debian12-7.0.22.tgz）
+	mongodbChannels = []string{
+		"https://fastdl.mongodb.org/linux/mongodb-linux-${ARCH}-${OSBUILD}-${FULL}.tgz",
+		"https://mirrors.huaweicloud.com/mongodb/linux/mongodb-linux-${ARCH}-${OSBUILD}-${FULL}.tgz",
+	}
+	// Docker 官方安装脚本（get.docker.com 支持 --mirror Aliyun 加速）
+	dockerChannels = []string{
+		"https://get.docker.com/",
+		"https://mirrors.aliyun.com/docker-ce/linux/static/stable/${ARCH}/docker-${FULL}.tgz",
+	}
+)
+
 // 常用 PHP 扩展（apt 包名后缀 / remi 包名后缀）
 var phpExtApt = []string{"mysql", "curl", "gd", "mbstring", "xml", "zip", "bcmath", "redis"}
 var phpExtRemi = []string{"mysqlnd", "curl", "gd", "mbstring", "xml", "zip", "bcmath", "redis"}
@@ -104,9 +145,10 @@ func init() {
 			Key: nv.Key, Name: "Node " + v, Category: CatRuntime, SubCategory: SubLangNodejs, Icon: "VideoPlay",
 			Description:     "Node.js " + v + " 运行时（含 npm），通过 nvm 安装，可与其他 Node 版本共存",
 			Service:         "",
-			VersionCmd:      `[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" && node -v 2>/dev/null || /usr/local/node` + v + `/bin/node -v 2>/dev/null || true`,
+			VersionCmd:      `ls "$HOME/.nvm/versions/node" 2>/dev/null | grep -oE '^v` + v + `\.[0-9]+\.[0-9]+' | head -n1 || /usr/local/node` + v + `/bin/node -v 2>/dev/null || true`,
 			InstallScript:   nodeInstallScript(v),
 			UninstallScript: nodeUninstallScript(v),
+			Channels:        nodeChannels,
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Node 版本共存",
 		})
 	}
@@ -117,9 +159,10 @@ func init() {
 			Key: pv.Key, Name: "Python " + v, Category: CatRuntime, SubCategory: SubLangPython, Icon: "TrendCharts",
 			Description:     "Python " + v + " 运行时（含 pip），通过 pyenv 安装，可与其他 Python 版本共存",
 			Service:         "",
-			VersionCmd:      `[ -s "$HOME/.pyenv/bin/pyenv" ] && export PATH="$HOME/.pyenv/bin:$PATH" && eval "$(pyenv init -)" && pyenv versions --bare 2>/dev/null | grep -w "` + pv.Full + `" || /usr/local/python` + v + `/bin/python` + pv.Major + ` -V 2>/dev/null || true`,
+			VersionCmd:      `ls "$HOME/.pyenv/versions" 2>/dev/null | grep -x "` + pv.Full + `" | head -n1 || /usr/local/python` + v + `/bin/python` + pv.Major + ` -V 2>/dev/null || true`,
 			InstallScript:   pythonInstallScript(v, pv.Full),
-			UninstallScript: pythonUninstallScript(pv.Full),
+			UninstallScript: pythonUninstallScript(pv.Full, v),
+			Channels:        pythonChannels,
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Python 版本共存",
 		})
 	}
@@ -133,6 +176,7 @@ func init() {
 			VersionCmd:      `/usr/local/go` + v + `/bin/go version 2>/dev/null || true`,
 			InstallScript:   goInstallScript(v, gv.Full),
 			UninstallScript: goUninstallScript(v),
+			Channels:        goChannels,
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Go 版本共存",
 		})
 	}
@@ -167,6 +211,7 @@ func init() {
 		VersionCmd:       `test -f ` + pmaDir + `/libraries/classes/Version.php && grep -oP "VERSION\s*=\s*'[^']+'" ` + pmaDir + `/libraries/classes/Version.php 2>/dev/null | head -n1`,
 		InstallScript:    pmaInstallScript,
 		UninstallScript:  pmaUninstallScript,
+		Channels:         pmaChannels,
 		SelectPhpVersion: true,
 		Remarks:          "需先安装 MySQL/MariaDB 与 PHP 版本；安装后从「数据库」- MySQL 的「管理」进入，无需密码",
 	})
@@ -179,6 +224,9 @@ func init() {
 		Service:     "",
 		// 用 tar 版本作为探测依据（迁移依赖 tar/gzip，两者系统自带）
 		VersionCmd: `tar --version 2>/dev/null | head -n1`,
+		// 该应用无真实可卸载二进制，探测命令恒真（tar 系统自带），
+		// 依赖面板按 InstallMarkFile 标记文件判定安装状态（安装后 touch、卸载后删除）。
+		InstallMarkFile: "{DataDir}/logs/apps/.site-migrate.installed",
 		InstallScript: `#!/bin/bash
 set -e
 echo "检查打包依赖工具 ..."
@@ -224,15 +272,29 @@ if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y curl lsb-release ca-certificates gnupg2 >/dev/null 2>&1 || apt-get install -y curl lsb-release ca-certificates >/dev/null 2>&1
-    code=$(lsb_release -sc 2>/dev/null)
-    if [ -n "$code" ] && [ -d /etc/apt/sources.list.d ]; then
-        curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg || true
-        if [ -s /usr/share/keyrings/sury-php.gpg ]; then
-            echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $code main" > /etc/apt/sources.list.d/php-sury.list
-            apt-get update -y
+    # 官方源已包含目标版本（如 Debian 13 自带 PHP 8.4）时无需 sury 仓库
+    if ! apt-cache policy php{{VER}}-fpm 2>/dev/null | grep -q 'Candidate:'; then
+        code=$(lsb_release -sc 2>/dev/null)
+        [ -z "$code" ] && code=$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release 2>/dev/null)
+        if [ -n "$code" ] && [ -d /etc/apt/sources.list.d ]; then
+            # 下载失败重试 3 次（曾因瞬时网络失败导致 sury 源未启用而安装报"无候选包"）
+            for i in 1 2 3; do
+                curl -fsSL --connect-timeout 10 --max-time 120 https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg && break
+                sleep 3
+            done
+            if [ -s /usr/share/keyrings/sury-php.gpg ]; then
+                echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $code main" > /etc/apt/sources.list.d/php-sury.list
+                apt-get update -y || true
+            else
+                echo "警告: 下载 sury 仓库密钥失败，若系统源无 php{{VER}}-fpm 将无法安装" >&2
+            fi
         fi
     fi
-    apt-get install -y php{{VER}}-fpm php{{VER}}-cli{{APT_EXT}}
+    if ! apt-get install -y php{{VER}}-fpm php{{VER}}-cli{{APT_EXT}}; then
+        # 首次失败多为源索引未刷新，重新 update 后重试一次
+        apt-get update -y || true
+        apt-get install -y php{{VER}}-fpm php{{VER}}-cli{{APT_EXT}}
+    fi
     systemctl enable php{{VER}}-fpm 2>/dev/null || true
     systemctl restart php{{VER}}-fpm 2>/dev/null || systemctl start php{{VER}}-fpm 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
@@ -267,12 +329,15 @@ func phpUninstallScript(ver, remi string) string {
 	tpl := `#!/bin/bash
 set -e
 if command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge php{{VER}}-fpm php{{VER}}-cli{{APT_EXT}}
-    apt-get autoremove -y
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge php{{VER}}-fpm php{{VER}}-cli{{APT_EXT}} || true
+    apt-get autoremove -y || true
     systemctl stop php{{VER}}-fpm 2>/dev/null || true
     systemctl disable php{{VER}}-fpm 2>/dev/null || true
-    rm -f /etc/apt/sources.list.d/php-sury.list
-    rm -f /usr/share/keyrings/sury-php.gpg
+    # 多版本共存时保留 sury 源，仅当无任何已装 PHP-FPM 时才清理
+    if ! dpkg -l 2>/dev/null | grep -q '^ii  php.*-fpm'; then
+        rm -f /etc/apt/sources.list.d/php-sury.list
+        rm -f /usr/share/keyrings/sury-php.gpg
+    fi
 elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
     PM=dnf
     command -v dnf >/dev/null 2>&1 || PM=yum
@@ -291,22 +356,58 @@ echo "PHP {{VER}} 已卸载"`
 }
 
 // nodeInstallScript 生成指定 Node.js 版本的一键安装脚本（通过 nvm）
+// 全链路多渠道 + 超时保护：
+//  1. nvm 本体：gitee clone 优先（国内快）、GitHub clone 兜底，均带 timeout 防无限挂起，
+//     再兜底官方 install.sh（gitee/GitHub 双源，curl 带超时）；
+//  2. node 二进制：走面板注入的 LP_CHANNELS 测速选最快镜像，下载失败自动切换下一个；
+//  3. 所有 nvm 调用都是 shell 函数，必须经 bash -c 重新 source nvm.sh 后用 timeout 包裹。
 func nodeInstallScript(ver string) string {
 	return `#!/bin/bash
 set -e
-export NVM_DIR="$HOME/.nvm"
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+NVM_TAG="v0.40.0"
+# ===== 1. 安装 nvm（多渠道 + 超时，避免 GitHub 不通时无限挂起）=====
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash \
-        || curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.0/install.sh | bash
+    echo "开始安装 nvm ..."
+    rm -rf "$NVM_DIR"
+    mkdir -p "$NVM_DIR"
+    if timeout 90 git clone --depth 1 https://gitee.com/mirrors/nvm.git "$NVM_DIR" >/dev/null 2>&1; then
+        echo "nvm 已通过 gitee 镜像安装"
+    elif timeout 180 git clone --depth 1 --branch "$NVM_TAG" https://github.com/nvm-sh/nvm.git "$NVM_DIR" >/dev/null 2>&1; then
+        echo "nvm 已通过 GitHub 安装"
+    else
+        echo "git clone 失败，改用 install.sh 安装 nvm ..."
+        curl -fsSL --connect-timeout 10 --max-time 60 https://gitee.com/mirrors/nvm/raw/$NVM_TAG/install.sh -o /tmp/nvm-install.sh \
+            || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_TAG/install.sh -o /tmp/nvm-install.sh
+        NVM_DIR="$NVM_DIR" bash /tmp/nvm-install.sh >/dev/null 2>&1 || true
+    fi
 fi
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-# 优先阿里云镜像下载 Node 二进制，失败回退官方源，再切 npmmirror。
-# nvm 通过 NVM_NODEJS_ORG_MIRROR 决定下载源，目录结构与官方一致可直接使用。
-export NVM_NODEJS_ORG_MIRROR=https://mirrors.aliyun.com/nodejs-release
-nvm install ` + ver + ` \
-    || { echo "阿里云镜像下载失败，回退官方源 nodejs.org"; unset NVM_NODEJS_ORG_MIRROR; nvm install ` + ver + `; } \
-    || { echo "官方源下载失败，切换 npmmirror 镜像重试"; export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node; nvm install ` + ver + `; }
-nvm alias default ` + ver + `
+# ===== 2. 多渠道加速：测速选最快 Node 镜像，下载失败自动切换下一个镜像 =====
+if [ -n "$LP_CHANNELS" ]; then
+    FAST=$(lp_pick_fastest_url $LP_CHANNELS)
+    if [ -n "$FAST" ]; then
+        export NVM_NODEJS_ORG_MIRROR="$FAST"
+        echo "已选择最快 Node 镜像: $FAST"
+    fi
+fi
+# 未测出最快源时用 npmmirror 保底，避免直连 nodejs.org 卡死
+export NVM_NODEJS_ORG_MIRROR="${NVM_NODEJS_ORG_MIRROR:-https://npmmirror.com/mirrors/node}"
+# npm registry 国内加速
+touch "$HOME/.npmrc"
+grep -q '^registry=' "$HOME/.npmrc" 2>/dev/null || echo 'registry=https://registry.npmmirror.com' >> "$HOME/.npmrc"
+# ===== 3. 安装 Node（nvm 为 shell 函数，经 bash -c 重新 source；timeout 防挂起）=====
+if ! timeout 600 bash -c 'source "$NVM_DIR/nvm.sh" && nvm install ` + ver + `'; then
+    echo "当前镜像下载失败，切换下一个源"
+    DL2=0
+    for m in $LP_CHANNELS; do
+        [ "$m" = "$FAST" ] && continue
+        export NVM_NODEJS_ORG_MIRROR="$m"
+        if timeout 600 bash -c 'source "$NVM_DIR/nvm.sh" && nvm install ` + ver + `'; then DL2=1; break; fi
+    done
+    [ "$DL2" = "1" ] || timeout 900 bash -c 'unset NVM_NODEJS_ORG_MIRROR; source "$NVM_DIR/nvm.sh" && nvm install ` + ver + `'
+fi
+timeout 60 bash -c 'source "$NVM_DIR/nvm.sh" && nvm alias default ` + ver + `' >/dev/null 2>&1 || true
 echo "Node ` + ver + ` 安装完成"
 `
 }
@@ -318,6 +419,12 @@ set -e
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 nvm uninstall ` + ver + ` 2>/dev/null || true
+# 兜底：nvm uninstall 因别名/引用等失败时，手动删除版本目录（探测按 nvm versions/node/v<ver>.* 判断）
+for base in "$HOME/.nvm" /root/.nvm /.nvm; do
+    rm -rf "$base"/versions/node/v` + ver + `.*
+done
+# 清理历史遗留的 /usr/local 安装目录（早期手动安装 / 安装脚本残留）
+rm -rf /usr/local/node` + ver + `
 echo "Node ` + ver + ` 已卸载"
 `
 }
@@ -348,24 +455,64 @@ fi
 
 # 2. 拉取 pyenv（优先清华源，失败回退 gitee）
 if [ ! -d "$PYENV_ROOT" ]; then
-    git clone --depth=1 https://mirrors.tuna.tsinghua.edu.cn/github/pyenv/pyenv.git "$PYENV_ROOT" 2>/dev/null \
-        || git clone --depth=1 https://gitee.com/mirrors/pyenv.git "$PYENV_ROOT" 2>/dev/null \
-        || git clone --depth=1 https://github.com/pyenv/pyenv.git "$PYENV_ROOT"
+    timeout 90 git clone --depth=1 https://mirrors.tuna.tsinghua.edu.cn/github/pyenv/pyenv.git "$PYENV_ROOT" 2>/dev/null \
+        || timeout 120 git clone --depth=1 https://gitee.com/mirrors/pyenv.git "$PYENV_ROOT" 2>/dev/null \
+        || timeout 180 git clone --depth=1 https://github.com/pyenv/pyenv.git "$PYENV_ROOT"
     git -C "$PYENV_ROOT" submodule update --init --depth=1 || true
 fi
 
-# 3. 预下载 Python 源码到 pyenv 缓存（优先阿里云扁平结构，回退清华/官方带版本子目录）
-CACHE="$PYENV_ROOT/cache/Python-` + full + `.tgz"
+# 3. 预下载 Python 源码到 pyenv 缓存（文件名必须是 Python-<ver>.tar.xz，
+#    否则 pyenv 不会命中缓存、会从 python.org 重新下载极慢）
+CACHE="$PYENV_ROOT/cache/Python-` + full + `.tar.xz"
+TMPCACHE="$CACHE.downloading"
 mkdir -p "$PYENV_ROOT/cache"
-if [ ! -f "$CACHE" ]; then
-    curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
-        "https://mirrors.aliyun.com/python-release/source/Python-` + full + `.tgz" \
-        || { echo "阿里云镜像下载失败，切换清华源"; curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
-            "https://mirrors.tuna.tsinghua.edu.cn/python/` + full + `/Python-` + full + `.tgz"; } \
-        || { echo "清华源下载失败，切换官方 python.org"; curl -fsSL --retry 3 --connect-timeout 20 -o "$CACHE" \
-            "https://www.python.org/ftp/python/` + full + `/Python-` + full + `.tgz"; }
-    [ -s "$CACHE" ] || { echo "所有镜像下载失败，请检查网络"; exit 1; }
+if [ ! -s "$CACHE" ]; then
+    rm -f "$TMPCACHE"
+    DL_OK=0
+    # 多渠道加速：LP_CHANNELS 由面板注入（每行一个源码包 URL 模板，含 ${FULL} 占位符）。
+    # 替换占位符后测速选最快源；下载失败自动切换下一个源。
+    # 先下载到 .downloading 临时文件，成功后原子 mv 到正式缓存，避免半截文件残留导致下次跳过下载。
+    PY_URLS=""
+    [ -n "$LP_CHANNELS" ] && PY_URLS=$(echo "$LP_CHANNELS" | sed "s|\${FULL}|` + full + `|g")
+    if [ -n "$PY_URLS" ]; then
+        FAST=$(lp_pick_fastest_url $PY_URLS)
+        if [ -n "$FAST" ]; then
+            echo "已选择最快 Python 源码源: $FAST"
+            if curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 -o "$TMPCACHE" "$FAST" && [ -s "$TMPCACHE" ]; then
+                mv "$TMPCACHE" "$CACHE"
+                DL_OK=1
+            fi
+        fi
+        if [ "$DL_OK" != "1" ]; then
+            if lp_download_fallback "$TMPCACHE" $PY_URLS; then
+                mv "$TMPCACHE" "$CACHE"
+                DL_OK=1
+            fi
+        fi
+    fi
+    # 兜底：面板未注入渠道时走内置多镜像级联
+    if [ "$DL_OK" != "1" ]; then
+        for u in \
+            "https://mirrors.huaweicloud.com/python/` + full + `/Python-` + full + `.tar.xz" \
+            "https://mirrors.aliyun.com/python-release/source/Python-` + full + `.tar.xz" \
+            "https://npmmirror.com/mirrors/python/` + full + `/Python-` + full + `.tar.xz" \
+            "https://mirrors.tuna.tsinghua.edu.cn/python/` + full + `/Python-` + full + `.tar.xz" \
+            "https://www.python.org/ftp/python/` + full + `/Python-` + full + `.tar.xz"; do
+            echo "下载 Python 源码: $u"
+            if curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 -o "$TMPCACHE" "$u" && [ -s "$TMPCACHE" ]; then
+                mv "$TMPCACHE" "$CACHE"
+                DL_OK=1
+                break
+            fi
+            rm -f "$TMPCACHE"
+            echo "镜像下载失败，切换下一个源"
+        done
+    fi
+    [ "$DL_OK" = "1" ] || { echo "所有镜像下载失败，请检查网络"; exit 1; }
 fi
+# 若 pyenv 因故未命中缓存，也会走 PYTHON_BUILD_MIRROR_URL（清华源，目录结构与官方一致），
+# 避免 pyenv 自行回退到极慢的 python.org。
+export PYTHON_BUILD_MIRROR_URL="https://mirrors.tuna.tsinghua.edu.cn/python"
 export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 
@@ -376,14 +523,23 @@ echo "Python ` + full + ` 安装完成"
 `
 }
 
-// pythonUninstallScript 生成指定 Python 版本的卸载脚本（full 为完整补丁版本号）
-func pythonUninstallScript(full string) string {
+// pythonUninstallScript 生成指定 Python 版本的卸载脚本
+// full 为完整补丁版本号（pyenv 目录名，如 3.13.15），ver 为主版本号（用于清理 /usr/local 遗留，如 3.13）
+func pythonUninstallScript(full, ver string) string {
 	return `#!/bin/bash
 set -e
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)" 2>/dev/null || true
 pyenv uninstall -f ` + full + ` 2>/dev/null || true
+# 兜底：pyenv uninstall 失败时手动删除版本目录（探测按 pyenv versions/<full> 判断）
+for base in "$HOME/.pyenv" /root/.pyenv /.pyenv; do
+    rm -rf "$base/versions/` + full + `"
+done
+# 重建 shims，清除已删除版本的残留入口（避免 PATH 探测误判「仍已安装」）
+pyenv rehash 2>/dev/null || true
+# 清理历史遗留的 /usr/local 安装目录
+rm -rf /usr/local/python` + ver + `
 echo "Python ` + full + ` 已卸载"
 `
 }
@@ -402,20 +558,41 @@ fi
 INSTALL_DIR="/usr/local/go` + ver + `"
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-# 国内服务器优先走阿里云镜像，失败回退 golang.google.cn，最后官方源 go.dev。
-# --strip-components=1 去掉 tarball 顶层 go/ 目录直接解压到 INSTALL_DIR，
-# 避免 mkdir 后 mv /usr/local/go 被嵌套成 /usr/local/go<ver>/go 导致探测不到。
+# 多渠道加速：LP_CHANNELS 由面板注入（每行一个下载地址模板，含 ${FULL}/${ARCH} 占位符）。
+# 替换占位符得到实际 URL 后测速选最快源；下载失败自动切换下一个源。
+# --strip-components=1 去掉 tarball 顶层 go/ 目录直接解压到 INSTALL_DIR。
 DL_OK=0
-for u in \
-    "https://mirrors.aliyun.com/golang/go` + full + `.linux-${GOARCH}.tar.gz" \
-    "https://golang.google.cn/dl/go` + full + `.linux-${GOARCH}.tar.gz" \
-    "https://go.dev/dl/go` + full + `.linux-${GOARCH}.tar.gz"; do
-    if curl -fsSL --retry 3 --connect-timeout 20 "$u" | tar -C "$INSTALL_DIR" --strip-components=1 -xzf -; then
-        DL_OK=1
-        break
+GO_URLS=""
+[ -n "$LP_CHANNELS" ] && GO_URLS=$(echo "$LP_CHANNELS" | sed "s|\${FULL}|` + full + `|g; s|\${ARCH}|$GOARCH|g")
+if [ -n "$GO_URLS" ]; then
+    FAST=$(lp_pick_fastest_url $GO_URLS)
+    if [ -n "$FAST" ]; then
+        echo "已选择最快 Go 源: $FAST"
+        if curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 "$FAST" | tar -C "$INSTALL_DIR" --strip-components=1 -xzf -; then
+            DL_OK=1
+        fi
     fi
-    echo "源下载失败，切换下一镜像: $u"
-done
+    if [ "$DL_OK" != "1" ]; then
+        TMPTGZ=$(mktemp)
+        if lp_download_fallback "$TMPTGZ" $GO_URLS; then
+            tar -C "$INSTALL_DIR" --strip-components=1 -xzf "$TMPTGZ" && DL_OK=1
+        fi
+        rm -f "$TMPTGZ"
+    fi
+fi
+# 兜底：面板未注入渠道时走内置多镜像
+if [ "$DL_OK" != "1" ]; then
+    for u in \
+        "https://mirrors.aliyun.com/golang/go` + full + `.linux-${GOARCH}.tar.gz" \
+        "https://golang.google.cn/dl/go` + full + `.linux-${GOARCH}.tar.gz" \
+        "https://go.dev/dl/go` + full + `.linux-${GOARCH}.tar.gz"; do
+        if curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 "$u" | tar -C "$INSTALL_DIR" --strip-components=1 -xzf -; then
+            DL_OK=1
+            break
+        fi
+        echo "源下载失败，切换下一镜像: $u"
+    done
+fi
 [ "$DL_OK" = "1" ] || { echo "所有镜像下载失败，请检查网络"; exit 1; }
 ln -sf "$INSTALL_DIR/bin/go" /usr/local/bin/go` + strings.ReplaceAll(ver, ".", "") + `
 ln -sf "$INSTALL_DIR/bin/gofmt" /usr/local/bin/gofmt` + strings.ReplaceAll(ver, ".", "") + `
@@ -456,7 +633,29 @@ else
 fi
 mkdir -p /www/server
 cd /tmp
-curl -fsSLo phpmyadmin.tar.gz "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz"
+# 多渠道加速：LP_CHANNELS 由面板注入（每行一个下载地址模板，含 ${VER} 占位符），
+# 替换占位符后测速选最快源；下载失败自动切换下一个源。
+PMA_URLS=""
+[ -n "$LP_CHANNELS" ] && PMA_URLS=$(echo "$LP_CHANNELS" | sed "s|\${VER}|5.2.2|g")
+DL_OK=0
+if [ -n "$PMA_URLS" ]; then
+    FAST=$(lp_pick_fastest_url $PMA_URLS)
+    if [ -n "$FAST" ]; then
+        echo "已选择最快 phpMyAdmin 源: $FAST"
+        if curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 -o phpmyadmin.tar.gz "$FAST" && [ -s phpmyadmin.tar.gz ]; then
+            DL_OK=1
+        fi
+    fi
+    if [ "$DL_OK" != "1" ]; then
+        rm -f phpmyadmin.tar.gz
+        if lp_download_fallback phpmyadmin.tar.gz $PMA_URLS; then
+            DL_OK=1
+        fi
+    fi
+fi
+if [ "$DL_OK" != "1" ]; then
+    curl -fsSL --connect-timeout 20 --max-time 600 -o phpmyadmin.tar.gz "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz"
+fi
 rm -rf /www/server/phpmyadmin /www/server/phpMyAdmin-5.2.2-all-languages
 tar xzf phpmyadmin.tar.gz -C /www/server
 mv /www/server/phpMyAdmin-5.2.2-all-languages /www/server/phpmyadmin
@@ -509,6 +708,7 @@ echo "phpMyAdmin 5.2.2 安装完成，通过面板「数据库」-> MySQL 的「
 
 // pmaUninstallScript phpMyAdmin 卸载脚本
 const pmaUninstallScript = `#!/bin/bash
+set -e
 rm -rf /www/server/phpmyadmin
 rm -f /etc/nginx/conf.d/lp_phpmyadmin.conf
 if command -v nginx >/dev/null 2>&1; then
@@ -612,10 +812,31 @@ install_mongodb_org() {
         *) echo "不支持的架构: $arch" >&2; exit 1 ;;
     esac
     if [ ! -x /usr/local/bin/mongod ]; then
-        local url="https://fastdl.mongodb.org/linux/mongodb-linux-${arch}-${osbuild}-${patch}.tgz"
-        echo "下载 MongoDB ${patch} (${arch}) ..."
         local tmpdir=$(mktemp -d)
-        curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 30 "$url" | tar -xz -C "$tmpdir"
+        # 多渠道加速：LP_CHANNELS 由面板注入（每行一个下载地址模板，含 ${FULL}/${ARCH}/${OSBUILD} 占位符）。
+        # 替换占位符后测速选最快源；下载失败自动切换下一个源。
+        local DL_OK=0 MG_URLS="" FAST="" TGZ=""
+        [ -n "$LP_CHANNELS" ] && MG_URLS=$(echo "$LP_CHANNELS" | sed "s|\${FULL}|${patch}|g; s|\${ARCH}|${arch}|g; s|\${OSBUILD}|${osbuild}|g")
+        if [ -n "$MG_URLS" ]; then
+            FAST=$(lp_pick_fastest_url $MG_URLS)
+            if [ -n "$FAST" ]; then
+                echo "已选择最快 MongoDB 源: $FAST"
+                if curl -fsSL --retry 3 --connect-timeout 30 --max-time 600 "$FAST" | tar -xz -C "$tmpdir"; then
+                    DL_OK=1
+                fi
+            fi
+            if [ "$DL_OK" != "1" ]; then
+                TGZ="$tmpdir/mongodb.tgz"
+                if lp_download_fallback "$TGZ" $MG_URLS; then
+                    tar -xz -f "$TGZ" -C "$tmpdir" && DL_OK=1
+                fi
+                rm -f "$TGZ"
+            fi
+        fi
+        # 兜底：面板未注入渠道时走官方源
+        if [ "$DL_OK" != "1" ]; then
+            curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 30 --max-time 600 "https://fastdl.mongodb.org/linux/mongodb-linux-${arch}-${osbuild}-${patch}.tgz" | tar -xz -C "$tmpdir"
+        fi
         mkdir -p /opt/mongodb
         cp -r "$tmpdir"/mongodb-linux-*/bin /opt/mongodb/
         ln -sf /opt/mongodb/bin/mongod /usr/local/bin/mongod
@@ -734,6 +955,18 @@ install_mssql() {
         # 让 sqlcmd 在 PATH 中
         mkdir -p /usr/local/bin
         ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd 2>/dev/null || true
+        # SQLServer 引擎依赖 OpenLDAP 2.5（liblber-2.5.so.0），而 Debian 官方源只有
+        # libldap 2.6（提供 liblber.so.2），不补装会导致 sqlservr 启动失败。
+        # 从 Ubuntu jammy 仓库下载 libldap-2.5-0 补装（微软官方仅支持 Ubuntu）。
+        if [ "$ID" = "debian" ]; then
+            if ! ldconfig -p | grep -q "liblber-2.5"; then
+                curl -fsSL -o /tmp/libldap-2.5-0.deb "https://archive.ubuntu.com/ubuntu/pool/main/o/openldap/libldap-2.5-0_2.5.20+dfsg-0ubuntu0.22.04.1_amd64.deb" || true
+                if [ -s /tmp/libldap-2.5-0.deb ]; then
+                    dpkg -i /tmp/libldap-2.5-0.deb || apt-get install -f -y
+                    rm -f /tmp/libldap-2.5-0.deb
+                fi
+            fi
+        fi
     elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
         PM=dnf
         command -v dnf >/dev/null 2>&1 || PM=yum
@@ -748,13 +981,9 @@ install_mssql() {
     fi
 }
 install_mssql
-# 提示用户运行 mssql-conf setup 设置 SA 密码
+# 引擎已安装，EULA 接受与 SA 密码设置由面板在安装完成后自动完成（EnsureSqlserverSetup）
 if [ -x /opt/mssql/bin/mssql-conf ]; then
-    echo "============================================================"
-    echo "SQLServer 已安装。请使用以下命令设置 SA 密码并启动服务："
-    echo "  /opt/mssql/bin/mssql-conf setup"
-    echo "设置完成后，请在面板「数据库」->「SQLServer」标签使用 SA 密码。"
-    echo "============================================================"
+    echo "SQLServer 引擎已安装，面板将自动完成 EULA 接受与 SA 密码设置。"
 fi
 systemctl daemon-reload
 echo "SQLServer 安装完成"`

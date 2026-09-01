@@ -608,6 +608,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=${ENV_FILE}
+Environment=HOME=/root
 ExecStart=${INSTALL_DIR}/panel -config ${INSTALL_DIR}/config.json
 Restart=on-failure
 RestartSec=3

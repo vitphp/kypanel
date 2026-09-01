@@ -309,6 +309,15 @@ func saveBaseTab(s *model.Site, req SiteSettingsReq) error {
 	s.PhpFpm = strings.TrimSpace(req.PhpFpm)
 	if strings.TrimSpace(req.RuntimeVersion) != "" {
 		s.RuntimeVersion = strings.TrimSpace(req.RuntimeVersion)
+		// 运行时站点（node/python/go）校验所选版本已安装（或系统默认运行时可用），
+		// 避免用户保存一个未安装的版本，等网站起不来才意识到选错了。
+		// 存量站点迁移：若旧 runtime_version 未安装但系统存在默认 python3/node/go，
+		// ensureRuntime 会回退放行；系统也没有默认运行时才报错并引导安装/重选。
+		if isRuntimeSite(s.Type) {
+			if err := ensureRuntime(s.Type, s.RuntimeVersion); err != nil {
+				return err
+			}
+		}
 	}
 
 	// 域名校验

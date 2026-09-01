@@ -24,12 +24,17 @@ request.interceptors.response.use(
   (response) => {
     const res = response.data
     if (res.code !== 0) {
-      ElMessage.error(res.msg || '请求失败')
+      if (!response.config?.silent) {
+        ElMessage.error(res.msg || '请求失败')
+      }
       return Promise.reject(new Error(res.msg || '请求失败'))
     }
     return res
   },
   (error) => {
+    if (error.config?.silent) {
+      return Promise.reject(error)
+    }
     if (error.response?.status === 401) {
       const auth = useAuthStore()
       auth.logout()

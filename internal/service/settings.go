@@ -20,13 +20,14 @@ import (
 
 // PanelInfo 面板设置信息
 type PanelInfo struct {
-	Port            int    `json:"port"`
-	HTTPS           bool   `json:"https"`
-	Domain          string `json:"domain"`
+	Port             int    `json:"port"`
+	HTTPS            bool   `json:"https"`
+	Domain           string `json:"domain"`
 	SecurityEntrance string `json:"security_entrance"` // 安全入口（登录页 URL 前缀）
-	PanelName       string `json:"panel_name"`         // 面板显示名称
-	PanelSub        string `json:"panel_sub"`          // 面板副标题
-	PanelVersion    string `json:"panel_version"`      // 面板当前版本
+	PanelName        string `json:"panel_name"`        // 面板显示名称
+	PanelSub         string `json:"panel_sub"`         // 面板副标题
+	PanelVersion     string `json:"panel_version"`     // 面板当前版本
+	ReportErrors     bool   `json:"report_errors"`     // 用户体验改善计划（错误上报）是否开启
 }
 
 // encryptSetting 加密后落库（敏感凭据不以明文存储）。
@@ -83,14 +84,24 @@ func GeneratePMAToken(adminID uint, username string) (string, error) {
 func GetPanelInfo() PanelInfo {
 	cfg := config.Get()
 	return PanelInfo{
-		Port:            cfg.Server.Port,
-		HTTPS:           bool(cfg.Server.HTTPS),
-		Domain:          cfg.Server.Domain,
+		Port:             cfg.Server.Port,
+		HTTPS:            bool(cfg.Server.HTTPS),
+		Domain:           cfg.Server.Domain,
 		SecurityEntrance: cfg.SecurityEntrance,
-		PanelName:       cfg.PanelName,
-		PanelSub:        cfg.PanelSub,
-		PanelVersion:    version.Version,
+		PanelName:        cfg.PanelName,
+		PanelSub:         cfg.PanelSub,
+		PanelVersion:     version.Version,
+		ReportErrors:     bool(cfg.Store.ReportErrors),
 	}
+}
+
+// SetReportErrors 开关「用户体验改善计划」（错误上报）。
+// 开启后：应用安装/卸载失败时自动上报错误信息到面板官网，便于官方收集问题并针对性修复；
+// 关闭后：不再上报任何信息。默认开启。
+func SetReportErrors(enabled bool) error {
+	cfg := config.Get()
+	cfg.Store.ReportErrors = config.Bool(enabled)
+	return cfg.Save(configFilePath())
 }
 
 // SavePortReq 保存端口请求
@@ -245,7 +256,11 @@ func SetMysqlRootPwd(pwd string) error {
 	if res.ExitCode != 0 {
 		return errors.New("修改 MySQL root 密码失败: " + strings.TrimSpace(res.Stderr))
 	}
-	return model.SetSetting("mysql_root_pw", encryptSetting(pwd))
+	if err := model.SetSetting("mysql_root_pw", encryptSetting(pwd)); err != nil {
+		return err
+	}
+	// 密码已变更，同步刷新计划任务用的 0600 凭据文件，避免 cron 备份用到旧密码
+	return ensureMysqlCredFile()
 }
 
 // ResetMysqlRootPwdAfterInstall 安装 MySQL/MariaDB 后自动重置 root@localhost 密码为随机串。
@@ -261,6 +276,61 @@ func ResetMysqlRootPwdAfterInstall() (string, error) {
 		return "", err
 	}
 	return newPwd, nil
+}
+
+// GetSqlserverSaPwd 读取面板已保存的 SQL Server SA 密码（解密后明文）
+func GetSqlserverSaPwd() string {
+	return decryptSetting(model.GetSetting("mssql_sa_pw"))
+}
+
+// SetupSqlserverSaPwd 配置 SQL Server：接受 EULA、设置 SA 密码并启动服务，
+// 成功后把密码加密保存到面板设置（供数据库页 sqlcmd 连接使用）。
+func SetupSqlserverSaPwd(pwd string) error {
+	if len(pwd) < 8 {
+		return errors.New("SA 密码长度不能少于 8 位")
+	}
+	// 非交互 setup：accept-eula 接受 EULA，MSSQL_SA_PASSWORD 设置 SA 密码，
+	// MSSQL_PID 指定版本（Developer 免费，无需 license）
+	cmd := fmt.Sprintf("MSSQL_SA_PASSWORD=%s MSSQL_PID=Developer /opt/mssql/bin/mssql-conf -n setup accept-eula", shellQuote(pwd))
+	res, err := ExecCommand(cmd, 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("mssql-conf setup 执行失败: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return errors.New("mssql-conf setup 失败: " + strings.TrimSpace(res.Stderr))
+	}
+	// setup 完成后启动并设为开机自启
+	if out, err := ExecCommand("systemctl enable --now mssql-server", 3*time.Minute); err != nil {
+		return fmt.Errorf("启动 mssql-server 失败: %w", err)
+	} else if out.ExitCode != 0 {
+		return errors.New("启动 mssql-server 失败: " + strings.TrimSpace(out.Stderr))
+	}
+	return model.SetSetting("mssql_sa_pw", encryptSetting(pwd))
+}
+
+// EnsureSqlserverSetup 幂等自愈：SQL Server 已安装但尚未完成 setup
+// （未接受 EULA / 未设置 SA 密码，启动报 exit 255）时自动补齐，
+// 生成随机 SA 密码、接受 EULA、启动服务并保存密码到面板设置。
+// 返回 (是否执行了配置, 生成的明文密码, error)。
+func EnsureSqlserverSetup() (bool, string, error) {
+	// 未安装 SQL Server 引擎直接跳过（无副作用）
+	if _, err := os.Stat("/opt/mssql/bin/mssql-conf"); err != nil {
+		return false, "", nil
+	}
+	// 已保存密码说明配置完成，跳过
+	if GetSqlserverSaPwd() != "" {
+		return false, "", nil
+	}
+	pwd, err := generateRandomPassword(14)
+	if err != nil {
+		return false, "", fmt.Errorf("生成随机 SA 密码失败: %w", err)
+	}
+	// 补齐 SQL Server 密码复杂度（至少含大写/小写/数字/特殊字符三类）：前缀 Sa@
+	pwd = "Sa@" + pwd
+	if err := SetupSqlserverSaPwd(pwd); err != nil {
+		return false, "", err
+	}
+	return true, pwd, nil
 }
 
 // generateRandomPassword 用 crypto/rand 生成 n 位大小写+数字混合的密码

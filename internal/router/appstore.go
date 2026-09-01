@@ -53,10 +53,17 @@ func setupAppRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, nil)
 	})
 
-	// 环境安装状态（数据库 / FTP / Docker / Nginx）
+	// 环境安装状态（数据库 / FTP / Docker / Nginx / 运行时 / 多版本 PHP/Node）
 	g.GET("/apps/env-status", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		utils.Ok(c, service.EnvStatus())
+	})
+
+	// 强制重新探测环境状态（前端「重新检测环境」按钮）：
+	// env-status 默认有 TTL 缓存，用户手动安装/卸载后点此按钮可立即刷新，
+	// 无需等待 TTL 过期或重启面板。
+	g.POST("/apps/env-status/refresh", func(c *gin.Context) {
+		utils.Ok(c, service.RefreshEnvStatus())
 	})
 
 	// 卸载应用

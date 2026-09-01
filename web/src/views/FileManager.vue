@@ -1147,11 +1147,8 @@ function syncHistory(path, push = true) {
 async function listDir(path, pushHistory = true) {
   loading.value = true
   try {
-    const res = await request.post('/file/list', { path })
-    if (res.code !== 0) {
-      ElMessage.error(res.msg || '加载失败')
-      return
-    }
+    // silent：目录不存在等预期错误由本函数自行处理（静默关闭失效标签），不弹统一错误提示
+    const res = await request.post('/file/list', { path }, { silent: true })
     items.value = res.data || []
     currentPath.value = path
     // 切换目录时，把上一级外的 du 缓存清掉，避免无关条目长期占用内存
@@ -1166,9 +1163,57 @@ async function listDir(path, pushHistory = true) {
     // 同步 tab 信息
     tabs.updateTabPath(tabs.activeId, path)
   } catch (e) {
-    ElMessage.error('加载失败: ' + (e?.message || e))
+    if (isDirMissing(e)) {
+      // 目录已被删除：静默移除对应标签，不弹报错
+      removeMissingTab(path)
+    } else {
+      ElMessage.error('加载失败: ' + (e?.message || e))
+    }
   } finally {
     loading.value = false
+  }
+}
+
+// 判断是否为「目录不存在 / 不再是目录」这类预期错误（后端 os.ReadDir 的原生报错）
+function isDirMissing(e) {
+  const msg = e?.response?.data?.msg || e?.message || ''
+  return /no such file or directory|not a directory/i.test(msg)
+}
+
+// 目录失效时：静默移除对应标签；若只剩最后一个标签则退回根目录，避免页面弹「文件夹不存在」
+function removeMissingTab(path) {
+  const idx = tabs.tabs.findIndex(t => t.path === path)
+  const targetIdx = idx >= 0 ? idx : tabs.tabs.findIndex(t => t.id === tabs.activeId)
+
+  // 只剩一个标签：不能关成空，退回根目录继续浏览
+  if (tabs.tabs.length <= 1) {
+    const first = tabs.tabs[0]
+    if (first) {
+      first.path = '/'
+      first.name = '/'
+      first.history = ['/']
+      first.historyIdx = 0
+      tabs.persist()
+    }
+    listDir('/', false)
+    replaceBrowserHistory('/')
+    return
+  }
+
+  if (targetIdx < 0) {
+    listDir('/', false)
+    return
+  }
+
+  const closing = tabs.tabs[targetIdx]
+  const wasActive = closing.id === tabs.activeId
+  tabs.closeTab(closing.id)
+  if (wasActive) {
+    const t = tabs.getActiveTab()
+    if (t && t.path !== currentPath.value) {
+      listDir(t.path, false)
+    }
+    if (t) replaceBrowserHistory(t.path)
   }
 }
 function deriveTabName(p) {

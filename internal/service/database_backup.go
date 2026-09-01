@@ -1,8 +1,10 @@
 package service
 
 import (
+	"archive/zip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -287,7 +289,18 @@ func DatabaseImport(dbType, dbName, filePath string) error {
 	}
 }
 
+// importMysqlFile 把 SQL 文件导入 MySQL。
+// 兼容 .sql / .sql.gz / .sql.zip（宝塔新版数据库手动备份为 .sql.zip，zip 内是单个 .sql）。
 func importMysqlFile(dbName, path string) error {
+	// zip 备份先用 Go archive/zip 解出 .sql 再导入（不依赖系统 unzip）
+	if strings.HasSuffix(strings.ToLower(path), ".zip") {
+		sqlPath, cleanup, err := extractSQLFromZip(path)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		path = sqlPath
+	}
 	mysql, err := LookPathBin("mysql")
 	if err != nil {
 		return errors.New("未找到 mysql 命令，请确认 MySQL 已安装")
@@ -315,6 +328,46 @@ func importMysqlFile(dbName, path string) error {
 		return errors.New(res2.Stderr)
 	}
 	return nil
+}
+
+// extractSQLFromZip 从 .sql.zip 中解出 .sql 文件到临时目录，返回临时文件路径与清理函数。
+// 宝塔数据库 zip 备份内通常只有一个 .sql；若出现多个，优先取名字带 .sql 后缀的。
+func extractSQLFromZip(zipPath string) (string, func(), error) {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("打开数据库 zip 备份失败: %w", err)
+	}
+	defer zr.Close()
+	var target *zip.File
+	for _, f := range zr.File {
+		if strings.HasSuffix(strings.ToLower(f.Name), ".sql") {
+			target = f
+			break
+		}
+	}
+	if target == nil && len(zr.File) > 0 {
+		target = zr.File[0]
+	}
+	if target == nil {
+		return "", nil, errors.New("数据库 zip 备份内没有文件")
+	}
+	rc, err := target.Open()
+	if err != nil {
+		return "", nil, fmt.Errorf("读取 zip 内文件失败: %w", err)
+	}
+	defer rc.Close()
+	tmp := filepath.Join(os.TempDir(), "kypanel-sql-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".sql")
+	out, err := os.Create(tmp)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := io.Copy(out, rc); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return "", nil, fmt.Errorf("解压数据库 zip 失败: %w", err)
+	}
+	out.Close()
+	return tmp, func() { os.Remove(tmp) }, nil
 }
 
 func importSqliteFile(dbName, path string) error {

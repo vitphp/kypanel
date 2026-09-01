@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kypanel/internal/config"
+	"kypanel/internal/model"
 )
 
 // ============================================================================
@@ -36,8 +37,21 @@ type AppMeta struct {
 	AptFallbackPackages []string `json:"-"`
 	// AptFallbackService 安装替代包后使用的 systemd 服务名（默认与 Service 相同）
 	AptFallbackService string `json:"-"`
+	// AptRemovePatterns apt 卸载时额外按通配模式清理的包名前缀（如 postgresql 装的是
+	// postgresql-17 等子包，apt remove postgresql 会报"包未安装"导致假成功）。
+	// 卸载时先用 dpkg -l 筛出实际安装的匹配包再 remove，避免通配无匹配时 apt 报错。
+	AptRemovePatterns []string `json:"-"`
 	InstallScript      string `json:"-"` // 自定义安装脚本（非 apt/yum 通用流程的应用，如 phpMyAdmin、多版本 PHP）
 	UninstallScript    string `json:"-"` // 自定义卸载脚本
+	// InstallMarkFile 安装标记文件：设置了该字段的应用没有真实的"可卸载二进制"
+	// （如 site-migrate 网站搬家，探测命令 tar --version 恒真——tar 是系统自带工具，
+	//  卸载脚本删不掉，卸载后探测仍命中导致状态回弹为「已安装」）。
+	// 面板安装成功后 touch 该文件、卸载成功后删除；探测优先以标记文件是否存在为准。
+	// 路径支持 {DataDir} 占位符（运行时替换为面板数据目录）。
+	InstallMarkFile string `json:"-"`
+	// Channels 多源下载渠道：面板安装时先测速选延迟最低的源，下载失败自动切换下一个。
+	// 每项为下载地址模板，支持 ${VER}（版本）、${FULL}（完整版本号）、${ARCH}（架构）占位符。
+	Channels []string `json:"-"`
 	// OpenPorts 安装完成后自动放行的端口（含端口段），如 FTP: ["20","21","39000-40000"]
 	OpenPorts []string `json:"-"`
 	WebUrl    string   `json:"web_url,omitempty"` // 安装后的访问地址（如 phpMyAdmin）
@@ -52,14 +66,19 @@ type AppMeta struct {
 	VersionDefault string `json:"version_default,omitempty"`
 	// SubCategory 二级分类 key（如 lang:php），用于顶级分类下的进一步筛选（运行时环境内的语言）
 	SubCategory string `json:"sub_category,omitempty"`
-	// SystemDefault 是否发行版自带（如 Debian 默认的 sqlite3/python3/nodejs/golang），
-	// 这些包被系统其它组件依赖、卸载无意义或会误伤，面板不允许卸载。
-	// 由 systemDefaultKeys 填充，前端据此隐藏「卸载」按钮。
+	// SystemDefault 是否发行版自带（DB 无面板安装记录 + 系统里实际探测到已存在）。
+	// 这类包被系统其它组件依赖、卸载无意义或会误伤，面板不允许卸载。
+	// 由 listAppsUncached 按运行时探测结果动态填充（source=system 时为 true），
+	// 前端据此隐藏「卸载」按钮并展示「系统自带」标签。
 	SystemDefault bool `json:"system_default,omitempty"`
 	// LocalOnly 本地专属应用（面板内置功能，官网商店无此应用）。
 	// 远程商店拉取成功时默认以远程列表为准，标记此字段的应用始终显示，
 	// 不依赖官网 seed 数据（如 site-migrate 网站搬家）。
 	LocalOnly bool `json:"-"`
+	// Hidden 不再提供安装入口的应用（如无版本运行时 nodejs/python3/golang）。
+	// meta 定义保留——已通过面板安装过的用户仍能显示/管理/卸载（findApp 依赖 meta），
+	// 但未安装的不再出现在「可安装」列表。由 listAppsUncached 过滤展示。
+	Hidden bool `json:"hidden,omitempty"`
 	// InstalledActions 应用安装后在卡片上显示的自定义操作按钮。
 	// 通用机制：由后端配置，前端根据 action 类型执行对应交互（如弹窗、跳转）。
 	InstalledActions []AppAction `json:"installed_actions,omitempty"`
@@ -82,15 +101,11 @@ const (
 	CatTool     = "tool"     // 系统工具
 )
 
-// systemDefaultKeys 发行版自带、不可卸载的应用 key。
-// 这些包随系统安装、被其它组件依赖或卸载无意义（apt remove 会静默成功但无实际效果），
-// 统一拒绝卸载，前端据此隐藏「卸载」按钮并展示「系统自带」标签。
-var systemDefaultKeys = map[string]bool{
-	"python3": true, // Debian 默认 python3
-	"golang":  true, // Debian 默认 golang
-	"nodejs":  true, // Debian 默认 nodejs
-	"sqlite":  true, // Debian 默认 sqlite3 CLI
-}
+// 系统自带应用不再用硬编码 key 列表判定，改为「运行时动态探测」：
+// DB 无面板安装记录 + 系统里实际探测到二进制/服务已存在 → 视为系统自带（source=system，不可卸载）。
+// 这样重装系统后只有真正预装的组件（如 python3）会被标记为系统自带，
+// 面板后续安装的应用（DB 有 installed 记录）都可正常卸载。
+// 判定逻辑见 appstore_tasks.go 的 listAppsUncached / UninstallApp 与 appstore_probe.go 的 EnvStatus。
 
 // 二级分类（运行时环境下的语言维度）
 const (
@@ -181,7 +196,10 @@ var appMetas = []AppMeta{
 		Description: "功能强大的开源关系型数据库",
 		Service:     "postgresql", VersionCmd: "psql --version",
 		AptPackages: []string{"postgresql"}, YumPackages: []string{"postgresql-server"},
-		SelectVersion:  true,
+		// Debian 上 apt install postgresql 实际装的是 postgresql-17 等子包（postgresql 是元包），
+		// 卸载只 remove postgresql 会报"包未安装"导致假成功。按 postgresql* 前缀通配清理实际子包。
+		AptRemovePatterns: []string{"postgresql*"},
+		SelectVersion:     true,
 		Versions:       []string{"16", "15", "14"},
 		VersionDefault: "16",
 		Remarks:        "安装后默认监听 5432，服务由 systemd 管理；默认不对外放行端口，需在「系统-防火墙」手动放行",
@@ -202,6 +220,7 @@ var appMetas = []AppMeta{
 		Service:     "mongod", VersionCmd: "mongod --version || mongosh --version",
 		InstallScript:   mongodbInstallScript,
 		UninstallScript: mongodbUninstallScript,
+		Channels:        mongodbChannels,
 		SelectVersion:   true,
 		Versions:        []string{"7.0", "6.0"},
 		VersionDefault:  "7.0",
@@ -210,8 +229,9 @@ var appMetas = []AppMeta{
 	{
 		Key: "sqlserver", Name: "SQLServer", Category: CatDatabase, Icon: "Coin",
 		Description: "Microsoft SQL Server for Linux（含命令行工具 sqlcmd）",
-		// test -x 前置检查：文件不存在时退出码非零，避免 `|| true` 吞退出码导致误判「已安装」
-		Service: "mssql-server", VersionCmd: "test -x /opt/mssql/bin/sqlservr && /opt/mssql/bin/sqlservr --version 2>&1",
+		// sqlservr 不支持 --version（会把该参数当启动选项直接拉起引擎，导致探测卡死/超时），
+		// 改为从包管理器读取引擎版本：dpkg-query 或 rpm 二选一。
+		Service: "mssql-server", VersionCmd: "test -x /opt/mssql/bin/sqlservr && (dpkg-query -f '${Version}' -W mssql-server 2>/dev/null || rpm -q mssql-server --qf '%{VERSION}' 2>/dev/null)",
 		InstallScript:   sqlserverInstallScript,
 		UninstallScript: sqlserverUninstallScript,
 		SelectVersion:   true,
@@ -282,17 +302,20 @@ elif command -v yum >/dev/null 2>&1; then
   yum remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
 fi
 `,
-		Remarks: "Docker 官方一键安装脚本，安装后请刷新页面",
+		Channels: dockerChannels,
+		Remarks:  "Docker 官方一键安装脚本，安装后请刷新页面",
 	},
 	{
+		// 无版本运行时：不再提供安装入口（只提供 Node/Python/Go 多版本），
+		// 定义保留用于「已安装兜底」——历史通过面板装过的用户仍可显示/管理/卸载。
 		Key: "nodejs", Name: "Node.js", Category: CatRuntime, SubCategory: SubLangNodejs, Icon: "VideoPlay",
 		Description: "Node.js 运行时（含 npm），适合前端项目 / 服务端 JS",
 		Service:     "", VersionCmd: "node -v && npm -v",
 		AptPackages: []string{"nodejs", "npm"}, YumPackages: []string{"nodejs", "npm"},
-		SelectVersion:  true,
-		Versions:       []string{"22", "20", "18"},
-		VersionDefault: "20",
-		Remarks:        "默认安装 Node 20；如需多版本请安装下方 Node 多版本",
+		Hidden:        true,
+		SelectVersion: true,
+		Versions:      []string{"22", "20", "18"},
+		Remarks:       "该应用已停止提供安装，请安装带版本号的 Node 多版本",
 	},
 	{
 		Key: "python3", Name: "Python3", Category: CatRuntime, SubCategory: SubLangPython, Icon: "TrendCharts",
@@ -301,20 +324,20 @@ fi
 		Service: "", VersionCmd: "python3 -V",
 		AptPackages:    []string{"python3", "python3-pip", "python3-venv"},
 		YumPackages:    []string{"python3", "python3-pip"},
+		Hidden:         true,
 		SelectVersion:  true,
 		Versions:       []string{"3.12", "3.11", "3.10"},
-		VersionDefault: "3.12",
-		Remarks:        "默认安装 Python 3.12；如需多版本请安装下方 Python 多版本",
+		Remarks:        "该应用已停止提供安装，请安装带版本号的 Python 多版本",
 	},
 	{
 		Key: "golang", Name: "Golang", Category: CatRuntime, SubCategory: SubLangGolang, Icon: "Cpu",
 		Description: "Go 语言工具链（go + gofmt），适合编译型后端服务",
 		Service:     "", VersionCmd: "go version",
 		AptPackages: []string{"golang-go"}, YumPackages: []string{"golang"},
-		SelectVersion:  true,
-		Versions:       []string{"1.23", "1.22", "1.21"},
-		VersionDefault: "1.23",
-		Remarks:        "默认安装 Go 1.23；如需多版本请安装下方 Go 多版本",
+		Hidden:        true,
+		SelectVersion: true,
+		Versions:      []string{"1.23", "1.22", "1.21"},
+		Remarks:       "该应用已停止提供安装，请安装带版本号的 Go 多版本",
 	},
 	{
 		Key: "java", Name: "Java (OpenJDK)", Category: CatRuntime, SubCategory: SubLangJava, Icon: "Coffee",
@@ -356,6 +379,7 @@ type remoteApp struct {
 	Versions            string `json:"versions"`
 	VersionDefault      string `json:"version_default"`
 	SystemDefault       bool   `json:"system_default"`
+	Channels            string `json:"channels"` // 多源下载渠道（官网 App.Channels，每行一个 URL 模板）
 	Sort                int    `json:"sort"`
 }
 
@@ -384,7 +408,20 @@ func (r *remoteApp) toAppMeta() AppMeta {
 		Versions:            splitAppCSV(r.Versions),
 		VersionDefault:      r.VersionDefault,
 		SystemDefault:       r.SystemDefault,
+		Channels:            splitAppLines(r.Channels),
 	}
+}
+
+// splitAppLines 把多行渠道文本切成非空行
+func splitAppLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // splitAppCSV 把逗号分隔字符串切成非空切片
@@ -630,7 +667,15 @@ func allAppMetas() []AppMeta {
 		localByKey[m.Key] = m
 	}
 	merged := make([]AppMeta, 0, len(remote))
+	// 远程列表按 key 去重：官网后台应用表若出现重复登记（同一应用两条记录），
+	// 面板侧不能跟着显示两个一模一样的应用——已安装列表会出现重复项、无法区分。
+	// 只保留第一条，其余同 key 项丢弃；seen 同时复用于后续 LocalOnly / DB 记录补回。
+	seen := make(map[string]bool, len(remote)+len(appMetas))
 	for _, r := range remote {
+		if seen[r.Key] {
+			continue
+		}
+		seen[r.Key] = true
 		if local, ok := localByKey[r.Key]; ok {
 			// 本地专属应用（LocalOnly）官网 seed 中即便存在也应以本地完整配置为准，
 			// 否则远程数据会覆盖 InstalledActions、Description、Remarks 等前端展示字段。
@@ -657,18 +702,41 @@ func allAppMetas() []AppMeta {
 			if local.Service != "" {
 				r.Service = local.Service
 			}
+			// apt 卸载逻辑字段同样以本地为准：官网 seed 数据里没有这些字段，
+			// 若远程 postgresql 应用缺 AptRemovePatterns，卸载时只会 remove 元包
+			// postgresql（实际未安装）导致"假成功/残留"。
+			if len(local.AptRemovePatterns) > 0 {
+				r.AptRemovePatterns = local.AptRemovePatterns
+			}
+			if len(local.AptFallbackPackages) > 0 {
+				r.AptFallbackPackages = local.AptFallbackPackages
+			}
+			if local.AptFallbackService != "" {
+				r.AptFallbackService = local.AptFallbackService
+			}
 		}
 		merged = append(merged, r)
 	}
 	// 本地专属应用（LocalOnly）始终显示，不依赖官网商店列表。
 	// 官网下架逻辑不受影响（仅 LocalOnly 应用会被补回，普通应用仍以远程为准）。
-	seen := make(map[string]bool, len(merged))
-	for _, m := range merged {
-		seen[m.Key] = true
-	}
 	for _, m := range appMetas {
 		if m.LocalOnly && !seen[m.Key] {
 			merged = append(merged, m)
+		}
+	}
+	// 已安装应用兜底：官网下架/删除 meta 后，已通过面板安装（含安装中/卸载中/失败）
+	// 的应用不能凭空消失——否则「已安装」列表消失、服务无法启停、应用无法卸载。
+	// 用本地内置 meta 补回（这些 meta 定义里含卸载脚本/服务名等逻辑字段），
+	// 展示层再按 Hidden + 是否已安装决定是否出现在「可安装」列表。
+	if recs, err := model.ListActiveAppRecords(); err == nil {
+		for _, rec := range recs {
+			if seen[rec.Key] {
+				continue
+			}
+			if local, ok := localByKey[rec.Key]; ok {
+				merged = append(merged, local)
+				seen[rec.Key] = true
+			}
 		}
 	}
 	return merged

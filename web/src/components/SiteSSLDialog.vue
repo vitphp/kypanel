@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     :title="`SSL 证书 - ${site?.name || ''}`"
-    width="680px"
+    width="900px"
     @update:model-value="$emit('update:modelValue', $event)"
     @opened="onOpen"
   >
@@ -50,15 +50,15 @@
         <span class="ssl-tip">为新域名申请 Let's Encrypt / LiteSSL 免费证书</span>
         <el-button type="success" :disabled="!certbotOk" @click="openApplyNew">申请新证书</el-button>
       </div>
-      <el-table :data="certList" size="small" stripe style="margin-top: 16px" v-loading="certListLoading">
-        <el-table-column prop="name" label="证书名" min-width="140" show-overflow-tooltip />
-        <el-table-column label="域名" min-width="180">
+      <el-table :data="certList" size="small" stripe style="margin-top: 16px" v-loading="certListLoading" class="ssl-cert-table">
+        <el-table-column prop="name" label="证书名" min-width="160" show-overflow-tooltip />
+        <el-table-column label="域名" min-width="240">
           <template #default="{ row }">
             <el-tag v-for="d in row.domains.slice(0, 2)" :key="d" size="small" style="margin-right: 4px">{{ d }}</el-tag>
             <span v-if="row.domains.length > 2" style="color: #909399; font-size: 12px">+{{ row.domains.length - 2 }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="品牌" width="110">
+        <el-table-column label="品牌" width="120">
           <template #default="{ row }">
             <el-tag v-if="row.brand === 'letsencrypt'" type="success" size="small">Let's Encrypt</el-tag>
             <el-tag v-else-if="row.brand === 'litessl'" type="primary" size="small">LiteSSL</el-tag>
@@ -70,11 +70,13 @@
             <el-tag :type="row.days <= 7 ? 'danger' : row.days <= 30 ? 'warning' : 'success'" size="small">{{ row.days }} 天</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" align="center" fixed="right">
+        <el-table-column label="操作" width="120" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" link type="primary" @click="deployCert(row)">部署</el-button>
-            <el-button size="small" link type="primary" @click="downloadCert(row)">下载</el-button>
-            <el-button size="small" link type="danger" @click="deleteCert(row)">删除</el-button>
+            <span class="ssl-ops">
+              <el-button size="small" link type="primary" @click="deployCert(row)">部署</el-button>
+              <el-button size="small" link type="primary" @click="downloadCert(row)">下载</el-button>
+              <el-button size="small" link type="danger" @click="deleteCert(row)">删除</el-button>
+            </span>
           </template>
         </el-table-column>
       </el-table>
@@ -528,5 +530,9 @@ function copyText(text) {
   font-size: 12px;
   color: #909399;
   margin-top: 2px;
+}
+/* 操作列按钮间距归零 */
+:deep(.ssl-ops .el-button + .el-button) {
+  margin-left: 0;
 }
 </style>

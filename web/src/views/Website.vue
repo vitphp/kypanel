@@ -57,9 +57,25 @@
           <el-button type="primary" size="large" :loading="installingNginx" @click="installNginx">
             <el-icon><Download /></el-icon> 一键安装 {{ nginxEnv?.name || 'Web 服务器' }}
           </el-button>
+          <el-button size="large" :loading="envChecking" @click="forceRecheckEnv">
+            <el-icon><Refresh /></el-icon>&nbsp;重新检测环境
+          </el-button>
           <p v-if="installingNginx" class="installing-hint">安装进行中，请稍候...</p>
         </div>
       </div>
+
+      <!-- 运行时环境安装中遮罩（PHP / Python / Go / Node）：安装时显示进度，覆盖「未检测到」 -->
+      <div v-else-if="isInstallingCurrentRuntime" class="env-missing" style="margin-top: 12px;">
+        <div class="env-missing-inner">
+          <el-icon :size="48" color="#409eff"><Warning /></el-icon>
+          <h3>正在安装 {{ currentInstallingLabel }}...</h3>
+          <p v-if="isCurrentRuntimeQueued">排队等待中，请稍候...（可在右下角「安装中心」查看实时日志）</p>
+          <p v-else>安装进行中，请稍候...（可在右下角「安装中心」查看实时日志）</p>
+        </div>
+      </div>
+
+      <!-- 环境/列表检测中：切 tab 或刷新时先显示骨架屏，状态查清后再渲染「未检测到」或列表 -->
+      <Skeleton v-else-if="envChecking || loading" type="table" :rows="8" :columns="[{width:'60px'},{width:'160px'},{flex:1},{width:'140px'},{width:'140px'},{width:'200px'}]" />
 
       <!-- 运行时环境未安装遮罩提示（PHP / Python / Go / Node） -->
       <div v-else-if="runtimeMissing" class="env-missing" style="margin-top: 12px;">
@@ -92,13 +108,12 @@
             <el-icon><Download /></el-icon>
             {{ runtimeInstallKey.length === 0 ? '请先选择要安装的版本' : `一键安装${runtimeInstallKey.length > 1 ? ` (${runtimeInstallKey.length})` : ''}` }}
           </el-button>
-          <p v-if="isInstallingCurrentRuntime" class="installing-hint">
-            正在安装 {{ currentInstallingLabel }}...
-          </p>
+          <el-button size="large" :loading="envChecking" @click="forceRecheckEnv">
+            <el-icon><Refresh /></el-icon>&nbsp;重新检测环境
+          </el-button>
         </div>
       </div>
 
-      <Skeleton v-else-if="loading" type="table" :rows="8" :columns="[{width:'60px'},{width:'160px'},{flex:1},{width:'140px'},{width:'140px'},{width:'200px'}]" />
       <el-table v-else :data="filteredSites" empty-text="该分类下暂无网站，点击右上角创建">
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column label="名称" width="180">
@@ -241,7 +256,7 @@
         <template v-if="form.type === 'static'">
           <el-form-item label="根目录" prop="root">
             <el-input v-model="form.root" :placeholder="rootPlaceholder" />
-            <span class="tip">默认 /www/wwwroot/&lt;域名第一段&gt;</span>
+            <span class="tip">默认 /www/wwwroot/&lt;完整域名&gt;</span>
           </el-form-item>
         </template>
 
@@ -257,7 +272,7 @@
           </el-form-item>
           <el-form-item label="根目录" prop="root">
             <el-input v-model="form.root" :placeholder="rootPlaceholder" />
-            <span class="tip">默认 /www/wwwroot/&lt;域名第一段&gt;</span>
+            <span class="tip">默认 /www/wwwroot/&lt;完整域名&gt;</span>
           </el-form-item>
 
           <el-divider content-position="left">可选：创建数据库</el-divider>
@@ -477,7 +492,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument, Files } from '@element-plus/icons-vue'
+import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument, Files, Refresh } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import SiteSettings from './SiteSettings.vue'
 import SiteStatDialog from '../components/SiteStatDialog.vue'
@@ -496,6 +511,10 @@ const sites = ref([])
 const settingsRef = ref()
 const logsRef = ref()
 const loading = ref(true)
+// 环境检测中（切 tab / 安装完成后重查状态）：与 loading 一样显示骨架屏
+const envChecking = ref(false)
+// 全局安装任务 store：用于监听运行时安装/卸载完成，实时刷新本页环境状态
+const tracker = useInstallTrackerStore()
 // 统计弹窗状态
 const statVisible = ref(false)
 const statSiteId = ref(0)
@@ -566,21 +585,8 @@ const runtimeInstallKey = computed(() => {
   // 默认不选中任何版本，只安装用户明确勾选的版本
   return selectedRuntimeVersion.value
 })
-// 当前 Tab 是否正在安装某个运行时版本（仅用于按钮 loading 显示）。
-// 语义独立于「勾选的版本」：只要 installing 非空且属于当前 Tab 的 runtime key 即视为安装中，
-// 避免与 runtimeInstallKey（勾选版本）耦合，杜绝「未装 PHP 却显示加载中」的竞态残留。
-const isInstallingCurrentRuntime = computed(() => {
-  if (!installing.value) return false
-  const keys = runtimeAppKey[activeTab.value]
-  if (!keys) return false
-  return keys.includes(installing.value)
-})
-// 当前正在装的 key 对应的中文标签（用于多选装多个时提示进度）
-const currentInstallingLabel = computed(() => {
-  if (!installing.value) return ''
-  const meta = envStatusMap.value[installing.value]
-  return meta?.name || installing.value
-})
+// 当前 Tab 运行时安装/排队状态（isInstallingCurrentRuntime / currentInstallingLabel / isCurrentRuntimeQueued）
+// 已移至 runtimeAppKey 之后定义，见下方「运行时安装状态（含排队）」区块。
 // 弹窗宽度 / label 对齐方式：根据视口响应式（移动端避免超出屏幕）
 const isMobile = ref(false)
 const dialogWidth = computed(() => isMobile.value ? '92vw' : '620px')
@@ -610,6 +616,36 @@ const runtimeAppKey = {
   go: ['golang', 'go119', 'go120', 'go121', 'go122', 'go123', 'go124', 'go125']
 }
 
+// 当前 Tab 是否有运行时任务正在安装或排队中（基于 /apps/list 实时状态，含 queued）。
+// 作为「安装中/排队中」遮罩与按钮 loading 的实时数据源，避免只依赖本地 installing 标记
+// 导致排队(queued)状态在刷新页面后丢失遮罩。
+const activeRuntimeTask = computed(() => {
+  const keys = runtimeAppKey[activeTab.value]
+  if (!keys) return null
+  const keyArray = Array.isArray(keys) ? keys : [keys]
+  return (runtimes.value || []).find(a =>
+    keyArray.includes(a.key) && (a.status === 'installing' || a.status === 'queued')
+  ) || null
+})
+// 当前 Tab 是否正在安装某个运行时版本（用于遮罩与按钮 loading 显示）。
+// 实时状态（含排队 queued）优先，本地 installing 标记兜底。
+const isInstallingCurrentRuntime = computed(() => {
+  if (activeRuntimeTask.value) return true
+  if (!installing.value) return false
+  const keys = runtimeAppKey[activeTab.value]
+  if (!keys) return false
+  return keys.includes(installing.value)
+})
+// 当前正在装的 key 对应的中文标签（用于多选装多个时提示进度）
+const currentInstallingLabel = computed(() => {
+  const key = activeRuntimeTask.value?.key || installing.value
+  if (!key) return ''
+  const meta = envStatusMap.value[key]
+  return meta?.name || key
+})
+// 当前运行时任务是否处于排队中（区别于真正 installing），用于遮罩文案区分
+const isCurrentRuntimeQueued = computed(() => activeRuntimeTask.value?.status === 'queued')
+
 // activeTab 对应的运行时环境 key 和状态
 // 支持多版本：如果任一版本已安装则返回聚合状态
 const currentRuntimeEnv = computed(() => {
@@ -633,14 +669,13 @@ const currentRuntimeVersions = computed(() => {
   return keyArray.map(k => {
     const meta = envStatusMap.value[k]
     if (!meta) return null
-    // 系统发行版自带的 runtime（php / python3 / golang / nodejs）卸载会破坏系统组件，
-    // 不显示「卸载」按钮，避免误操作
-    const systemDefaultKeys = ['php', 'python3', 'golang', 'nodejs']
+    // 系统发行版自带的 runtime（source=system，即 DB 无面板安装记录但系统里实际存在）
+    // 卸载会破坏系统组件，不显示「卸载」按钮；面板安装的（source=panel）都可卸载。
     return {
       key: k,
       name: meta.name,
       installed: meta.installed,
-      uninstallable: !systemDefaultKeys.includes(k),
+      uninstallable: meta.source !== 'system',
       version: meta.version,
       versions: meta.versions,
       versionDefault: meta.version_default,
@@ -658,6 +693,11 @@ const runtimeMissing = computed(() => {
   if (!['php', 'python', 'go', 'node'].includes(activeTab.value)) return null
   const keys = runtimeAppKey[activeTab.value]
   const keyArray = Array.isArray(keys) ? keys : [keys]
+
+  // 已有该类型运行中的站点 → 环境实际可用（站点跑起来说明运行时真实存在，
+  // 可能来自系统自带或用户自行安装的版本），不再显示「未检测到」遮罩。
+  // 避免"站点明明在跑、页面却提示未检测到环境"的矛盾。
+  if (sites.value.some(s => s.type === activeTab.value && s.status === 'running')) return null
 
   // Python / Node / Go 的系统默认运行时（python3 / nodejs / golang）不算"已安装"
   // 创建网站需要面板管理的多版本环境
@@ -715,6 +755,9 @@ const filteredSites = computed(() => {
 function onTabChange() {
   localStorage.setItem(TAB_STORAGE_KEY, activeTab.value)
   loadSites()
+  // 切 tab 立即重新检测环境状态：先显示骨架屏，查清后再显示「未检测到」或正常列表，
+  // 避免切换类型后仍残留上一个 tab 的旧环境快照。
+  reloadEnv()
 
   // 切换到 PHP/Python/Go/Node 等需要选择版本的运行时而当前未安装时，
   // 如果用户还没有勾选任何版本，自动为他选中第一个推荐版本，避免
@@ -815,9 +858,9 @@ const frameworkHint = computed(() => {
 
 // ====== 创建网站辅助：根目录/数据库/FTP 自动填充 & 安装检测 ======
 
-// 域名（如 "vltphp.n.05v.cn" → "vltphp"）作为网站目录前缀。
-// domain 可能形如 "host:port"（剥端口），含中文/特殊字符 → 仅保留 [a-z0-9-_]，
-// 若最终为空则回退到 fallback（站点名），再次为空则回退 "site"。
+// 域名首段（如 "vltphp.n.05v.cn" → "vltphp"），用于数据库名 / FTP 用户名
+// （这类标识符不允许含 "."）。domain 可能形如 "host:port"（剥端口），
+// 含中文/特殊字符 → 仅保留 [a-z0-9-_]，若最终为空则回退到 fallback。
 function sanitizeDomainPrefix(domain, fallback) {
   let name = (fallback || '').trim()
   if (domain) {
@@ -830,15 +873,30 @@ function sanitizeDomainPrefix(domain, fallback) {
   return cleaned || 'site'
 }
 
+// 网站目录名：统一使用完整域名（保留 "."），避免同前缀不同域名（如
+// a.example.com / a.other.com）的站点目录冲突。
+// "*.example.com" → "example.com"，"127.0.0.1:8899" → "127.0.0.1"。
+function siteDirFromDomain(domain, fallback) {
+  let name = (fallback || '').trim()
+  if (domain) {
+    let d = domain.trim().split(':')[0]
+    d = d.replace(/^\*\./, '').toLowerCase().trim()
+    if (d) name = d
+  }
+  let cleaned = name.replace(/[^a-z0-9-_.]/gi, '').toLowerCase()
+  cleaned = cleaned.replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '')
+  return cleaned || 'site'
+}
+
 // 根目录预览：基于当前 domain / name
 const rootPreview = computed(() => {
-  return '/www/wwwroot/' + sanitizeDomainPrefix(form.domain, form.name)
+  return '/www/wwwroot/' + siteDirFromDomain(form.domain, form.name)
 })
 // root 当前是不是由我们自动推断？用户手动改过则视为"已锁定"，不再覆盖
 const rootAuto = ref(false)
 // root 字段 placeholder：让用户清楚默认推断规则
 const rootPlaceholder = computed(() =>
-  `留空默认 ${rootPreview.value}（根据域名截取，或未填域名回退到站点名）`
+  `留空默认 ${rootPreview.value}（按完整域名，或未填域名回退到站点名）`
 )
 
 // n 位 [a-z0-9] 随机串（用于 db 名 / ftp 用户名后缀）
@@ -960,36 +1018,23 @@ async function quickInstall(keyOrKeys, label) {
     return
   }
 
-  // 启动 watchdog：拉到 installed 装下一个；拉到 failed 终止；连续 90s 状态一直 installing 且无变化 → 报警
+  // 启动 watchdog：拉到 installed 装下一个；拉到 failed / 被后端判为异常中止则提示失败。
+  // 不设固定"卡死时长"报警：慢安装（下载大、编译久）是正常的，靠固定时长只会误报吓用户。
+  // 后端 GhostWatcher 每 30 秒核查安装是否真的异常（任务丢失且无 apt/dpkg 进程才重置），
+  // 真正出问题时状态会变成 failed / not_installed，前端据此提示即可。
   installing.value = activeKey
-  let lastStatus = ''
-  let stuckSince = Date.now()
   const watchTimer = setInterval(async () => {
     try {
       const res = await request.get('/apps/list')
       const apps = res.data || []
       const app = apps.find((a) => a.key === activeKey)
       if (!app) return
-      // 状态变化 → 重置 stuck 计时
-      if (app.status !== lastStatus) {
-        lastStatus = app.status
-        stuckSince = Date.now()
-      }
-      // 卡死检测：连续 90 秒状态停在同一个 installing 不动 → 后端可能 ghost
-      if (app.status === 'installing' && Date.now() - stuckSince > 90000) {
-        clearInterval(watchTimer)
-        installing.value = ''
-        ElMessage.warning(`${activeKey} 安装状态长时间未变化，可能后台已异常，请到应用商店查看`)
-        return
-      }
       if (app.status === 'installed') {
         // 当前版本装完 -> 装下一个
         const idx = keyList.indexOf(activeKey)
         if (idx >= 0 && idx < keyList.length - 1) {
           activeKey = keyList[idx + 1]
           installing.value = activeKey
-          lastStatus = ''
-          stuckSince = Date.now()
           try {
             const payload = { key: activeKey }
             const meta = envStatusMap.value[activeKey]
@@ -1017,7 +1062,12 @@ async function quickInstall(keyOrKeys, label) {
       } else if (app.status === 'failed') {
         clearInterval(watchTimer)
         installing.value = ''
-        ElMessage.error(`${activeKey} 安装失败，请查看日志`)
+        ElMessage.error(`${activeKey} 安装失败：${app.error || '请查看安装日志'}`)
+      } else if (app.status === 'not_installed') {
+        // 后端 ghost 检测判定安装已异常中止（任务丢失/进程消失）或服务重启中断
+        clearInterval(watchTimer)
+        installing.value = ''
+        ElMessage.error(`${activeKey} 安装已中止：${app.error || '后台任务异常，请重新尝试'}`)
       }
     } catch (e) {}
   }, 3000)
@@ -1029,11 +1079,15 @@ async function resumePendingInstalls(apps) {
   try {
     // 复用 loadRuntimes 已拉取的 /apps/list 结果，避免重复请求
     const list = apps || runtimes.value || []
-    // 只接管「真正正在安装」的任务（installing）；failed 是已失败，不该再显示 loading。
-    // 且只关注运行时环境类 key（php*/python*/node*/go*），避免无关应用的失败记录触发按钮加载态。
-    const runtimeKeys = new Set(Object.values(runtimeAppKey).flat())
+    // 接管「正在安装」与「排队中」的任务（installing / queued）；failed 是已失败，不该再显示 loading。
+    // 关注运行时环境类 key（php*/python*/node*/go*）+ 数据库/FTP（mysql/mariadb/ftp），
+    // 避免无关应用的记录触发按钮加载态。
+    const runtimeKeys = new Set([
+      ...Object.values(runtimeAppKey).flat(),
+      'mysql', 'mariadb', 'ftp'
+    ])
     const pending = list.filter(a => {
-      if (a.status !== 'installing') return false
+      if (a.status !== 'installing' && a.status !== 'queued') return false
       if (!runtimeKeys.has(a.key)) return false
       const env = envStatusMap.value[a.key]
       return env && !env.installed
@@ -1044,23 +1098,13 @@ async function resumePendingInstalls(apps) {
     }
     const activeKey = pending[0].key
     installing.value = activeKey
-    let lastStatus = ''
-    let stuckSince = Date.now()
     const watchTimer = setInterval(async () => {
       try {
         const r = await request.get('/apps/list')
         const arr = r.data || []
         const app = arr.find(a => a.key === activeKey)
         if (!app) return
-        if (app.status !== lastStatus) {
-          lastStatus = app.status
-          stuckSince = Date.now()
-        }
-        if (app.status === 'installing' && Date.now() - stuckSince > 90000) {
-          clearInterval(watchTimer)
-          installing.value = ''
-          return
-        }
+        // installing / queued → 继续等待（后端 GhostWatcher 每 30s 核查是否真异常，慢安装不误判）
         if (app.status === 'installed') {
           clearInterval(watchTimer)
           installing.value = ''
@@ -1069,7 +1113,12 @@ async function resumePendingInstalls(apps) {
         } else if (app.status === 'failed') {
           clearInterval(watchTimer)
           installing.value = ''
-          ElMessage.error(`${activeKey} 安装失败，请查看日志`)
+          ElMessage.error(`${activeKey} 安装失败：${app.error || '请查看安装日志'}`)
+        } else if (app.status === 'not_installed') {
+          // 后端 ghost 检测判定安装已异常中止（任务丢失/进程消失）或服务重启中断
+          clearInterval(watchTimer)
+          installing.value = ''
+          ElMessage.error(`${activeKey} 安装已中止：${app.error || '后台任务异常，请重新尝试'}`)
         }
       } catch (e) {}
     }, 3000)
@@ -1090,6 +1139,57 @@ async function refreshEnvStatus() {
   await loadRuntimes()
 }
 
+// 重新检测环境状态（切 tab / 安装完成后触发）。检测期间 envChecking=true 显示骨架屏。
+async function reloadEnv() {
+  envChecking.value = true
+  try {
+    await Promise.all([loadEnvStatus(), loadRuntimes()])
+  } finally {
+    envChecking.value = false
+  }
+}
+
+// 手动「重新检测环境」（遮罩按钮）：env-status 后端有 TTL 缓存，
+// 用户手动安装/卸载（绕过面板）后点此按钮，强制后端重新探测并刷新页面状态。
+async function forceRecheckEnv() {
+  envChecking.value = true
+  try {
+    await request.post('/apps/env-status/refresh')
+    await Promise.all([loadEnvStatus(), loadRuntimes()])
+  } finally {
+    envChecking.value = false
+  }
+}
+
+// 监听全局安装任务：运行时（php/python/go/node）安装/卸载完成时，立即刷新本页环境状态，
+// 让「未检测到环境」遮罩瞬间切换成正常列表，避免安装成功后仍卡在旧状态。
+// InstallFloater 常驻轮询 /apps/tasks + /apps/list 并把状态写回 store，这里只做「终态到达」的边沿检测。
+let lastRuntimeTaskStatus = {}
+watch(
+  () => tracker.tasks,
+  (tasks) => {
+    const runtimeKeys = new Set(Object.values(runtimeAppKey).flat())
+    const snapshot = {}
+    let needRefresh = false
+    for (const t of tasks || []) {
+      snapshot[t.key] = t.status
+      if (!runtimeKeys.has(t.key)) continue
+      const prev = lastRuntimeTaskStatus[t.key]
+      const finished = ['installed', 'uninstalled', 'failed'].includes(t.status)
+      // 从非终态 -> 终态（完成/失败/已卸载）才算一次「状态瞬间更新」的触发点
+      if (finished && prev && prev !== t.status && !['installed', 'uninstalled', 'failed'].includes(prev)) {
+        needRefresh = true
+      }
+    }
+    lastRuntimeTaskStatus = snapshot
+    if (needRefresh) {
+      // 延迟一小拍，避开 InstallFloater 同轮状态写回造成的不必要请求抖动
+      setTimeout(() => reloadEnv(), 300)
+    }
+  },
+  { deep: true }
+)
+
 // 卸载运行环境
 async function uninstallRuntime(ver) {
   try {
@@ -1101,6 +1201,10 @@ async function uninstallRuntime(ver) {
   } catch { return }
   try {
     await request.post('/apps/uninstall', { key: ver.key })
+    // 写入全局任务队列，右下角浮窗立即显示（与 AppStore 一致）
+    const tracker = useInstallTrackerStore()
+    tracker.unmarkRemoved(ver.key) // 用户主动触发：先清除"被移除"标记
+    tracker.upsert({ key: ver.key, name: ver.name, action: 'uninstall', status: 'uninstalling', message: '正在卸载...' })
     ElMessage.success('卸载已提交')
     await loadEnvStatus()
     await loadRuntimes()
@@ -1713,6 +1817,10 @@ onBeforeUnmount(() => {
   margin-top: 12px;
   color: #409eff;
   font-size: 13px;
+}
+.installing-hint.installing-sub {
+  margin-top: 4px;
+  color: #909399;
 }
 
 /* 删除网站弹窗 */

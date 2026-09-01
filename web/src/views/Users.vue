@@ -31,8 +31,8 @@
               <template #default="{ row }">
                 <div class="ops-cell">
                   <template v-if="row.can_delete">
-                    <el-button v-if="row.role_id !== 0" link type="primary" size="small" @click="editRole(row)">改角色</el-button>
-                    <el-button v-if="row.role_id !== 0" link type="warning" size="small" @click="resetPwd(row)">重置密码</el-button>
+                    <el-button link type="primary" size="small" @click="editRole(row)">改角色</el-button>
+                    <el-button link type="warning" size="small" @click="resetPwd(row)">重置密码</el-button>
                     <el-button link type="danger" size="small" @click="removeUser(row)">删除</el-button>
                   </template>
                   <el-tag v-else-if="row.is_founder" type="success" size="small">创始用户</el-tag>

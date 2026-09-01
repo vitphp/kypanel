@@ -135,6 +135,19 @@
           </template>
 
           <template v-if="site.type === 'node' || site.type === 'python' || site.type === 'go'">
+            <el-form-item label="运行版本">
+              <el-select v-model="form.runtime_version" style="width: 100%" placeholder="选择运行版本">
+                <el-option v-for="o in runtimeEnvVersions[site.type] || []" :key="o.value" :label="o.label" :value="o.value" />
+                <template v-if="!(runtimeEnvVersions[site.type] || []).length">
+                  <el-option label="未检测到已安装的版本，请先在应用商店安装" value="" disabled />
+                </template>
+              </el-select>
+              <!-- 存量站点迁移：站点当前运行版本未安装 → 警告并引导重新选择 -->
+              <span v-if="runtimeVersionMissing" class="tip warn" style="display: block; margin-top: 4px;">
+                当前运行版本「{{ form.runtime_version }}」未检测到已安装，网站可能无法启动。
+                请在应用商店安装该版本，或在此重新选择已安装的版本后保存。
+              </span>
+            </el-form-item>
             <el-form-item label="项目端口">
               <el-input-number v-model="form.proxy_port" :min="1" :max="65535" />
               <span class="tip">反代到 127.0.0.1:{{ form.proxy_port }}</span>
@@ -382,6 +395,16 @@ const saving = ref(false)
 const savingConfig = ref(false)
 const phpFpms = ref([])
 const runtimeDirOptions = ref([{ label: '使用网站目录', value: '' }])
+// 运行时多版本（node / python / go）已安装版本列表，供「运行版本」下拉选择。
+// 用于存量站点迁移：升级后站点 runtime_version 可能对应当前未安装的版本，
+// 此时展示警告并允许重新选择已安装版本。
+const runtimeEnvVersions = ref({}) // { python: [{value:'Python 3.13', label:'Python 3.13'}], node: [...], go: [...] }
+const runtimeVersionMissing = computed(() => {
+  const t = site.value.type
+  if (!['python', 'node', 'go'].includes(t)) return false
+  if (!form.runtime_version) return false
+  return !(runtimeEnvVersions.value[t] || []).some(o => o.value === form.runtime_version)
+})
 
 // 目录选择器
 const dirPickerVisible = ref(false)
@@ -527,6 +550,7 @@ function open(id, tab = null) {
     loadSiteDirs()
   })
   loadPhpFpms()
+  loadRuntimeVersions()
 }
 
 function loadDetail(id) {
@@ -622,6 +646,25 @@ function loadPhpFpms() {
     phpFpms.value = res.data || []
     deriveRuntimeVersion()
   }).catch(() => {})
+}
+
+// 加载已安装的运行时多版本（node / python / go），用于「运行版本」下拉
+function loadRuntimeVersions() {
+  request.get('/apps/env-status').then((res) => {
+    const data = res.data || {}
+    const map = { python: [], node: [], go: [] }
+    for (const [key, meta] of Object.entries(data)) {
+      if (!meta || !meta.installed) continue
+      let t = ''
+      if (key.startsWith('python')) t = 'python'
+      else if (key.startsWith('node')) t = 'node'
+      else if (key.startsWith('go')) t = 'go'
+      else continue
+      const label = meta.name || key
+      map[t].push({ value: label, label })
+    }
+    runtimeEnvVersions.value = map
+  }).catch(() => { /* 静默：版本下拉为空时仅影响编辑时的可选性 */ })
 }
 
 function loadRuntimeDirOptions() {
@@ -1032,6 +1075,7 @@ defineExpose({ open })
 <style scoped>
 .setting-form { margin-top: 8px; }
 .tip { margin-left: 8px; font-size: 12px; color: #909399; line-height: 1.4; }
+.tip.warn { color: #e6a23c; margin-left: 0; }
 /* Nginx 代码编辑器样式已抽到 components/CodeEditor.vue */
 .config-hint { color: #909399; font-size: 12px; margin-right: auto; }
 .action-bar { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }

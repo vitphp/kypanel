@@ -275,7 +275,9 @@ function onUpdateClick() {
 
 // 更新进度 UI
 function updateUpgradeUI(d) {
-  if (d?.phase) upgradePhase.value = d.phase
+  // 面板重启后新进程的 phase 会重置为 idle/空，此时不要覆盖当前 rebooting 状态，
+  // 否则下方「rebooting -> idle」兜底判断会失效，页面永远停在「重启中」不刷新。
+  if (d?.phase && d.phase !== 'idle') upgradePhase.value = d.phase
   if (d?.message) upgradeMessage.value = d.message
   if (d?.phase === 'downloading') {
     if (d.total > 0) {

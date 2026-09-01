@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +77,9 @@ func (c *BTClient) btRequestRaw(class, action string, params url.Values) ([]byte
 		params = url.Values{}
 	}
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	// action 同时写进 POST body：URL query 里虽有 ?action=xxx，但部分面板版本
+	// 只从 POST body 取 action，缺失时会报「没有在模型中找到指定模块」。
+	params.Set("action", action)
 	params.Set("request_token", btMD5(ts+btMD5(c.ApiSK)))
 	params.Set("request_time", ts)
 	bodyStr := params.Encode()
@@ -116,6 +120,13 @@ func (c *BTClient) btRequestRaw(class, action string, params url.Values) ([]byte
 			}
 			continue // 404 → 尝试另一种 API 格式
 		}
+		// 「模块不存在」往往也是路径风格不匹配导致（legacy 的 /class?action=
+		// 与 new 的 /api/class/action 并不等价），切换风格再试一次，
+		// 避免整条迁移链在这一步中断。
+		if btIsModuleNotFound(body) {
+			lastErr = fmt.Errorf("对端面板接口失败: %s", btErrMsg(body))
+			continue
+		}
 		c.cacheAPIStyle(style)
 		return body, nil
 	}
@@ -141,6 +152,28 @@ func (c *BTClient) cacheAPIStyle(style string) {
 	if c.apiStyle == "" {
 		c.apiStyle = style
 	}
+}
+
+// btIsModuleNotFound 判断响应是否为「模块不存在」类错误。
+// 这类错误多为路径风格不匹配（legacy 的 /class?action= 与 new 的 /api/class/action），
+// 切换风格重试即可；真正的业务失败（如数据库已存在）不算。
+func btIsModuleNotFound(body []byte) bool {
+	if bytes.Contains(body, []byte(`"status":true`)) || bytes.Contains(body, []byte(`"status": true`)) {
+		return false // 成功响应
+	}
+	return bytes.Contains(body, []byte("没有在模型中找到指定模块")) ||
+		bytes.Contains(body, []byte(`\u6ca1\u6709\u5728\u6a21\u578b\u4e2d\u627e\u5230\u6307\u5b9a\u6a21\u5757`))
+}
+
+// btErrMsg 从错误响应体中取出 msg 字段，取不到则返回原文
+func btErrMsg(body []byte) string {
+	var m struct {
+		Msg string `json:"msg"`
+	}
+	if json.Unmarshal(body, &m) == nil && m.Msg != "" {
+		return m.Msg
+	}
+	return strings.TrimSpace(string(body))
 }
 
 // btRequest 通用请求：POST form 到 /<class>?action=<action>
@@ -251,6 +284,16 @@ func (c *BTClient) PHPVersionList() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 先识别 {"status": false, "msg": "..."} 这类错误响应：
+	// 否则下面的兜底解析会把错误对象当成空列表成功返回，
+	// 导致环境预检误判成「目标面板已装所需 PHP」，迁移才会在中途失败。
+	var errObj struct {
+		Status bool   `json:"status"`
+		Msg    string `json:"msg"`
+	}
+	if json.Unmarshal(body, &errObj) == nil && !errObj.Status && errObj.Msg != "" {
+		return nil, errors.New("对端面板接口失败: " + errObj.Msg)
+	}
 	extract := func(v any) string {
 		switch t := v.(type) {
 		case string:
@@ -311,16 +354,24 @@ func (c *BTClient) PHPVersionList() ([]string, error) {
 // ---------------- 数据库 ----------------
 
 // AddDatabase 在对端面板创建数据库
+//
+// 参数严格按对端面板新版 UI 实际提交的 AddDatabase 表单补齐：
+//   dtype 必填，缺省会「创建成功但不写入面板数据库列表」——这就是之前
+//   php666 在 MySQL 里真实存在、面板 UI 却不显示、需手动「同步数据库」的原因。
+//   dataAccess / listen_ip / host 为新版面板新增字段，一并带上保证兼容。
 func (c *BTClient) AddDatabase(name, user, password string) (map[string]any, error) {
-	// 参数名严格按对端面板官方 AddDatabase 接口：
-	// name / db_user / password / address / codeing / sid
 	params := url.Values{}
 	params.Set("name", name)
 	params.Set("db_user", user)
 	params.Set("password", password)
-	params.Set("address", "%")
+	params.Set("dataAccess", "127.0.0.1")
+	params.Set("address", "127.0.0.1")
 	params.Set("codeing", "utf8mb4")
+	params.Set("dtype", "MySQL")
+	params.Set("ps", "由 kypanel 网站搬家迁入")
 	params.Set("sid", "0")
+	params.Set("listen_ip", "0.0.0.0/0")
+	params.Set("host", "")
 	return c.btRequest("database", "AddDatabase", params)
 }
 
@@ -340,12 +391,177 @@ func (c *BTClient) DatabaseList() ([]map[string]any, error) {
 	return btParseDataList(res)
 }
 
-// ImportDatabase 导入 SQL 到对端面板指定数据库（id 为数据库 ID，sqlPath 为对端面板服务器上的 SQL 文件路径）
-func (c *BTClient) ImportDatabase(dbID string, sqlPath string) (map[string]any, error) {
+// ImportDatabase 导入 SQL 到对端面板指定数据库（服务端路径方式）。
+// dbID 为 databases 表记录 ID；dbName 为数据库名；sqlPath 为对端面板服务器上已存在的 SQL 文件路径。
+// 对端 InputSql 接口必填参数为 name 与 file（只传 id+file_name 会依次报「缺少参数！name / file」）。
+func (c *BTClient) ImportDatabase(dbID, dbName, sqlPath string) (map[string]any, error) {
 	params := url.Values{}
 	params.Set("id", dbID)
-	params.Set("file_name", sqlPath)
+	params.Set("name", dbName)
+	params.Set("file", sqlPath)
+	params.Set("sid", "0")
 	return c.btRequest("database", "InputSql", params)
+}
+
+// ImportDatabaseFile 以「本地上传」方式导入 SQL：把本地 SQL 文件内容 multipart 上传给对端 InputSql，
+// 由对端面板自行保存并执行导入，绕开对端不同版本对 file 参数路径解析不一致的问题
+// （实测相对路径报「导入路径不存在!」、绝对路径报「数据库导入包含异常」，
+// 均因对端新版 InputSql 对 file 的解析与旧版不同）。
+func (c *BTClient) ImportDatabaseFile(dbID, dbName, localSQL string) (map[string]any, error) {
+	f, err := os.Open(localSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("id", dbID)
+	_ = mw.WriteField("name", dbName)
+	_ = mw.WriteField("sid", "0")
+	_ = mw.WriteField("codeing", "utf8")
+	fw, err := mw.CreateFormFile("file", filepath.Base(localSQL))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return nil, err
+	}
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	_ = mw.WriteField("request_time", ts)
+	_ = mw.WriteField("request_token", btMD5(ts+btMD5(c.ApiSK)))
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+	payload := body.Bytes()
+	contentType := mw.FormDataContentType()
+
+	var lastErr error
+	for _, style := range c.apiStyleOrder() {
+		var u string
+		if style == "new" {
+			u = fmt.Sprintf("%s/api/database/InputSql", c.BaseURL)
+		} else {
+			u = fmt.Sprintf("%s/database?action=InputSql", c.BaseURL)
+		}
+		slog.Info("对端面板API请求(multipart InputSql)", "url", u, "style", style, "db", dbName)
+		req, err := http.NewRequest("POST", u, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("User-Agent", "kypanel-migrate/1.0")
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("请求对端面板失败: %w", err)
+		}
+		rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		resp.Body.Close()
+		if rerr != nil {
+			return nil, rerr
+		}
+		slog.Info("对端面板API响应", "url", u, "status", resp.StatusCode, "body", truncateLog(strings.TrimSpace(string(rb)), 500))
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("对端面板返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+			if !strings.Contains(lastErr.Error(), "HTTP 404") {
+				return nil, lastErr
+			}
+			continue // 404 → 尝试另一种 API 格式
+		}
+		if btIsModuleNotFound(rb) {
+			lastErr = fmt.Errorf("对端面板接口失败: %s", btErrMsg(rb))
+			continue
+		}
+		c.cacheAPIStyle(style)
+		var m map[string]any
+		if err := json.Unmarshal(rb, &m); err != nil {
+			return nil, fmt.Errorf("对端面板响应解析失败: %s", truncateLog(strings.TrimSpace(string(rb)), 300))
+		}
+		if ok, exists := m["status"].(bool); exists && !ok {
+			msg, _ := m["msg"].(string)
+			return nil, fmt.Errorf("对端面板接口失败: %s", msg)
+		}
+		return m, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("对端面板请求失败: database/InputSql")
+}
+
+// ImportStatus 获取对端面板当前数据库导入状态（database?action=GetImportStatus）
+func (c *BTClient) ImportStatus() (map[string]any, error) {
+	return c.btRequest("database", "GetImportStatus", nil)
+}
+
+// ImportLog 获取对端面板数据库导入日志文本（database?action=GetImportLog）
+func (c *BTClient) ImportLog() (string, error) {
+	body, err := c.btRequestRaw("database", "GetImportLog", nil)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
+// ReadFile 读取对端面板服务器上文件内容（files?action=GetFileBody）
+func (c *BTClient) ReadFile(path string) (map[string]any, error) {
+	params := url.Values{}
+	params.Set("path", path)
+	return c.btRequest("files", "GetFileBody", params)
+}
+
+// ---------------- 站点配置（迁出到对端面板后补齐） ----------------
+// 这些接口只通过官方 API 修改对端面板的站点配置，不直接写 nginx/apache 配置文件。
+// 对端面板（宝塔）的站点配置由它自己生成，直接搬运 kypanel 的配置片段会因语法
+// 与结构差异导致 web 服务器校验失败（典型：a duplicate default server for 0.0.0.0:80）。
+
+// SetSiteRunPath 设置对端面板网站的运行目录（/site?action=SetSiteRunPath）。
+// id: 网站 ID；runPath: 相对网站根目录的路径，"/" 表示根目录，"/public" 表示根下的 public。
+func (c *BTClient) SetSiteRunPath(siteID, runPath string) error {
+	params := url.Values{}
+	params.Set("id", siteID)
+	params.Set("runPath", runPath)
+	_, err := c.btRequest("site", "SetSiteRunPath", params)
+	return err
+}
+
+// SetSSL 为对端面板网站部署自定义 SSL 证书（/site?action=SetSSL）。
+// siteName 传网站主域名；key 为私钥 PEM，csr 为证书 PEM（需保留换行符）。
+func (c *BTClient) SetSSL(siteName, key, csr string) error {
+	params := url.Values{}
+	params.Set("siteName", siteName)
+	params.Set("key", key)
+	params.Set("csr", csr)
+	_, err := c.btRequest("site", "SetSSL", params)
+	return err
+}
+
+// HttpToHttps 开启对端面板网站的 HTTP → HTTPS 强制跳转（/site?action=HttpToHttps）。
+func (c *BTClient) HttpToHttps(siteName string) error {
+	params := url.Values{}
+	params.Set("siteName", siteName)
+	_, err := c.btRequest("site", "HttpToHttps", params)
+	return err
+}
+
+// ApplyCustomRewrite 把自定义伪静态规则直接写入对端面板的站点 rewrite 配置文件。
+// 路径：/www/server/panel/vhost/rewrite/<siteName>.conf（宝塔 nginx 站点配置默认 include 的路径）。
+// 写入后宝塔在面板 UI 里能看到内容；用户重启 nginx 或在宝塔里点保存都会重新加载。
+//
+// 旧实现走的是 /site?action=SetRewriteTel + /site?action=SetRewriteLists 两条链路，
+// 但 SetRewriteLists 的 rewrite_data 是宝塔内置模板名（wordpress / thinkphp 等），
+// 传自定义模板名会被静默忽略——这是之前「伪静态在宝塔里没添加上」的真实原因。
+func (c *BTClient) ApplyCustomRewrite(siteName, ruleContent string) error {
+	confPath := "/www/server/panel/vhost/rewrite/" + siteName + ".conf"
+	params := url.Values{}
+	params.Set("path", confPath)
+	params.Set("data", ruleContent)
+	// 宝塔 SaveFileBody 必须显式传 encoding，否则报 FILE_SAVE_ERR
+	// 且错误为 'dict_obj' object has no attribute 'encoding'
+	params.Set("encoding", "utf-8")
+	_, err := c.btRequest("files", "SaveFileBody", params)
+	return err
 }
 
 // ---------------- FTP ----------------
@@ -486,8 +702,9 @@ func (c *BTClient) ZipDir(sfile, dfile, zfile, zipType string) error {
 
 // DeleteFile 删除对端面板服务器上的文件（files?action=DeleteFile）
 func (c *BTClient) DeleteFile(path string) error {
+	// 注意：宝塔 files?action=DeleteFile 用的是 path 参数（name 会报「没有在模型中找到指定模块」或参数无效）
 	params := url.Values{}
-	params.Set("name", path)
+	params.Set("path", path)
 	_, err := c.btRequest("files", "DeleteFile", params)
 	return err
 }
@@ -549,6 +766,261 @@ func (c *BTClient) DatabaseBackupList(dbID string) ([]map[string]any, error) {
 	return btParseDataList(res2)
 }
 
+// BackupSiteNow 立即触发网站备份（site?action=BackupSite，参数 name=站点名）。
+func (c *BTClient) BackupSiteNow(siteName string) error {
+	params := url.Values{}
+	params.Set("name", siteName)
+	_, err := c.btRequest("site", "BackupSite", params)
+	return err
+}
+
+// WaitSiteBackup 轮询等待对端面板网站备份完成，返回备份文件的远程绝对路径。
+func (c *BTClient) WaitSiteBackup(siteName string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if p := c.NewestSiteBackup(siteName); p != "" {
+			return p, nil
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return "", errors.New("等待对端面板网站备份超时")
+}
+
+// btRemoteFile 对端面板目录中的文件条目
+type btRemoteFile struct {
+	Name    string `json:"nm"`
+	Size    int64  `json:"sz"`
+	ModTime int64  `json:"mt"`
+}
+
+// ListDir 列对端面板服务器目录（files?action=GetDirNew），返回文件与子目录名。
+// 宝塔 backup 表 id 与站点/数据库 id 无关（按主键查会拿到全表），
+// 且 getData 的 type/search 参数在新版面板不可靠，因此直接列文件系统目录最稳妥。
+func (c *BTClient) ListDir(path string) (files []btRemoteFile, dirs []string, err error) {
+	params := url.Values{}
+	params.Set("path", path)
+	body, err := c.btRequestRaw("files", "GetDirNew", params)
+	if err != nil {
+		return nil, nil, err
+	}
+	var m struct {
+		Files []btRemoteFile `json:"files"`
+		Dirs  []struct {
+			Nm string `json:"nm"`
+		} `json:"dir"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, nil, fmt.Errorf("解析对端面板目录列表失败: %w", err)
+	}
+	for _, d := range m.Dirs {
+		dirs = append(dirs, d.Nm)
+	}
+	return m.Files, dirs, nil
+}
+
+// newestBackupInDir 取目录中最新（按修改时间）且匹配指定后缀的非空备份文件完整路径
+func (c *BTClient) newestBackupInDir(dir string, suffixes ...string) string {
+	files, _, err := c.ListDir(dir)
+	if err != nil {
+		return ""
+	}
+	best := ""
+	var bestMt int64
+	for _, f := range files {
+		if f.Size <= 0 {
+			continue
+		}
+		lower := strings.ToLower(f.Name)
+		matched := false
+		for _, s := range suffixes {
+			if strings.HasSuffix(lower, s) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if f.ModTime > bestMt {
+			bestMt = f.ModTime
+			best = f.Name
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	return filepath.Join(dir, best)
+}
+
+// NewestSiteBackup 返回对端面板网站目录下最新的 .tar.gz 网站备份完整路径
+// （宝塔网站备份固定位于 /www/backup/site/<站点名>/，文件名 <站点名>_<时间戳>.tar.gz）
+func (c *BTClient) NewestSiteBackup(siteName string) string {
+	return c.newestBackupInDir(filepath.Join("/www/backup/site", siteName), ".tar.gz")
+}
+
+// NewestDBBackup 返回对端面板数据库目录下最新的数据库备份完整路径
+// （宝塔手动备份在 /www/backup/database/mysql/<库名>/，旧版本在 /www/backup/database/<库名>/）
+func (c *BTClient) NewestDBBackup(dbName string) string {
+	for _, dir := range []string{
+		filepath.Join("/www/backup/database/mysql", dbName),
+		filepath.Join("/www/backup/database", dbName),
+	} {
+		if p := c.newestBackupInDir(dir, ".sql.gz", ".sql.zip", ".sql"); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// CopyFile 在对端面板服务器上复制文件（files?action=CopyFile，sfile/dfile）
+func (c *BTClient) CopyFile(sfile, dfile string) error {
+	params := url.Values{}
+	params.Set("sfile", sfile)
+	params.Set("dfile", dfile)
+	_, err := c.btRequest("files", "CopyFile", params)
+	return err
+}
+
+// ReadRemoteFile 读取对端面板服务器上文本文件内容（files?action=GetFileBody）
+func (c *BTClient) ReadRemoteFile(path string) (string, error) {
+	params := url.Values{}
+	params.Set("path", path)
+	res, err := c.btRequest("files", "GetFileBody", params)
+	if err != nil {
+		return "", err
+	}
+	// 返回 {"status":true,"data":"..."} 或直接 data 字段
+	if v, ok := res["data"].(string); ok {
+		return v, nil
+	}
+	return "", errors.New("读取对端面板文件失败")
+}
+
+// GetSiteWebRoot 解析对端面板站点 nginx 配置中的 root 目录（用于临时放置可下载文件）
+func (c *BTClient) GetSiteWebRoot(domain string) string {
+	conf, err := c.ReadRemoteFile("/www/server/panel/vhost/nginx/" + domain + ".conf")
+	if err != nil {
+		return ""
+	}
+	// GetFileBody 返回的 JSON 中换行是转义字面量（\n），先还原成真实换行再解析
+	conf = strings.ReplaceAll(conf, "\\n", "\n")
+	re := regexp.MustCompile(`(?m)^\s*root\s+([^;#\s]+)`)
+	if m := re.FindStringSubmatch(conf); len(m) > 1 {
+		root := strings.TrimSpace(m[1])
+		if root != "" && strings.HasPrefix(root, "/") {
+			return root
+		}
+	}
+	return ""
+}
+
+// btSiteConfServerNames 解析对端面板站点 nginx 配置中的 server_name 列表
+// （部分站点记录里 domain 字段为空或为数字，需从配置里取真实域名用于文件直链）
+func (c *BTClient) btSiteConfServerNames(domain string) []string {
+	conf, err := c.ReadRemoteFile("/www/server/panel/vhost/nginx/" + domain + ".conf")
+	if err != nil {
+		return nil
+	}
+	conf = strings.ReplaceAll(conf, "\\n", "\n")
+	re := regexp.MustCompile(`(?m)^\s*server_name\s+([^;]+)`)
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(conf, -1) {
+		for _, d := range strings.Fields(m[1]) {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				out = append(out, d)
+			}
+		}
+	}
+	return out
+}
+
+// DownloadViaWeb 从对端面板传输文件（单域名版，内部走 DownloadViaWebCandidates）
+func (c *BTClient) DownloadViaWeb(remotePath, domain, dest string) error {
+	return c.DownloadViaWebCandidates(remotePath, []string{domain}, dest)
+}
+
+// DownloadViaWebCandidates 从对端面板传输文件：把远程文件复制到候选站点 web 根目录，
+// 通过站点 HTTPS 直链下载到本地（兼容宝塔新版无下载 API 的面板）。
+// 逐个候选域名尝试：获取该域名站点根目录 → CopyFile → HEAD 探测 → 断点续传下载，
+// 避免单个域名（如站内 API 域名）不可公网访问导致整个迁移中断。
+func (c *BTClient) DownloadViaWebCandidates(remotePath string, domains []string, dest string) error {
+	if len(domains) == 0 {
+		return errors.New("无可用的对端传输域名")
+	}
+	tmpName := "kypanel_" + btMD5(remotePath)[:12] + ".bin"
+	var tried []string
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		webRoot := c.GetSiteWebRoot(domain)
+		if webRoot == "" {
+			tried = append(tried, domain+":无站点配置")
+			continue
+		}
+		tmpPath := strings.TrimRight(webRoot, "/") + "/" + tmpName
+		if err := c.CopyFile(remotePath, tmpPath); err != nil {
+			tried = append(tried, domain+":复制失败")
+			continue
+		}
+		u := "https://" + domain + "/" + tmpName
+		if !probeURL(u) {
+			tried = append(tried, domain+":不可访问")
+			_ = c.DeleteFile(tmpPath)
+			continue
+		}
+		// 清理临时文件失败只告警，不影响迁移结果
+		defer func(p string) {
+			if err := c.DeleteFile(p); err != nil {
+				slog.Warn("清理对端面板临时文件失败（可到对端面板手动删除）", "path", p, "err", err)
+			}
+		}(tmpPath)
+		return resumeDownloadHTTP(u, dest)
+	}
+	return fmt.Errorf("对端面板临时文件不可访问（已尝试 %v）", tried)
+}
+
+// probeURL 探测对端站点 HTTPS 直链是否可访问（跳过证书校验，兼容自签名证书）
+func probeURL(u string) bool {
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, err := client.Head(u)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent
+}
+
+// btBackupRemotePath 从备份记录中提取远程完整路径：优先 filename（完整路径），
+// 其次用 name + 默认备份目录。
+func btBackupRemotePath(b map[string]any) string {
+	if p := toStr(b["filename"]); p != "" {
+		return p
+	}
+	if n := toStr(b["name"]); n != "" {
+		return filepath.Join("/www/backup/site", n)
+	}
+	return ""
+}
+
+// btDBBackupRemotePath 提取数据库备份远程完整路径
+func btDBBackupRemotePath(b map[string]any) string {
+	if p := toStr(b["filename"]); p != "" {
+		return p
+	}
+	if n := toStr(b["name"]); n != "" {
+		return filepath.Join("/www/backup/database", n)
+	}
+	return ""
+}
+
 // FtpUserList 获取对端面板 FTP 账号列表（/data?action=getData&table=ftps）
 func (c *BTClient) FtpUserList() ([]map[string]any, error) {
 	params := url.Values{}
@@ -562,7 +1034,21 @@ func (c *BTClient) FtpUserList() ([]map[string]any, error) {
 		}
 		res = res2
 	}
-	return btParseDataList(res)
+	list, err := btParseDataList(res)
+	if err != nil {
+		return nil, err
+	}
+	// 归一化字段：宝塔 ftps 表用户名字段为 name（部分接口为 username），
+	// 统一填充为 username，并兜底 path，避免上层按 username 解析时全部为空。
+	for _, item := range list {
+		if toStr(item["username"]) == "" {
+			item["username"] = item["name"]
+		}
+		if toStr(item["path"]) == "" {
+			item["path"] = item["dir"]
+		}
+	}
+	return list, nil
 }
 
 // DownloadFile 从对端面板服务器下载文件（files?action=Download）到本地 destPath。

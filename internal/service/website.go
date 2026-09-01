@@ -101,6 +101,8 @@ type CreateSiteReq struct {
 	Root      string `json:"root"` // 静态/PHP 根目录 或 python/node/go 项目路径
 	ProxyPass string `json:"proxy_pass"`
 	Remark    string `json:"remark"`
+	// 伪静态（迁入时同步源面板的 rewrite 规则）
+	Rewrite string `json:"rewrite"`
 
 	// PHP / 运行环境公共
 	RuntimeVersion string `json:"runtime_version"` // PHP 版本（如 PHP 8.2）/ Python 3.11 / Node 18 / Go 1.22
@@ -495,6 +497,12 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 
 	// 根目录 + 默认文档（静态 / PHP）
 	root := s.Root
+	if strings.TrimSpace(root) == "" {
+		// 兜底：反代类站点（node/python/go/proxy）若因历史数据未落 Root 字段，
+		// 下面 .well-known 块会输出 "root ;" 空参数指令，导致 nginx -t 校验失败、
+		// 进而拖垮该站点所有配置写入。回退到默认页目录保证配置始终合法。
+		root = DefaultPagesDir()
+	}
 	if model.IsRootType(s.Type) {
 		if rd := strings.TrimSpace(s.RuntimeDir); rd != "" {
 			root = filepath.Join(root, strings.Trim(rd, "/"))
@@ -763,15 +771,7 @@ func ensureRuntime(t string, runtimeVersion string) error {
 		}
 	case model.SiteTypePython:
 		if runtimeVersion != "" {
-			v := strings.TrimPrefix(runtimeVersion, "Python ")
-			// 尝试 pyenv 路径
-			pyenvBin := filepath.Join(os.Getenv("HOME"), ".pyenv", "versions", v, "bin", "python"+v)
-			if _, err := os.Stat(pyenvBin); err == nil {
-				return nil
-			}
-			// 尝试 /usr/local/python<ver>
-			localBin := "/usr/local/python" + v + "/bin/python" + v
-			if _, err := os.Stat(localBin); err == nil {
+			if findRuntimeBinDir(model.SiteTypePython, normalizeRuntimeVersion(runtimeVersion)) != "" {
 				return nil
 			}
 		}
@@ -780,16 +780,7 @@ func ensureRuntime(t string, runtimeVersion string) error {
 		}
 	case model.SiteTypeNode:
 		if runtimeVersion != "" {
-			v := strings.TrimPrefix(runtimeVersion, "Node ")
-			// 尝试 nvm 路径
-			nvmPattern := filepath.Join(os.Getenv("HOME"), ".nvm", "versions", "node", "v"+v+".*", "bin", "node")
-			matches, _ := filepath.Glob(nvmPattern)
-			if len(matches) > 0 {
-				return nil
-			}
-			// 尝试 /usr/local/node<ver>
-			localBin := "/usr/local/node" + v + "/bin/node"
-			if _, err := os.Stat(localBin); err == nil {
+			if findRuntimeBinDir(model.SiteTypeNode, normalizeRuntimeVersion(runtimeVersion)) != "" {
 				return nil
 			}
 		}
@@ -798,10 +789,7 @@ func ensureRuntime(t string, runtimeVersion string) error {
 		}
 	case model.SiteTypeGo:
 		if runtimeVersion != "" {
-			v := strings.TrimPrefix(runtimeVersion, "Go ")
-			// 尝试 /usr/local/go<ver>
-			localBin := "/usr/local/go" + v + "/bin/go"
-			if _, err := os.Stat(localBin); err == nil {
+			if findRuntimeBinDir(model.SiteTypeGo, normalizeRuntimeVersion(runtimeVersion)) != "" {
 				return nil
 			}
 		}
@@ -812,7 +800,9 @@ func ensureRuntime(t string, runtimeVersion string) error {
 	return nil
 }
 
-// runtimeVersionOf 检测本机已安装的运行环境版本
+// runtimeVersionOf 检测本机已安装的运行环境版本。
+// 输出统一归一化为「前缀 + 主.次版本」（如 "Python 3.13"、"Node 20.19"、"Go 1.24"），
+// 保证 ensureRuntime / writeSiteService 解析一致，不再出现 "go1.24.4" / "Node v20.19.2" 等格式混杂。
 func runtimeVersionOf(t string) string {
 	switch t {
 	case model.SiteTypePHP:
@@ -820,26 +810,89 @@ func runtimeVersionOf(t string) string {
 		if err == nil && res.ExitCode == 0 {
 			fields := strings.Fields(res.Stdout)
 			if len(fields) >= 2 && strings.HasPrefix(fields[0], "PHP") {
-				return fields[0] + " " + fields[1]
+				if v := normalizeRuntimeVersion(fields[1]); v != "" {
+					return "PHP " + v
+				}
 			}
 		}
 	case model.SiteTypePython:
 		res, err := ExecCommand("python3 --version", 15*time.Second)
 		if err == nil && res.ExitCode == 0 {
-			return strings.TrimSpace(res.Stdout)
+			if v := normalizeRuntimeVersion(strings.TrimSpace(res.Stdout)); v != "" {
+				return "Python " + v
+			}
 		}
 	case model.SiteTypeNode:
 		res, err := ExecCommand("node -v", 15*time.Second)
 		if err == nil && res.ExitCode == 0 {
-			return "Node " + strings.TrimSpace(res.Stdout)
+			if v := normalizeRuntimeVersion(strings.TrimSpace(res.Stdout)); v != "" {
+				return "Node " + v
+			}
 		}
 	case model.SiteTypeGo:
 		res, err := ExecCommand("go version", 15*time.Second)
 		if err == nil && res.ExitCode == 0 {
 			fields := strings.Fields(res.Stdout)
 			if len(fields) >= 3 {
-				return fields[2]
+				if v := normalizeRuntimeVersion(fields[2]); v != "" {
+					return "Go " + v
+				}
 			}
+		}
+	}
+	return ""
+}
+
+// normalizeRuntimeVersion 从任意格式的版本描述中提取主.次版本号（如 "20.19"）。
+// 兼容 "Node v20.19.2"、"go1.24.4"、"Python 3.13.5"、"PHP 8.2.33"、"Node 20" 等写法。
+func normalizeRuntimeVersion(raw string) string {
+	m := regexp.MustCompile(`(\d+)\.(\d+)`).FindStringSubmatch(strings.TrimSpace(raw))
+	if len(m) >= 3 {
+		return m[1] + "." + m[2]
+	}
+	return strings.TrimSpace(raw)
+}
+
+// findRuntimeBinDir 定位指定类型、主.次版本运行时的 bin 目录（供 PATH 注入 / 环境校验）。
+// 兼容各版本实际安装位置的差异，全部用 glob 模糊匹配：
+//   - Node:   $HOME/.nvm/versions/node/v20.*/bin、/usr/local/node20*/bin
+//   - Python: $HOME/.pyenv/versions/3.13.*/bin（pyenv 目录是完整补丁号 3.13.15，必须 glob）、/usr/local/python3.13*/bin
+//   - Go:     /usr/local/go1.24*/bin
+//
+// 家目录候选包含 $HOME 与 /root：面板以 systemd 服务运行时曾存在未注入 HOME 的历史部署，
+// 导致 pyenv 装到了 /.pyenv，这里一并兜底兼容。
+func findRuntimeBinDir(t, v string) string {
+	if v == "" {
+		return ""
+	}
+	mainVer := strings.SplitN(v, ".", 2)[0]
+	homes := make([]string, 0, 2)
+	if h := os.Getenv("HOME"); h != "" {
+		homes = append(homes, h)
+	}
+	homes = append(homes, "/root")
+	switch t {
+	case model.SiteTypeNode:
+		for _, h := range homes {
+			if matches, _ := filepath.Glob(filepath.Join(h, ".nvm", "versions", "node", "v"+v+".*", "bin")); len(matches) > 0 {
+				return matches[0]
+			}
+		}
+		if matches, _ := filepath.Glob("/usr/local/node" + mainVer + "*/bin"); len(matches) > 0 {
+			return matches[0]
+		}
+	case model.SiteTypePython:
+		for _, h := range homes {
+			if matches, _ := filepath.Glob(filepath.Join(h, ".pyenv", "versions", v+".*", "bin")); len(matches) > 0 {
+				return matches[0]
+			}
+		}
+		if matches, _ := filepath.Glob("/usr/local/python" + mainVer + "*/bin"); len(matches) > 0 {
+			return matches[0]
+		}
+	case model.SiteTypeGo:
+		if matches, _ := filepath.Glob("/usr/local/go" + v + "*/bin"); len(matches) > 0 {
+			return matches[0]
 		}
 	}
 	return ""
@@ -861,32 +914,22 @@ func writeSiteService(s *model.Site) error {
 	}
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\n")
-	// 根据 RuntimeVersion 设置对应版本的环境变量
+	// 根据 RuntimeVersion 设置对应版本的环境变量（版本统一归一化为主.次格式，路径 glob 模糊匹配）
 	if s.RuntimeVersion != "" {
 		switch s.Type {
 		case model.SiteTypeNode:
-			v := strings.TrimPrefix(s.RuntimeVersion, "Node ")
-			// nvm 路径
-			nvmPattern := filepath.Join(os.Getenv("HOME"), ".nvm", "versions", "node", "v"+v+".*", "bin")
-			matches, _ := filepath.Glob(nvmPattern)
-			if len(matches) > 0 {
-				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", matches[0])
-			} else if _, err := os.Stat("/usr/local/node" + v + "/bin/node"); err == nil {
-				fmt.Fprintf(&sb, "export PATH=\"/usr/local/node%s/bin:$PATH\"\n", v)
+			if bin := findRuntimeBinDir(model.SiteTypeNode, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
+				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
 			}
 		case model.SiteTypePython:
-			v := strings.TrimPrefix(s.RuntimeVersion, "Python ")
-			pyenvBin := filepath.Join(os.Getenv("HOME"), ".pyenv", "versions", v, "bin")
-			if _, err := os.Stat(pyenvBin); err == nil {
-				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", pyenvBin)
-			} else if _, err := os.Stat("/usr/local/python" + v); err == nil {
-				fmt.Fprintf(&sb, "export PATH=\"/usr/local/python%s/bin:$PATH\"\n", v)
+			if bin := findRuntimeBinDir(model.SiteTypePython, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
+				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
 			}
 		case model.SiteTypeGo:
-			v := strings.TrimPrefix(s.RuntimeVersion, "Go ")
-			if _, err := os.Stat("/usr/local/go" + v); err == nil {
-				fmt.Fprintf(&sb, "export PATH=\"/usr/local/go%s/bin:$PATH\"\n", v)
-				fmt.Fprintf(&sb, "export GOROOT=\"/usr/local/go%s\"\n", v)
+			if bin := findRuntimeBinDir(model.SiteTypeGo, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
+				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
+				// GOROOT = bin 目录的上一级（如 /usr/local/go1.24）
+				fmt.Fprintf(&sb, "export GOROOT=\"%s\"\n", filepath.Dir(bin))
 			}
 		}
 	}
@@ -1082,10 +1125,53 @@ func writeSiteConfAndReload(s *model.Site) error {
 	return webReload()
 }
 
-// sanitizeDomainPrefix 提取域名（如 "vltphp.n.05v.cn" → "vltphp"）作为网站目录前缀。
-// domain 可能形如 "host:port"（剥端口），可能含中文/特殊字符 → 仅保留 [a-z0-9-_]，
+// siteDirFromDomain 根据域名推断网站目录名，统一使用完整域名（保留 "."）。
+// 例如 "vltphp.n.05v.cn" → "vltphp.n.05v.cn"，"127.0.0.1:8899" → "127.0.0.1"，
+// "*.example.com" → "example.com"。域名可能含中文/特殊字符 → 仅保留 [a-z0-9-_.]，
 // 若最终为空则回退到 fallback（站点名），再次为空则回退 "site"。
-func sanitizeDomainPrefix(domain, fallback string) string {
+// 说明：完整域名作为目录名可避免同前缀不同域名（如 a.example.com / a.other.com）
+// 的站点目录冲突；数据库名/FTP 用户名不能含 "."，仍用域名首段（见 domainPrefixOf）。
+func siteDirFromDomain(domain, fallback string) string {
+	name := strings.TrimSpace(fallback)
+	if d := strings.TrimSpace(domain); d != "" {
+		// 形如 host:port → 只取 host
+		if i := strings.IndexAny(d, ":"); i >= 0 {
+			d = d[:i]
+		}
+		// 通配符绑定：*.example.com → example.com
+		d = strings.TrimPrefix(strings.TrimSpace(d), "*.")
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" {
+			name = d
+		}
+	}
+	// 仅保留 [a-z0-9-_.]，滤掉其他字符，保证作为目录名安全
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_' || r == '.':
+			return r
+		default:
+			return -1
+		}
+	}, name)
+	// 清理首尾点与连续点，避免出现 ".example" / "example..com" 这类不友好目录
+	cleaned = strings.Trim(cleaned, ".")
+	for strings.Contains(cleaned, "..") {
+		cleaned = strings.ReplaceAll(cleaned, "..", ".")
+	}
+	if cleaned == "" {
+		return "site"
+	}
+	return cleaned
+}
+
+// domainPrefixOf 提取域名首段（如 "vltphp.n.05v.cn" → "vltphp"），
+// 用于数据库名 / FTP 用户名这类不允许含 "." 的标识符生成。
+func domainPrefixOf(domain, fallback string) string {
 	name := strings.TrimSpace(fallback)
 	if d := strings.TrimSpace(domain); d != "" {
 		// 形如 host:port → 只取 host
@@ -1101,7 +1187,7 @@ func sanitizeDomainPrefix(domain, fallback string) string {
 			name = d
 		}
 	}
-	// 仅保留 [a-z0-9-_]，滤掉其他字符，保证作为目录名安全
+	// 仅保留 [a-z0-9-_]
 	cleaned := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z':
@@ -1167,6 +1253,7 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		Port:            req.Port,
 		Type:            req.Type,
 		Remark:          req.Remark,
+		Rewrite:         req.Rewrite,
 		RuntimeVersion:  strings.TrimSpace(req.RuntimeVersion),
 		StartCommand:    strings.TrimSpace(req.StartCommand),
 		EnvVars:         strings.TrimSpace(req.EnvVars),
@@ -1204,10 +1291,10 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 	case model.IsRootType(s.Type):
 		// 静态 / PHP：确定根目录并创建
 		// 不填写 Root 时，按以下顺序自动推断：
-		//   1) 域名第一个 "." 前的内容（用户意图）
+		//   1) 完整域名（如 a.example.com → /www/wwwroot/a.example.com）
 		//   2) 站点名（兜底）
 		if req.Root == "" {
-			s.Root = filepath.Join(webRootBase, sanitizeDomainPrefix(req.Domain, s.Name))
+			s.Root = filepath.Join(webRootBase, siteDirFromDomain(req.Domain, s.Name))
 		} else {
 			s.Root = strings.TrimRight(req.Root, "/")
 		}
@@ -1265,6 +1352,18 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 			return nil, errors.New("反向代理类型需要填写代理目标，如 http://127.0.0.1:8080")
 		}
 		s.ProxyPass = strings.TrimRight(strings.TrimSpace(req.ProxyPass), "/")
+		// 反代站点同样需要站点根目录：Let's Encrypt 的 HTTP-01 验证目录
+		// （/.well-known/）落在站点 root 下，Root 为空会让生成的 nginx 配置
+		// 出现 "root ;" 空参数指令，nginx -t 校验失败导致站点根本创建不出来。
+		if req.Root == "" {
+			s.Root = filepath.Join(webRootBase, siteDirFromDomain(req.Domain, s.Name))
+		} else {
+			s.Root = strings.TrimRight(req.Root, "/")
+		}
+		if err := os.MkdirAll(s.Root, 0o755); err != nil {
+			return nil, errors.New("创建站点目录失败: " + err.Error())
+		}
+		_ = ChownToWebUser(s.Root, true)
 	}
 
 	// PHP / 静态站点：未指定默认文档时自动填充系统默认值

@@ -169,7 +169,8 @@ const sortedTasks = computed(() => {
     const ao = order[a.status] ?? 5
     const bo = order[b.status] ?? 5
     if (ao !== bo) return ao - bo
-    return (b.startedAt || 0) - (a.startedAt || 0)
+    // 同一状态组内按入队时间正序（先点安装的排上面，与串行执行顺序一致）
+    return (a.startedAt || 0) - (b.startedAt || 0)
   })
   return list
 })
@@ -223,6 +224,8 @@ let prevHadActive = false
 let sawTransition = false
 // 全部成功完成后的「5 秒自动隐藏」定时器
 let autoHideTimer = null
+// ghost 判定宽限：记录任务「疑似失联」的连续轮询次数，避免 ListApps 缓存竞态导致的一次性误判为「已暂停」
+const stallSeen = new Map()
 
 function stopSyncTimer() {
   if (syncTimer) {
@@ -297,42 +300,75 @@ async function syncTasks() {
         version: t.version || '',
         status,
         message,
+        startedAt: t.started_at || 0, // 用后端真实入队时间作为排序基准，避免本地 Date.now() 与刷新场景顺序不一致
       })
     }
 
     // 2) 本 store 里的任务：根据 /apps/list 终态收尾
     const statusOf = (k) => list.find((a) => a.key === k)?.status || ''
     let anyFinishedNow = false
+    const endedKeys = new Set() // 本轮刚收尾（完成/失败/暂停）的任务，用于自动切换右侧日志
     for (const t of [...tasks.value]) {
       if (t.paused) continue
       if (t.finishedAt) continue
       const cur = statusOf(t.key)
       const isBackendActive = backendTasks.some((b) => b.key === t.key)
-      if (isBackendActive) continue
+      if (isBackendActive) {
+        stallSeen.delete(t.key)
+        continue
+      }
       if (t.status === 'installing' || t.status === 'queued') {
         if (cur === 'installed') {
           tracker.upsert({ key: t.key, name: t.name, action: 'install', version: t.version, status: 'installed', message: '安装完成' })
           anyFinishedNow = true
+          endedKeys.add(t.key)
+          stallSeen.delete(t.key)
         } else if (cur === 'failed') {
           tracker.upsert({ key: t.key, name: t.name, action: 'install', version: t.version, status: 'failed', message: list.find((a) => a.key === t.key)?.error || '安装失败' })
           anyFinishedNow = true
+          endedKeys.add(t.key)
+          stallSeen.delete(t.key)
         } else if ((cur === 'not_installed' || cur === 'installing') && !t.paused && t.status !== 'queued') {
-          // 被取消/手动中断，或 DB 状态残留为 installing 但后端已无此任务（ghost）→ 暂停，
-          // 避免浮窗永远显示「安装中 N」无法收尾
-          tracker.markPaused(t.key)
+          // 被取消/手动中断，或 DB 状态残留为 installing 但后端已无此任务（ghost）→ 暂停。
+          // 需连续两轮都失联才判定，避免 ListApps 缓存竞态（安装刚完成但列表仍短暂返回 installing）误判。
+          const n = (stallSeen.get(t.key) || 0) + 1
+          if (n >= 2) {
+            tracker.markPaused(t.key)
+            endedKeys.add(t.key)
+            stallSeen.delete(t.key)
+          } else {
+            stallSeen.set(t.key, n)
+          }
         }
       } else if (t.status === 'uninstalling') {
         if (cur === 'not_installed' || cur === '') {
           tracker.upsert({ key: t.key, name: t.name, action: 'uninstall', status: 'uninstalled', message: '卸载完成' })
           anyFinishedNow = true
+          endedKeys.add(t.key)
+          stallSeen.delete(t.key)
         } else if (cur === 'failed') {
           tracker.upsert({ key: t.key, name: t.name, action: 'uninstall', status: 'failed', message: '卸载失败' })
           anyFinishedNow = true
+          endedKeys.add(t.key)
+          stallSeen.delete(t.key)
         } else if (cur === 'uninstalling' && !t.paused) {
-          // DB 状态残留为 uninstalling 但后端已无此任务（ghost）→ 暂停
-          tracker.markPaused(t.key)
+          // DB 状态残留为 uninstalling 但后端已无此任务（ghost）→ 暂停（同样需连续两轮确认）
+          const n = (stallSeen.get(t.key) || 0) + 1
+          if (n >= 2) {
+            tracker.markPaused(t.key)
+            endedKeys.add(t.key)
+            stallSeen.delete(t.key)
+          } else {
+            stallSeen.set(t.key, n)
+          }
         }
       }
+    }
+
+    // 自动切换：当前右侧选中的任务本轮刚结束，优先切到「执行中」任务，其次「排队中」任务继续看日志
+    if (endedKeys.size && endedKeys.has(tracker.activeLogKey)) {
+      const next = tasks.value.find((x) => isRunning(x)) || tasks.value.find((x) => x.status === 'queued')
+      tracker.setActiveLogKey(next ? next.key : '')
     }
 
     // 3) 声音判断：之前有进行中 -> 现在没有 -> 全部结束（先播完音效再决定是否延迟隐藏）
@@ -425,6 +461,7 @@ async function removeTask(t) {
   if (isRunning(t) || t.status === 'queued') {
     try { await request.post('/apps/tasks/cancel', { key: t.key }) } catch (e) {}
   }
+  stallSeen.delete(t.key) // 清理失联计数，避免该 key 下次重新入队后被残留计数误判为暂停
   tracker.remove(t.key)
   ElMessage.success(`已从队列移除 ${t.name}`)
 }

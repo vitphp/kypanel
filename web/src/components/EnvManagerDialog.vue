@@ -410,6 +410,7 @@ import {
   Upload, Clock, NoSmoking, Plus
 } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { useInstallTrackerStore } from '../stores/installTracker'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -427,18 +428,24 @@ const currentVer = computed(() => props.versions.find((v) => v.name === activeVe
 
 // 一键安装：弹确认框 → 调 /apps/install { key }
 async function confirmInstall(key, name) {
+  // Python 多版本走源码编译（pyenv），耗时显著长于其他运行时，明确告知预期时长
+  const pythonTip = key.startsWith('python')
+    ? `确定要安装 ${name} 吗？\nPython 为源码编译安装，预计需要 10~20 分钟，期间请勿关闭或刷新页面。`
+    : `确定要安装 ${name} 吗？安装过程可能持续数分钟，期间请勿关闭或刷新页面。`
   try {
-    await ElMessageBox.confirm(
-      `确定要安装 ${name} 吗？安装过程可能持续数分钟，期间请勿关闭或刷新页面。`,
-      '安装环境',
-      { type: 'warning', confirmButtonText: '一键安装', cancelButtonText: '取消' }
-    )
+    await ElMessageBox.confirm(pythonTip, '安装环境', {
+      type: 'warning', confirmButtonText: '一键安装', cancelButtonText: '取消'
+    })
   } catch {
     return
   }
   busyKey.value = key
   try {
     await request.post('/apps/install', { key })
+    // 写入全局任务队列，右下角浮窗立即显示（与 AppStore 一致）
+    const tracker = useInstallTrackerStore()
+    tracker.unmarkRemoved(key) // 用户主动触发：先清除"被移除"标记
+    tracker.upsert({ key, name, action: 'install', status: 'queued', message: '排队等待中...' })
     ElMessage.success(`${name} 安装任务已启动，请稍候查看「应用商店」日志`)
     emit('refresh')
   } catch (e) {
@@ -467,6 +474,10 @@ async function confirmUninstall(key, name) {
   busyKey.value = key
   try {
     await request.post('/apps/uninstall', { key })
+    // 写入全局任务队列，右下角浮窗立即显示（与 AppStore 一致）
+    const tracker = useInstallTrackerStore()
+    tracker.unmarkRemoved(key) // 用户主动触发：先清除"被移除"标记
+    tracker.upsert({ key, name, action: 'uninstall', status: 'uninstalling', message: '正在卸载...' })
     ElMessage.success(`${name} 卸载任务已启动，请稍候查看「应用商店」日志`)
     emit('refresh')
   } catch (e) {

@@ -33,13 +33,23 @@ func (a *Admin) CheckPassword(plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(a.PasswordHash), []byte(plain)) == nil
 }
 
+// HasAnyAdmin 判断是否存在任意管理员账号
+func HasAnyAdmin() bool {
+	var count int64
+	DB.Model(&Admin{}).Count(&count)
+	return count > 0
+}
+
 // EnsureDefaultAdmin 确保至少存在一个管理员。
-// 若不存在则以配置中的默认账号创建（首次启动引导）。
+// 仅当数据库中完全没有管理员时才以配置/环境变量中的默认账号创建（首次安装引导）。
+// 注意：不能按 PANEL_ADMIN_USER 逐个查找后重建——panel.env 中会残留该环境变量
+// （stripEnvPlainPassword 只清 PANEL_ADMIN_PASS），若按用户名找，被删除的默认账号
+// 会在每次重启时被重新创建出来，导致用户管理里出现"删不掉的幽灵账号"。
 func EnsureDefaultAdmin(username, password string) (*Admin, error) {
 	var admin Admin
-	err := DB.Where("username = ?", username).First(&admin).Error
+	err := DB.Order("id asc").First(&admin).Error
 	if err == nil {
-		return &admin, nil
+		return &admin, nil // 已存在任意管理员，不再创建默认账号
 	}
 
 	admin = Admin{Username: username}

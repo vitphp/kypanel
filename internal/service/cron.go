@@ -293,6 +293,8 @@ func CronLog(cronID uint) (string, error) {
 func SyncCrontab() error {
 	// 先确保 wrapper 脚本存在，否则 cron 行无法工作
 	_ = EnsureCronWrapper()
+	// 确保 MySQL 凭据文件存在且最新，备份数据库任务通过 --defaults-extra-file 引用它
+	_ = ensureMysqlCredFile()
 	// 确保任务日志目录存在（crontab 行通过 >> 重定向写日志，crond 不会自动创建父目录）
 	_ = os.MkdirAll(cronLogDir(), 0o755)
 

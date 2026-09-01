@@ -70,6 +70,13 @@
                   <span class="setting-value">{{ info.security_entrance || '未启用' }}</span>
                   <el-button link type="primary" @click="openEntranceDialog">修改</el-button>
                 </li>
+                <li class="setting-item">
+                  <div class="setting-info">
+                    <div class="setting-title">用户体验改善计划</div>
+                    <div class="setting-desc">开启后，应用安装/卸载失败时自动上报错误信息到面板官网（仅系统与应用信息，不含任何数据），便于官方收集问题并针对性修复；关闭后不再上报</div>
+                  </div>
+                  <el-switch v-model="info.report_errors" @change="toggleReportErrors" />
+                </li>
               </ul>
             </el-card>
           </el-col>
@@ -653,6 +660,17 @@ async function loadInfo() {
   info.value = { ...info.value, ...res.data }
   // 同步面板名称到 store（顶栏实时刷新用）
   usePanelStore().setInfo(res.data)
+}
+
+// 用户体验改善计划（错误上报）开关
+async function toggleReportErrors(val) {
+  try {
+    await request.post('/settings/report', { enabled: !!val })
+    ElMessage.success(val ? '已开启用户体验改善计划，失败时将自动上报' : '已关闭用户体验改善计划，不再上报')
+  } catch (e) {
+    // 保存失败回滚开关状态
+    info.value.report_errors = !val
+  }
 }
 
 const usernameDialog = ref({ show: false, username: '', loading: false })

@@ -4,7 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +35,11 @@ type UpdateInfo struct {
 	WebURL      string `json:"web_url"`      // 前端包（可选，空=本次不更新前端）
 	XdbURL      string `json:"xdb_url"`      // 离线 IP 库（可选，空=本次不更新离线库）
 	Force       bool   `json:"force"`
+	// 各文件的 SHA-256 校验和（小写十六进制）。官网下发时面板在替换前强制比对，
+	// 防止下载包被篡改/替换；为空时不强制（兼容未下发哈希的旧官网）。
+	Sha256    string `json:"sha256"`
+	WebSha256 string `json:"web_sha256"`
+	XdbSha256 string `json:"xdb_sha256"`
 }
 
 // UpgradeStatus 面板升级进度状态（供前端轮询展示）
@@ -114,17 +120,13 @@ func CheckUpdate(ctx context.Context, arch string, force bool) (*UpdateInfo, err
 
 	baseURL := strings.TrimSuffix(config.Get().Store.BaseURL, "/")
 	if baseURL == "" {
-		baseURL = "http://panel.apihot.cn"
+		baseURL = "https://panel.apihot.cn"
 	}
 	checkURL := baseURL + "/api/panel/update?" + cacheKey
 
-	// 兼容自签/不完整证书链，避免 HTTPS 握手失败导致永远检测不到更新
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+	// 使用系统根证书做标准 TLS 校验：官网若被劫持/中间人，HTTPS 握手会直接失败，
+	// 而不是静默放行导致被下发伪造的更新包
+	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL, nil)
 	if err != nil {
 		cacheErr(err, cacheKey)
@@ -163,6 +165,9 @@ func CheckUpdate(ctx context.Context, arch string, force bool) (*UpdateInfo, err
 			WebURL      string `json:"web_url"`
 			XdbURL      string `json:"xdb_url"`
 			Force       bool   `json:"force"`
+			Sha256      string `json:"sha256"`
+			WebSha256   string `json:"web_sha256"`
+			XdbSha256   string `json:"xdb_sha256"`
 		} `json:"data"`
 	}
 	info := UpdateInfo{}
@@ -179,6 +184,9 @@ func CheckUpdate(ctx context.Context, arch string, force bool) (*UpdateInfo, err
 		WebURL:      wrapper.Data.WebURL,
 		XdbURL:      wrapper.Data.XdbURL,
 		Force:       wrapper.Data.Force,
+		Sha256:      wrapper.Data.Sha256,
+		WebSha256:   wrapper.Data.WebSha256,
+		XdbSha256:   wrapper.Data.XdbSha256,
 	}
 	// 兼容老版本官网直接返回顶层字段的格式
 	if info.Version == "" && info.DownloadURL == "" {
@@ -249,6 +257,7 @@ XDB_TMP=@@XDB_TMP@@
 XDB=@@XDB@@
 XDB_OLD=@@XDB_OLD@@
 DONE_FILE=@@DONE_FILE@@
+ROLLBACK_MARK=@@ROLLBACK_MARK@@
 VERSION=@@VERSION@@
 
 fail() {
@@ -315,7 +324,9 @@ fi
 
 rm -f "$NEW_BIN"
 
-# 4) 写完成标记，重启后的新进程据此返回「更新完成」
+# 4) 写完成标记，重启后的新进程据此返回「更新完成」；
+#    同时清除回滚标记，避免重启后 AutoRollbackUpgrade 误判为升级失败而回滚
+rm -f "$ROLLBACK_MARK"
 echo -n "$VERSION" > "$DONE_FILE"
 
 echo "[upgrade] new binary version: $("$BIN" -version 2>/dev/null || echo unknown)"
@@ -373,12 +384,7 @@ func UpgradePanel(info UpdateInfo) error {
 		}()
 		time.Sleep(500 * time.Millisecond) // 让前端先收到响应
 
-		client := &http.Client{
-			Timeout: 10 * time.Minute,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
+		client := &http.Client{Timeout: 10 * time.Minute}
 		progress := func(file string, d, t int64) {
 			setUpgradeStatus(UpgradeStatus{Running: true, Phase: "downloading", Message: "正在下载更新包…", File: file, Downloaded: d, Total: t})
 		}
@@ -395,10 +401,16 @@ func UpgradePanel(info UpdateInfo) error {
 			backupDone <- backupResult{path: path, err: err}
 		}()
 
-		// 1) 下载后端二进制并校验 ELF
+		// 1) 下载后端二进制并校验：SHA-256（官网下发时强制比对）+ ELF 魔数
 		if err := downloadUpgradeFile(client, info.DownloadURL, tmpBin, "后端程序", progress); err != nil {
 			slog.Error("升级失败：下载后端二进制", "err", err)
 			setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "下载后端程序失败", Error: err.Error()})
+			return
+		}
+		if err := verifyFileSha256(tmpBin, info.Sha256); err != nil {
+			slog.Error("升级失败：后端程序 SHA-256 校验未通过", "err", err)
+			_ = os.Remove(tmpBin)
+			setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "下载的后端程序校验未通过（文件可能被篡改）", Error: err.Error()})
 			return
 		}
 		header := make([]byte, 4)
@@ -414,12 +426,19 @@ func UpgradePanel(info UpdateInfo) error {
 			return
 		}
 
-		// 2) 可选：下载前端包并解压校验到临时目录
+		// 2) 可选：下载前端包，校验 SHA-256 后解压校验到临时目录
 		if info.WebURL != "" {
 			if err := downloadUpgradeFile(client, info.WebURL, tmpWeb, "前端界面", progress); err != nil {
 				slog.Error("升级失败：下载前端包", "err", err)
 				_ = os.Remove(tmpBin)
 				setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "下载前端界面失败", Error: err.Error()})
+				return
+			}
+			if err := verifyFileSha256(tmpWeb, info.WebSha256); err != nil {
+				slog.Error("升级失败：前端包 SHA-256 校验未通过", "err", err)
+				_ = os.Remove(tmpBin)
+				_ = os.Remove(tmpWeb)
+				setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "前端包校验未通过（文件可能被篡改）", Error: err.Error()})
 				return
 			}
 			if err := extractTarGz(tmpWeb, webUpgradeDir); err != nil {
@@ -433,13 +452,21 @@ func UpgradePanel(info UpdateInfo) error {
 			_ = os.Remove(tmpWeb)
 		}
 
-		// 3) 可选：下载离线 IP 库
+		// 3) 可选：下载离线 IP 库，校验 SHA-256
 		if info.XdbURL != "" {
 			if err := downloadUpgradeFile(client, info.XdbURL, tmpXdb, "离线IP库", progress); err != nil {
 				slog.Error("升级失败：下载离线 IP 库", "err", err)
 				_ = os.Remove(tmpBin)
 				_ = os.RemoveAll(webUpgradeDir)
 				setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "下载离线IP库失败", Error: err.Error()})
+				return
+			}
+			if err := verifyFileSha256(tmpXdb, info.XdbSha256); err != nil {
+				slog.Error("升级失败：离线 IP 库 SHA-256 校验未通过", "err", err)
+				_ = os.Remove(tmpBin)
+				_ = os.RemoveAll(webUpgradeDir)
+				_ = os.Remove(tmpXdb)
+				setUpgradeStatus(UpgradeStatus{Running: false, Phase: "failed", Message: "离线IP库校验未通过（文件可能被篡改）", Error: err.Error()})
 				return
 			}
 		}
@@ -471,18 +498,19 @@ func UpgradePanel(info UpdateInfo) error {
 		setUpgradeStatus(UpgradeStatus{Running: true, Phase: "applying", Message: "正在替换面板文件…"})
 		script := upgradeScriptTemplate
 		repl := map[string]string{
-			"@@LOG@@":       upgradeLog,
-			"@@NEW_BIN@@":   tmpBin,
-			"@@BIN@@":       binaryPath,
-			"@@BIN_OLD@@":   binaryPath + ".old.upgrade",
-			"@@WEB_UP@@":    webUpgradeDir,
-			"@@WEB_DIR@@":   webDir,
-			"@@WEB_OLD@@":   webOldDir,
-			"@@XDB_TMP@@":   tmpXdb,
-			"@@XDB@@":       filepath.Join(dataDir, "data", "ip2region.xdb"),
-			"@@XDB_OLD@@":   xdbOld,
-			"@@DONE_FILE@@": filepath.Join(dataDir, ".upgrade_done"),
-			"@@VERSION@@":   info.Version,
+			"@@LOG@@":           upgradeLog,
+			"@@NEW_BIN@@":       tmpBin,
+			"@@BIN@@":           binaryPath,
+			"@@BIN_OLD@@":       binaryPath + ".old.upgrade",
+			"@@WEB_UP@@":        webUpgradeDir,
+			"@@WEB_DIR@@":       webDir,
+			"@@WEB_OLD@@":       webOldDir,
+			"@@XDB_TMP@@":       tmpXdb,
+			"@@XDB@@":           filepath.Join(dataDir, "data", "ip2region.xdb"),
+			"@@XDB_OLD@@":       xdbOld,
+			"@@DONE_FILE@@":     filepath.Join(dataDir, ".upgrade_done"),
+			"@@ROLLBACK_MARK@@": rollbackMark,
+			"@@VERSION@@":       info.Version,
 		}
 		for k, v := range repl {
 			script = strings.ReplaceAll(script, k, v)
@@ -754,6 +782,29 @@ func AutoRollbackUpgrade() {
 	_ = os.Remove(markPath)
 	// 触发一次重启：当前进程内存中是升级后的代码，重启后由 systemd 拉起恢复好的旧版本
 	triggerRestart(dataDir, filepath.Join(dataDir, "panel"))
+}
+
+// verifyFileSha256 计算文件 SHA-256 并与期望值比对。期望值为空时跳过
+// （兼容官网未下发哈希的旧版本，此时安全依赖 TLS 证书校验）。
+func verifyFileSha256(path, expect string) error {
+	expect = strings.ToLower(strings.TrimSpace(expect))
+	if expect == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != expect {
+		return fmt.Errorf("SHA-256 不匹配：期望 %s，实际 %s", expect, got)
+	}
+	return nil
 }
 
 // downloadUpgradeFile 下载升级文件到指定路径，限制最大体积避免异常包撑爆磁盘。

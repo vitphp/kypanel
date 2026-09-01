@@ -5,7 +5,7 @@
         <el-tab-pane
           v-for="t in dbTypes"
           :key="t.type"
-          :label="t.label"
+          :label="dbLabel(t)"
           :name="t.type"
         >
           <div class="toolbar">
@@ -71,8 +71,8 @@
           <div v-else-if="installingMap[t.type]" class="env-missing">
             <div class="env-missing-inner">
               <el-icon :size="48" color="#409eff"><Warning /></el-icon>
-              <h3 v-if="pendingActionMap[t.type] === 'uninstall'">正在卸载 {{ t.label }}...</h3>
-              <h3 v-else>正在安装 {{ t.label }}...</h3>
+              <h3 v-if="pendingActionMap[t.type] === 'uninstall'">正在卸载 {{ dbLabel(t) }}...</h3>
+              <h3 v-else>正在安装 {{ dbLabel(t) }}...</h3>
               <p>{{ pendingActionMap[t.type] === 'uninstall' ? '卸载进行中，请稍候...' : '安装进行中，请稍候...' }}</p>
             </div>
           </div>
@@ -81,7 +81,7 @@
           <div v-else-if="!statusMap[t.type]?.available" class="env-missing">
             <div class="env-missing-inner">
               <el-icon :size="48" color="#e6a23c"><Warning /></el-icon>
-              <h3>未检测到 {{ t.label }} 环境</h3>
+              <h3>未检测到 {{ dbLabel(t) }} 环境</h3>
               <p>{{ envStatusMap[t.type]?.remarks || statusMap[t.type]?.message || '请先安装对应的数据库环境' }}</p>
               <div v-if="envStatusMap[t.type]?.select_version" class="version-row">
                 <span>选择版本：</span>
@@ -272,10 +272,22 @@
             <el-input v-model="form.user" placeholder="留空则与数据库名相同" />
           </el-form-item>
           <el-form-item label="密码" required>
-            <el-input v-model="form.password" type="password" show-password placeholder="设置访问密码" />
+            <el-input v-model="form.password" :type="createPwdVisible ? 'text' : 'password'" placeholder="设置访问密码">
+              <template #suffix>
+                <el-icon class="pwd-eye-icon" :size="16" @click="createPwdVisible = !createPwdVisible">
+                  <Hide v-if="createPwdVisible" />
+                  <View v-else />
+                </el-icon>
+                <el-tooltip content="随机生成新密码" placement="top">
+                  <el-icon class="pwd-refresh-icon" :size="16" @click="randomPasswordNow"><Refresh /></el-icon>
+                </el-tooltip>
+              </template>
+            </el-input>
           </el-form-item>
           <el-form-item v-if="activeType === 'mysql'" label="编码">
-            <el-input v-model="form.charset" placeholder="默认 utf8mb4" />
+            <el-select v-model="form.charset" filterable placeholder="默认 utf8mb4" style="width: 100%">
+              <el-option v-for="cs in mysqlCharsets" :key="cs" :label="cs" :value="cs" />
+            </el-select>
           </el-form-item>
         </template>
       </el-form>
@@ -438,7 +450,7 @@
     <!-- root 密码管理弹窗 -->
     <el-dialog
       v-model="rootPwdDialogVisible"
-      :title="`${dbTypes.find(t => t.type === rootPwdType)?.label || ''} root 密码`"
+      :title="`${dbLabel(dbTypes.find(t => t.type === rootPwdType))} root 密码`"
       width="540px"
       :close-on-click-modal="false"
     >
@@ -520,6 +532,7 @@ const listMap = ref({})
 const keywordMap = ref({})
 const createVisible = ref(false)
 const creating = ref(false)
+const createPwdVisible = ref(true) // 创建弹窗密码默认明文显示
 const form = ref({ name: '', user: '', password: '', charset: '' })
 
 // 一键安装状态
@@ -587,9 +600,17 @@ const dbPortMap = {
 }
 
 const dialogTitle = computed(() => {
-  const label = dbTypes.value.find((t) => t.type === activeType.value)?.label || ''
-  return `创建 ${label} 数据库`
+  const t = dbTypes.value.find((t) => t.type === activeType.value)
+  return `创建 ${t ? dbLabel(t) : ''} 数据库`
 })
+
+// 数据库类型显示名：优先用 env-status 的真实环境名（后端对 MySQL 实装 MariaDB 时
+// 返回 "MySQL (MariaDB)" 标注真实引擎），未探测到时回退静态 label。
+function dbLabel(t) {
+  if (!t) return ''
+  const real = envStatusMap.value[t.type]?.name
+  return real || t.label || t.type
+}
 
 const dialogNeedAuth = computed(() => {
   return ['mysql', 'pgsql'].includes(activeType.value)
@@ -804,8 +825,25 @@ async function load() {
 
 function openCreate(type) {
   activeType.value = type
-  form.value = { name: '', user: '', password: '', charset: '' }
+  form.value = { name: '', user: '', password: randomPassword(16), charset: 'utf8mb4' }
   createVisible.value = true
+}
+
+// MySQL 常用字符集
+const mysqlCharsets = [
+  'utf8mb4', 'utf8', 'gbk', 'gb2312', 'big5', 'latin1', 'ascii',
+]
+
+// n 位 [A-Za-z0-9] 随机密码（用于数据库访问密码）
+function randomPassword(n = 16) {
+  const cs = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  let s = ''
+  for (let i = 0; i < n; i++) s += cs[Math.floor(Math.random() * cs.length)]
+  return s
+}
+
+function randomPasswordNow() {
+  form.value.password = randomPassword(16)
 }
 
 async function create() {
@@ -1405,6 +1443,11 @@ onUnmounted(() => {
 .service-status .caret { color: #909399; }
 .service-status.is-loading { cursor: wait; opacity: 0.6; }
 .service-status.is-unknown { cursor: not-allowed; }
+.pwd-eye-icon,
+.pwd-refresh-icon { cursor: pointer; color: #909399; transition: color 0.15s; }
+.pwd-eye-icon:hover,
+.pwd-refresh-icon:hover { color: #409eff; }
+.pwd-eye-icon { margin-right: 6px; }
 .service-status.is-unknown .caret { display: none; }
 
 /* root 密码弹窗 */

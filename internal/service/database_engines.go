@@ -183,10 +183,52 @@ func mysqlBaseArgs() string {
 	return fmt.Sprintf("-uroot -p%s -N -s", shellQuote(pw))
 }
 
+// mysqlCredFile 返回 MySQL root 凭据文件路径（0600，option 文件格式）。
+// 计划任务「备份数据库」通过 --defaults-extra-file 引用它，
+// 避免 MySQL root 密码明文写进系统 crontab / 任务命令列。
+func mysqlCredFile() string {
+	dir := config.Get().DataDir
+	if dir == "" {
+		dir = "/opt/kypanel"
+	}
+	return filepath.Join(dir, "conf", "mysql-root.cnf")
+}
+
+// ensureMysqlCredFile 把解密后的 MySQL root 密码写入 0600 凭据文件，
+// 供 mysqldump / mysql 通过 --defaults-extra-file 免明文密码连接。
+// 密码为空时删除文件（无密码环境退回 auth_socket，无需凭据文件）。
+func ensureMysqlCredFile() error {
+	pw := GetMysqlRootPwd()
+	path := mysqlCredFile()
+	if pw == "" {
+		_ = os.Remove(path)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	// option 文件转义：引号内 # 为字面量，仅需转义反斜杠与双引号
+	esc := strings.ReplaceAll(pw, `\`, `\\`)
+	esc = strings.ReplaceAll(esc, `"`, `\"`)
+	content := "[client]\nuser=root\npassword=\"" + esc + "\"\n"
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+// mysqlCredArgs 返回 cron 备份任务用的连接参数：通过 0600 凭据文件认证，
+// 密码不进入 crontab 命令行。--defaults-extra-file 必须是第一个参数。
+// 密码为空（auth_socket 免密）时退回无密码形式，与 mysqlBaseArgs 行为一致。
+func mysqlCredArgs() string {
+	if GetMysqlRootPwd() == "" {
+		return "-uroot -N -s"
+	}
+	return fmt.Sprintf("--defaults-extra-file=%s -uroot -N -s", shellQuote(mysqlCredFile()))
+}
+
 func (mysqlEngine) List() ([]map[string]interface{}, error) {
-	ok, msg := MysqlAvailable()
+	ok, _ := MysqlAvailable()
 	if !ok {
-		return nil, errors.New(msg)
+		// 未安装 MySQL：返回空列表而非报错，避免网站搬家等场景因缺环境直接失败
+		return []map[string]interface{}{}, nil
 	}
 	cmd := "mysql " + mysqlBaseArgs() + " -e " + shellQuote(`SELECT schema_name, default_character_set_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY schema_name`)
 	res, err := ExecCommand(cmd, 15*time.Second)
@@ -774,7 +816,7 @@ func (sqlserverEngine) Available() (bool, string) {
 }
 
 func (sqlserverEngine) saPassword() string {
-	return model.GetSetting("mssql_sa_pw")
+	return decryptSetting(model.GetSetting("mssql_sa_pw"))
 }
 
 func (e sqlserverEngine) sqlcmd(extra string) string {
@@ -920,6 +962,10 @@ func (e sqliteEngine) Create(req CreateDatabaseReq) error {
 }
 
 func (e sqliteEngine) Delete(name string) error {
+	// name 会拼进文件路径，白名单校验防止路径穿越删除 dataDir 外文件
+	if !identRe.MatchString(name) {
+		return errors.New("数据库名无效")
+	}
 	path := filepath.Join(e.dataDir(), name)
 	return os.Remove(path)
 }

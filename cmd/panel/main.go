@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -27,6 +28,11 @@ import (
 )
 
 func main() {
+	// 兜底注入 HOME：面板以 systemd 服务运行时默认不注入 HOME，
+	// 会导致 $HOME/.pyenv 展开成 /.pyenv（装到根目录）、站点 runner 解析
+	// pyenv/nvm 路径失败，多版本站点起不来。存量部署不改 service 也生效。
+	ensureHomeEnv()
+
 	// 以 "ky" 身份运行（软链接 /usr/local/bin/ky -> 面板二进制）
 	// 或显式传入 ky/menu 参数时，进入命令行管理菜单
 	if filepath.Base(os.Args[0]) == "ky" ||
@@ -118,6 +124,8 @@ func main() {
 	if err := service.InitDefaultPages(); err != nil {
 		slog.Warn("初始化默认页面失败", "err", err)
 	}
+	// 写入应用商店多源下载渠道（go/node/python 的镜像源，首次启动初始化，可后台增删改）
+	service.EnsureAppChannels()
 	// CLI 模式：自动续签 HTTPS 证书后退出（计划任务每天调用，防止证书到期网站打不开）
 	if *renewSSL {
 		days := *renewDays
@@ -189,7 +197,9 @@ func main() {
 		adminUser = "admin"
 	}
 	passwordGenerated := false
-	if adminPass == "" {
+	// 仅在「没有任何管理员」时才生成随机密码：已有管理员时无需生成，
+	// 避免每次重启都打印误导性的「已生成默认管理员随机密码」日志。
+	if adminPass == "" && !model.HasAnyAdmin() {
 		adminPass = generatePassword()
 		passwordGenerated = true
 	}
@@ -253,6 +263,16 @@ func main() {
 	// 自愈 Web 服务器：启动时修复无效站点证书（自签兜底），配置通过且 nginx 未运行时自动拉起。
 	// 防止某个站点的坏证书导致 nginx 全局校验失败、所有网站起不来（升级/重启后尤为关键）
 	service.SelfHealWebServerOnBoot()
+
+	// 自愈 SQL Server：已安装但未 setup（未接受 EULA / 未设置 SA 密码，启动报 exit 255）时自动补齐。
+	// 异步执行避免阻塞面板启动（mssql-conf setup 首次初始化可能耗时数十秒）。
+	go func() {
+		if done, _, err := service.EnsureSqlserverSetup(); err != nil {
+			slog.Warn("SQL Server 自愈配置失败", "err", err)
+		} else if done {
+			slog.Info("已自动完成 SQL Server 配置（接受 EULA + 设置 SA 密码）")
+		}
+	}()
 
 	// 初始化单站安全后台协程（CC 自动封禁、攻击日志采集、geo 封禁）
 	service.InitSiteSecurity()
@@ -409,4 +429,27 @@ func localIP() string {
 		return ip4.String()
 	}
 	return "127.0.0.1"
+}
+
+// ensureHomeEnv 兜底设置 HOME 环境变量。
+// 面板以 systemd 服务运行时默认不注入 HOME，导致：
+//  1. 安装脚本里 $HOME/.pyenv 展开成 /.pyenv（Python 多版本装到根目录）；
+//  2. writeSiteService 拼 pyenv/nvm 路径时 os.Getenv("HOME") 为空，路径解析失败，
+//     多版本站点的 runner 脚本无法注入 PATH，站点起不来。
+//
+// 优先取当前用户的家目录，取不到再回退 /root（面板必须以 root 运行）。
+func ensureHomeEnv() {
+	if os.Getenv("HOME") != "" {
+		return
+	}
+	home := ""
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		home = u.HomeDir
+	} else if runtime.GOOS != "windows" {
+		home = "/root"
+	}
+	if home != "" {
+		_ = os.Setenv("HOME", home)
+		slog.Info("已兜底设置 HOME 环境变量", "home", home)
+	}
 }

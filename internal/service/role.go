@@ -163,14 +163,21 @@ func CreateAdmin(username, password string, roleID uint) error {
 }
 
 // UpdateAdminRole 修改用户角色
-func UpdateAdminRole(adminID, roleID uint) error {
+// operatorID 为当前操作者 ID。保护规则：
+//   - 不能修改自己（防止把自己降级后锁死）；
+//   - 创始用户（安装时创建的第一个账号）不可修改角色（与不可删除保持一致）。
+// 其余用户（包括其他超级管理员）均可调整角色。
+func UpdateAdminRole(operatorID, adminID, roleID uint) error {
 	var admin model.Admin
 	if err := model.DB.First(&admin, adminID).Error; err != nil {
 		return errors.New("用户不存在")
 	}
-	if admin.RoleID == 0 && roleID != 0 {
-		// 超管不能降级（防止把自己锁死）
-		return errors.New("超级管理员不能修改角色")
+	if adminID == operatorID {
+		return errors.New("不能修改当前登录账号的角色")
+	}
+	founder := founderAdmin()
+	if founder != nil && adminID == founder.ID {
+		return errors.New("创始用户不可修改角色")
 	}
 	admin.RoleID = roleID
 	return model.DB.Save(&admin).Error

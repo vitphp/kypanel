@@ -25,7 +25,8 @@ func setupMigrateRoutes(g *gin.RouterGroup) {
 			Token string `json:"token"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			utils.Fail(c, 400, "参数错误")
+			// 透传具体原因，便于排查（笼统的「参数错误」无法定位问题）
+			utils.Fail(c, 400, "参数错误: "+err.Error())
 			return
 		}
 		res, err := service.DetectPanel(req.URL, req.Token)
@@ -103,15 +104,16 @@ func setupMigrateRoutes(g *gin.RouterGroup) {
 	// ---- 对端面板环境预检 ----
 	g.POST("/migrate/bt/precheck", func(c *gin.Context) {
 		var req struct {
-			BTURL string   `json:"bt_url"`
-			BTSK  string   `json:"bt_sk"`
-			Sites []string `json:"sites"`
+			BTURL     string   `json:"bt_url"`
+			BTSK      string   `json:"bt_sk"`
+			Sites     []string `json:"sites"`
+			Databases []string `json:"databases"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			utils.Fail(c, 400, "参数错误")
 			return
 		}
-		res, err := service.BTEnvCompare(req.BTURL, req.BTSK, req.Sites)
+		res, err := service.BTEnvCompare(req.BTURL, req.BTSK, req.Sites, req.Databases)
 		if err != nil {
 			utils.Fail(c, 500, err.Error())
 			return
@@ -183,6 +185,11 @@ func setupMigrateRoutes(g *gin.RouterGroup) {
 			return
 		}
 		utils.Ok(c, gin.H{"id": id})
+	})
+
+	// ---- 任务列表：重新打开搬家工具时用它恢复「进行中」的任务进度 ----
+	g.GET("/migrate/tasks", func(c *gin.Context) {
+		utils.Ok(c, service.ListImportTasks())
 	})
 
 	// ---- 任务状态（导入/对端面板迁出通用）----

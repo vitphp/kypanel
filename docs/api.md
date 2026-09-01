@@ -103,6 +103,29 @@ kypanel 后端基于 Go + Gin，所有业务 API 统一前缀 `/api`。
 | GET | `/api/site/stat` | 网站访问统计 |
 | GET | `/api/site/stat/status` | 访问统计服务状态 |
 
+### 创建网站（POST /api/site/create）请求字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string | 是 | 站点名称（唯一，创建后可在列表点击名称修改） |
+| `type` | string | 是 | `php` / `static` / `node` / `python` / `go` / `proxy` |
+| `domain` | string | 是 | 主域名（支持域名 / IP / `IP:端口` 形式） |
+| `domains` | string | 否 | 附加域名，逗号分隔 |
+| `port` | int | 是 | 监听端口（1–65535，对外访问端口） |
+| `root` | string | 否 | 网站目录（绝对路径）。留空时自动推断为 `/www/wwwroot/<完整域名>`（如 `vltphp.n.05v.cn` → `/www/wwwroot/vltphp.n.05v.cn`；域名未填则回退站点名）。`proxy` 类型同样适用：留空会创建目录，Let's Encrypt HTTP-01 验证文件写入该目录 |
+| `runtime_version` | string | 视类型 | PHP / Node / Python / Go 的运行时版本（如 `PHP 8.2`、`Node 20`、`Python 3.12`、`Go 1.24`）；必须为已安装版本，未安装返回错误 |
+| `php_fpm` | string | 否 | PHP-FPM 版本标识（PHP 类型；不填自动按 runtime_version 解析） |
+| `start_command` | string | 否 | 进程型启动命令（如 `python app.py`、`npm run start`） |
+| `env_vars` | string | 否 | 环境变量，`KEY=VALUE` 每行一个 |
+| `proxy_port` | int | 否 | 进程型应用端口，nginx 反代到 `127.0.0.1:<proxy_port>` |
+| `proxy_pass` | string | proxy 必填 | 反代目标（如 `http://127.0.0.1:8080`） |
+| `create_db` | bool | 否 | PHP 类型是否同时创建数据库 |
+| `db_name` / `db_user` / `db_password` | string | 否 | 数据库名/用户/密码，留空自动生成 |
+| `create_ftp` | bool | 否 | PHP 类型是否同时创建 FTP 账号 |
+| `ftp_username` / `ftp_password` | string | 否 | FTP 用户名/密码，留空自动生成 |
+
+> 注意：`port` 为必填，不填会返回参数错误；创建前需先安装对应运行时环境（PHP/Node/Python/Go）与 Web 服务器（Nginx/Apache）。
+
 ### SSL 证书
 
 | 方法 | 路径 | 说明 |

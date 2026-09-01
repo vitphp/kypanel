@@ -72,6 +72,8 @@ type Config struct {
 	// Store 应用商店远程源（官网下发应用）
 	Store struct {
 		BaseURL string `json:"base_url"` // 官网 API 基址，如 https://panel.apihot.cn，空则禁用远程拉取
+		// ReportErrors 应用安装/卸载失败时是否自动上报错误到官网（便于官方收集问题、针对性修复）
+		ReportErrors Bool `json:"report_errors"`
 	} `json:"store"`
 
 	// DataDir 面板数据目录
@@ -97,6 +99,7 @@ func Default() *Config {
 	c.Log.File = filepath.Join(defaultDataDir, "logs", "panel.log")
 	c.Log.MaxDay = 30
 	c.Store.BaseURL = "https://panel.apihot.cn"
+	c.Store.ReportErrors = true // 默认开启错误上报，收集问题便于升级修复；可在 config.json 关闭
 	return c
 }
 

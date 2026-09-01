@@ -81,9 +81,9 @@
             <template v-if="app.status === 'not_installed'">
               <el-button type="primary" size="small" @click="install(app)">一键安装</el-button>
             </template>
-            <template v-else-if="app.status === 'installing' || app.status === 'uninstalling'">
+            <template v-else-if="app.status === 'queued' || app.status === 'installing' || app.status === 'uninstalling'">
               <el-button type="warning" size="small" disabled>
-                {{ app.status === 'installing' ? '安装中...' : '卸载中...' }}
+                {{ app.status === 'queued' ? '排队中...' : (app.status === 'installing' ? '安装中...' : '卸载中...') }}
               </el-button>
               <el-button size="small" @click="openLog(app)">查看日志</el-button>
             </template>
@@ -114,8 +114,8 @@
                 @click="onCustomAction(app, act)"
               >{{ act.label }}</el-button>
               <el-tooltip
-                v-if="app.system_default"
-                content="系统自带应用，卸载无意义或会误伤系统依赖，不支持卸载"
+                v-if="app.system_default && isLangRuntimeApp(app)"
+                content="系统自带运行环境，卸载会误伤系统依赖，不支持卸载"
                 placement="top"
               >
                 <span>
@@ -284,6 +284,7 @@ const categoryMap = computed(() => {
 })
 const statusMap = {
   not_installed: '未安装',
+  queued: '排队中',
   installing: '安装中',
   installed: '已安装',
   uninstalling: '卸载中',
@@ -291,6 +292,7 @@ const statusMap = {
 }
 const statusTypeMap = {
   not_installed: 'info',
+  queued: 'warning',
   installing: 'warning',
   installed: 'success',
   uninstalling: 'warning',
@@ -344,9 +346,9 @@ async function loadApps() {
     res.data.forEach((a) => {
       const prev = prevAppStatus[a.key]
       const cur = a.status
-      if (cur === 'failed' && (prev === 'installing' || prev === 'uninstalling')) {
+      if (cur === 'failed' && (prev === 'installing' || prev === 'uninstalling' || prev === 'queued')) {
         if (!firstLoad) playFailSound()
-        ElMessage.error(`${a.name} ${prev === 'installing' ? '安装' : '卸载'}失败，请查看日志后重试`)
+        ElMessage.error(`${a.name} ${prev === 'installing' || prev === 'queued' ? '安装' : '卸载'}失败，请查看日志后重试`)
       }
       prevAppStatus[a.key] = cur
     })
@@ -394,8 +396,12 @@ async function install(app) {
   if (app.select_php_version) {
     return openPhpVersionDialog(app)
   }
+  // Python 多版本走源码编译（pyenv），耗时显著长于其他运行时，明确告知预期时长
+  const pythonCompileTip = app.key.startsWith('python')
+    ? '\nPython 为源码编译安装，预计需要 10~20 分钟，期间请勿关闭或刷新页面。'
+    : ''
   try {
-    await ElMessageBox.confirm(`确定安装 ${app.name} 吗？${app.remarks ? '注意：' + app.remarks : ''}`, '安装应用', {
+    await ElMessageBox.confirm(`确定安装 ${app.name} 吗？${app.remarks ? '注意：' + app.remarks : ''}${pythonCompileTip}`, '安装应用', {
       confirmButtonText: '开始安装',
       cancelButtonText: '取消',
       type: 'info'
@@ -541,6 +547,12 @@ function onCustomAction(app, act) {
   }
   // 预留：后续支持 exec-service、open-path 等动作
   ElMessage.info(`动作 ${act.action} 暂未实现`)
+}
+
+// 语言运行时应用（Node/Python/Go/PHP 等）：系统自带的才禁用卸载（会误伤系统依赖）；
+// 基础服务（nginx/mysql/redis 等）系统自带允许卸载，不在此列。
+function isLangRuntimeApp(app) {
+  return app.category === 'runtime' && (app.sub_category || '').startsWith('lang:')
 }
 
 function uninstall(app) {

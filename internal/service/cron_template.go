@@ -307,13 +307,18 @@ func GenerateCronFromTemplate(req CronTemplateReq) (string, string, error) {
 		if err != nil {
 			return "", "", err
 		}
+		// 写入 0600 凭据文件，命令通过 --defaults-extra-file 引用，
+		// 防止 MySQL root 密码明文出现在 crontab / 任务命令中
+		if err := ensureMysqlCredFile(); err != nil {
+			return "", "", fmt.Errorf("写入 MySQL 凭据文件失败: %w", err)
+		}
 		var blocks []string
 		for _, db := range dbNames {
 			if !identRe.MatchString(db) {
 				continue
 			}
 			block := fmt.Sprintf(
-				"mkdir -p %s && "+mysqlBaseArgs()+" mysqldump --default-character-set=utf8mb4 %s | gzip > %s/%s_%s.sql.gz && "+
+				"mkdir -p %s && "+mysqlCredArgs()+" mysqldump --default-character-set=utf8mb4 %s | gzip > %s/%s_%s.sql.gz && "+
 					"cd %s && ls -1tr %s_%s_*.sql.gz 2>/dev/null | head -n -%d | xargs -r rm --",
 				backupDir, db, backupDir, db, dateStamp,
 				backupDir, db, dateStamp, keep)
@@ -335,9 +340,12 @@ func GenerateCronFromTemplate(req CronTemplateReq) (string, string, error) {
 		if keep <= 0 {
 			keep = 7
 		}
+		if err := ensureMysqlCredFile(); err != nil {
+			return "", "", fmt.Errorf("写入 MySQL 凭据文件失败: %w", err)
+		}
 		backupDir := "/www/backup/database_incremental/" + db
 		cmd := fmt.Sprintf(
-			"mkdir -p %s && "+mysqlBaseArgs()+" mysqldump --default-character-set=utf8mb4 %s | gzip > %s/%s_%s.sql.gz && "+
+			"mkdir -p %s && "+mysqlCredArgs()+" mysqldump --default-character-set=utf8mb4 %s | gzip > %s/%s_%s.sql.gz && "+
 				"cd %s && ls -1tr %s_%s_*.sql.gz 2>/dev/null | head -n -%d | xargs -r rm --",
 			backupDir, db, backupDir, db, dateStamp,
 			backupDir, db, dateStamp, keep)

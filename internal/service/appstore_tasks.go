@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,11 @@ var (
 // 同一时刻只允许一个应用安装/卸载任务真正执行，其余任务排队等待，
 // 避免多个 apt-get/yum/dpkg 并发导致包管理器锁冲突。
 var installSlot = make(chan struct{}, 1)
+
+// aptOpts 防止 apt 在慢源/异常网络下无限挂起：
+// ForceIPv4 规避国内服务器 IPv6 路由不通导致的下载挂起（曾导致 sqlserver 的
+// 290MB 包 20 分钟零字节）；http::Timeout 设置无数据超时；Retries 限制重试次数。
+const aptOpts = " -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=60 -o Acquire::Retries=2"
 
 // acquireInstallSlot 等待并占用安装令牌（阻塞直到上一个任务完成或 ctx 取消）
 func acquireInstallSlot(ctx context.Context) bool {
@@ -66,8 +72,8 @@ func ListAppTasks() []AppTask {
 	for _, t := range appTasks {
 		list = append(list, *t)
 	}
-	// 按开始时间倒序（最新任务在前）
-	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt > list[j].StartedAt })
+	// 按入队时间正序（先入队的排前面，与全局串行队列的实际执行顺序一致）
+	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt < list[j].StartedAt })
 	return list
 }
 
@@ -146,6 +152,10 @@ func cleanupRunningGhosts() {
 			rec.InstalledAt = nil
 			if err := model.SaveAppRecord(&rec); err == nil {
 				slog.Warn("ghost 状态已自动清理", "key", rec.Key, "prev_status", status)
+				// 安装任务进程消失属于真实异常，异步上报官网便于收集修复（有 24h 去重）
+				if status == model.AppInstalling {
+					ReportAppError(rec.Key, "install", "后台任务已异常结束（安装进程消失）", "")
+				}
 			}
 		}
 	}
@@ -230,6 +240,7 @@ var (
 	appsListCache    atomic.Value // 存 []AppItem
 	appsListCachedAt time.Time
 	appsListProbing  bool
+	appsListGen      uint64 // 失效版本号：探测期间若被 InvalidateAppsCache 失效过，本次探测结果作废
 	appsListMu       sync.Mutex
 )
 
@@ -237,6 +248,7 @@ var (
 func InvalidateAppsCache() {
 	appsListMu.Lock()
 	appsListCachedAt = time.Time{}
+	appsListGen++
 	appsListMu.Unlock()
 }
 
@@ -245,31 +257,61 @@ func InvalidateAppsCache() {
 func ListApps() []AppItem {
 	const cacheTTL = 5 * time.Second
 
-	appsListMu.Lock()
-	if cached, ok := appsListCache.Load().([]AppItem); ok && time.Since(appsListCachedAt) < cacheTTL {
-		appsListMu.Unlock()
-		return cached
-	}
-	if appsListProbing {
-		// 已有探测在跑：返回旧缓存；无旧缓存则返回空列表（仅首次并发极低时发生）
-		if cached, ok := appsListCache.Load().([]AppItem); ok {
+	// 最多探测两轮：安装/卸载完成会 InvalidateAppsCache（gen++），
+	// 若第一轮探测恰好跨过了这次失效，其结果基于旧 DB 状态（installing/uninstalling），
+	// 写回缓存会让前端在 TTL 内持续拿到旧状态，误判任务「已暂停」。此时丢弃旧结果重跑一轮。
+	for attempt := 0; attempt < 2; attempt++ {
+		appsListMu.Lock()
+		if cached, ok := appsListCache.Load().([]AppItem); ok && time.Since(appsListCachedAt) < cacheTTL {
 			appsListMu.Unlock()
 			return cached
 		}
+		if appsListProbing {
+			// 已有探测在跑：仅当旧缓存仍有效（TTL 内、未被 InvalidateAppsCache 失效）才返回旧缓存。
+			// 安装/卸载完成会 InvalidateAppsCache（cachedAt 清零），此时旧缓存里的
+			// installing/uninstalling 已过期，若仍返回会让前端在探测窗口内反复拿到旧状态、
+			// 连续两轮误判任务「已暂停」。失效时返回空列表，前端 statusOf 落空（cur=''），
+			// 卸载任务按「已完成」收尾、安装任务保持等待，探测结束下一轮即拿到正确状态。
+			if cached, ok := appsListCache.Load().([]AppItem); ok && time.Since(appsListCachedAt) < cacheTTL {
+				appsListMu.Unlock()
+				return cached
+			}
+			appsListMu.Unlock()
+			return []AppItem{}
+		}
+		appsListProbing = true
+		gen := appsListGen
 		appsListMu.Unlock()
-		return []AppItem{}
+
+		items := listAppsUncached()
+
+		appsListMu.Lock()
+		appsListProbing = false
+		if gen == appsListGen {
+			// 探测期间缓存未被失效：正常写入并返回
+			appsListCache.Store(items)
+			appsListCachedAt = time.Now()
+			appsListMu.Unlock()
+			return items
+		}
+		// 探测期间缓存被失效过：本次结果已过期，不写缓存，立即重跑一轮拿最新状态
+		appsListMu.Unlock()
 	}
-	appsListProbing = true
-	appsListMu.Unlock()
 
+	// 极端：连续两轮探测都被失效，最后一次结果兜底返回（正常写入，避免每请求都空转重探测）
 	items := listAppsUncached()
-
 	appsListMu.Lock()
 	appsListCache.Store(items)
 	appsListCachedAt = time.Now()
-	appsListProbing = false
 	appsListMu.Unlock()
 	return items
+}
+
+// isLangRuntime 判断是否为语言运行时类应用（Category=runtime 且 SubCategory 以 lang: 开头）。
+// 语言运行时（Node/Python/Go/PHP 各版本）只显示「面板安装」的，系统自带的 python3/nodejs
+// 不展示；基础服务（nginx/mysql 等）不受此限制，系统已安装的照常展示并标注「系统已安装」。
+func isLangRuntime(meta AppMeta) bool {
+	return meta.Category == CatRuntime && strings.HasPrefix(meta.SubCategory, "lang:")
 }
 
 // listAppsUncached 实际的全量探测（ListApps 的缓存保护已剥掉）
@@ -339,7 +381,7 @@ func listAppsUncached() []AppItem {
 	items := make([]AppItem, len(metas))
 	for i, meta := range metas {
 		item := AppItem{AppMeta: meta}
-		item.SystemDefault = systemDefaultKeys[meta.Key]
+		item.SystemDefault = false // 动态判定：以系统实际探测为准，忽略远程 seed/本地定义里的静态 system_default
 		hasRec := false
 		var rec *model.AppRecord
 		if r, ok := recByKey[meta.Key]; ok {
@@ -353,10 +395,32 @@ func listAppsUncached() []AppItem {
 			item.Status = model.AppNotInstalled
 		}
 		if !hasRec && item.Status == model.AppNotInstalled && results[i].isGhost {
-			item.Status = model.AppInstalled
-			item.Source = "system" // DB 无记录但系统里存在且能用 → 系统自带
+			// 语言运行时只显示「面板安装」的：系统自带的 python3/nodejs/golang 不展示，
+			// 避免误导用户以为有面板管理的多版本环境。基础服务（nginx/mysql 等）照常展示。
+			if !isLangRuntime(meta) {
+				item.Status = model.AppInstalled
+				item.Source = "system" // DB 无记录但系统里存在且能用 → 系统自带
+				item.SystemDefault = true // 动态标记：系统实际预装且非面板安装
+			}
 		} else if hasRec && item.Status == model.AppInstalled {
-			item.Source = "panel" // DB 有 installed 记录 → 面板安装
+			item.Source = "panel" // DB 有 installed 记录 → 面板安装（可卸载）
+		}
+		// 记录为 not_installed 但系统里二进制/服务实际存在且可用 → 修正为 installed。
+		// 典型场景：Docker 由系统/官方脚本安装、或历史失败记录被重置为 not_installed，
+		// 但容器页 /docker/status 已识别为已安装，商店列表应与之一致。
+		if hasRec && item.Status == model.AppNotInstalled && isMetaInstalled(meta) {
+			item.Status = model.AppInstalled
+			item.Source = "panel"
+			item.Error = ""
+			if v, err := probeVersion(meta.VersionCmd); err == nil && v != "" {
+				item.Version = v
+				rec.Status = model.AppInstalled
+				rec.Version = v
+				rec.Error = ""
+				now := time.Now()
+				rec.InstalledAt = &now
+				_ = model.SaveAppRecord(rec)
+			}
 		}
 		// 清理孤儿失败记录：failed 但实际不能用（探测不到）→ 修正为 not_installed（隐藏）
 		// 典型场景：安装失败残留 failed 记录，但应用目录/二进制不存在，应归入「未安装」而非「已安装/失败」
@@ -387,7 +451,24 @@ func listAppsUncached() []AppItem {
 		}
 		items[i] = item
 	}
-	return items
+	// 过滤不再提供安装入口（Hidden）且未安装的应用：
+	// 无版本运行时（nodejs/python3/golang）meta 保留用于「已安装兜底」，
+	// 但未安装的不再出现在「可安装」列表；已安装（面板装过）的照常显示、可管理/卸载。
+	filtered := items[:0]
+	// 最终兜底去重：任何上游路径（远程商店列表 / LocalOnly 补回 / DB 记录补回）
+	// 出现重复 key 时只保留第一条，杜绝「已安装」等列表出现两个一模一样应用。
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		if seen[item.Key] {
+			continue
+		}
+		seen[item.Key] = true
+		if item.Hidden && item.Status == model.AppNotInstalled {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 // AppLogPath 返回某应用的安装/卸载日志文件路径
@@ -395,11 +476,22 @@ func AppLogPath(key string) string {
 	return filepath.Join(config.Get().DataDir, "logs", "apps", key+".log")
 }
 
+// appTokenRe 应用安装参数（版本号/PHP 版本）白名单：仅允许字母数字点下划线连字符。
+// 版本号会拼进以 root 执行的安装脚本，必须严格白名单防止命令注入。
+var appTokenRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
 // InstallApp 异步安装应用；phpVersion 为 phpMyAdmin 等应用选择的 PHP 版本（空则用最高版本），version 为通用版本选择
 func InstallApp(key string, phpVersion string, version string) error {
 	meta, ok := findApp(key)
 	if !ok {
 		return errors.New("未知应用: " + key)
+	}
+	// 版本号/PHP 版本会拼进 shell 脚本以 root 执行，必须白名单校验防命令注入
+	if phpVersion != "" && !appTokenRe.MatchString(phpVersion) {
+		return errors.New("PHP 版本号格式无效")
+	}
+	if version != "" && !appTokenRe.MatchString(version) {
+		return errors.New("版本号格式无效")
 	}
 	// Nginx 与 Apache 互斥：只能安装其中一个
 	if err := checkWebServerConflict(meta.Key); err != nil {
@@ -507,6 +599,9 @@ func runInstall(ctx context.Context, meta AppMeta, phpVersion string, version st
 	if meta.InstallScript != "" {
 		// 自定义安装脚本（多版本 PHP / phpMyAdmin / MongoDB / SQLServer 等）
 		script := meta.InstallScript
+		// 多渠道加速：注入测速选源函数，并把该应用的下载渠道以 LP_CHANNELS 变量注入脚本，
+		// 安装时先测速选延迟最低的源，下载失败自动切换下一个源。
+		script = injectChannelHelpers(meta.Channels, script)
 		if meta.Key == "phpmyadmin" {
 			socket := ""
 			if phpVersion != "auto" {
@@ -559,19 +654,30 @@ func runInstall(ctx context.Context, meta AppMeta, phpVersion string, version st
 			}
 		}
 	} else if pkgMgr == "apt" {
+		// 修复上次中断残留的 dpkg 半配置状态（否则 apt-get install 全部报
+		// "dpkg was interrupted, you must manually run 'dpkg --configure -a'" 失败）
+		if err := runCmdWithLogCtx(ctx, "dpkg --configure -a", logPath, appInstallTimeout); err != nil {
+			logf("dpkg --configure -a 未完全成功（可忽略）: %v", err)
+		}
+		// 修复历史 broken 依赖（如残留的半配置 node-* 包）：
+		// apt 处于 "Unmet dependencies" 状态时任何 install 都会返回 100 失败，
+		// 先 --fix-broken 补齐缺失依赖 / 清理损坏包，避免所有安装连带失败。
+		if err := runCmdWithLogCtx(ctx, "apt-get install -y -f"+aptOpts, logPath, appInstallTimeout); err != nil {
+			logf("apt --fix-broken 未完全成功（可忽略）: %v", err)
+		}
 		logf("开始 apt-get update ...")
-		if err := runCmdWithLogCtx(ctx, "apt-get update", logPath, appInstallTimeout); err != nil {
+		if err := runCmdWithLogCtx(ctx, "apt-get update"+aptOpts, logPath, appInstallTimeout); err != nil {
 			logf("apt-get update 失败: %v", err)
 			// update 失败不阻塞安装，继续尝试
 		}
-		cmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s", strings.Join(meta.AptPackages, " "))
+		cmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s%s", strings.Join(meta.AptPackages, " "), aptOpts)
 		logf("执行安装命令: %s", cmd)
 		if err := runCmdWithLogCtx(ctx, cmd, logPath, appInstallTimeout); err != nil {
 			if len(meta.AptFallbackPackages) > 0 {
 				// 原包不可用（如 Debian 新版本仓库无 mysql-server），尝试兼容替代包
 				fb := strings.Join(meta.AptFallbackPackages, " ")
 				logf("%s 安装失败，尝试兼容替代包: %s", strings.Join(meta.AptPackages, " "), fb)
-				fbCmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s", fb)
+				fbCmd := fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s%s", fb, aptOpts)
 				logf("执行安装命令: %s", fbCmd)
 				if fbErr := runCmdWithLogCtx(ctx, fbCmd, logPath, appInstallTimeout); fbErr != nil {
 					status = model.AppFailed
@@ -622,6 +728,18 @@ func runInstall(ctx context.Context, meta AppMeta, phpVersion string, version st
 				_ = pwd
 			}
 		}
+		if meta.Key == "sqlserver" {
+			// SQL Server 装包后必须 mssql-conf setup（接受 EULA + 设置 SA 密码），
+			// 否则 sqlservr 启动即退 255。这里自动生成随机 SA 密码并保存到面板设置。
+			logf("配置 SQL Server（接受 EULA + 设置 SA 密码）...")
+			if done, _, err := EnsureSqlserverSetup(); err != nil {
+				logf("SQL Server 配置失败: %v（可在面板重启后自动重试）", err)
+			} else if done {
+				logf("已自动生成 SA 密码并保存到面板设置")
+			} else {
+				logf("SQL Server 已配置，跳过")
+			}
+		}
 		// 安装完成后必须成功探测到版本才视为成功，否则标记失败。
 		// 避免脚本 exit 0 但实际没安装成功，导致应用商店显示 installed
 		// 而 env-status 检测不到、网站页一直卡在"未检测到环境"的情况。
@@ -648,6 +766,15 @@ func runInstall(ctx context.Context, meta AppMeta, phpVersion string, version st
 	now := time.Now()
 	if status == model.AppInstalled {
 		rec.InstalledAt = &now
+		// 标记文件应用：安装成功后创建标记文件（作为安装状态唯一依据，
+		// 避免探测命令恒真的虚拟应用在卸载后状态回弹）。
+		if meta.InstallMarkFile != "" {
+			mark := resolveInstallMark(meta.InstallMarkFile)
+			if err := os.MkdirAll(filepath.Dir(mark), 0o755); err == nil {
+				_ = os.WriteFile(mark, []byte(time.Now().Format(time.RFC3339)), 0o644)
+				logf("已创建安装标记: %s", mark)
+			}
+		}
 		// 安装成功后自动放行软件所需端口（仅 FTP）。
 		// FTP 需要 20/21/39000-40000 被动端口段才能被外部访问；
 		// MySQL/Redis 等数据库、Nginx/Apache 等 Web 服务的端口不应自动暴露到公网，避免安全隐患。
@@ -665,6 +792,10 @@ func runInstall(ctx context.Context, meta AppMeta, phpVersion string, version st
 				}
 			}
 		}
+	}
+	if status == model.AppFailed && errMsg != "" {
+		// 安装失败自动上报官网，便于官方收集问题并针对性修复（可在 config.json 关闭）
+		ReportAppError(meta.Key, "install", errMsg, logPath)
 	}
 	rec.Status = status
 	rec.Version = ver
@@ -699,11 +830,18 @@ func UninstallApp(key string) error {
 	if !ok {
 		return errors.New("未知应用: " + key)
 	}
-	// 系统发行版自带的应用（Debian 默认 sqlite3 / python3 / golang / nodejs）：
-	// 它们的 AptPackages 要么被系统其它组件依赖、要么卸载会静默成功但无实际效果，
-	// 前端看上去「任务已启动」实际什么也没做。直接拒绝卸载，统一让用户走「启动 / 停止」控制服务。
-	if systemDefaultKeys[key] {
-		return errors.New("系统发行版自带的应用，不支持卸载（请用「启动 / 停止」控制服务）")
+	// 动态判断「系统自带」：DB 无面板安装记录 + 系统里实际探测到二进制/服务已存在。
+	// 语言运行时（发行版预装的 python3/nodejs 等）卸载会误伤系统，拒绝卸载；
+	// 基础服务（nginx/mysql/redis 等）系统自带允许卸载（用户明确要求），补建记录后走正常流程；
+	// 面板自己安装的（DB 有 installed 记录）都允许卸载。
+	rec, recErr := model.GetAppRecord(key)
+	if recErr != nil && isMetaInstalled(meta) {
+		if isLangRuntime(meta) {
+			return errors.New("系统发行版自带的运行环境，不支持卸载（请用「启动 / 停止」控制服务）")
+		}
+		// 基础服务系统自带：允许卸载，补建记录让后续卸载流程正常走
+		rec = &model.AppRecord{Key: key}
+		recErr = nil
 	}
 
 	taskMu.Lock()
@@ -723,21 +861,13 @@ func UninstallApp(key string) error {
 	}
 	taskMu.Unlock()
 
-	rec, err := model.GetAppRecord(key)
-	if err != nil {
-		// record 缺失：可能是系统自带环境（默认版 PHP 等），或通过其它途径装上但未走本面板安装流程。
-		// 兜底探测：二进制/服务在跑 → 创建 installed record，让卸载流程能正常走下去
-		if isMetaInstalled(meta) {
-			rec = &model.AppRecord{Key: key, Status: model.AppInstalled, ServiceName: resolveServiceName(meta)}
-			if v, verr := probeVersion(meta.VersionCmd); verr == nil {
-				rec.Version = v
-			}
-		} else {
-			taskMu.Lock()
-			delete(appTasks, key)
-			taskMu.Unlock()
-			return errors.New("应用尚未安装")
-		}
+	if recErr != nil {
+		// record 缺失且系统里探测不到 → 未安装。上面已拦截「系统自带」（isMetaInstalled 为真），
+		// 能走到这里的必然未安装。
+		taskMu.Lock()
+		delete(appTasks, key)
+		taskMu.Unlock()
+		return errors.New("应用尚未安装")
 	}
 	rec.Status = model.AppUninstalling
 	_ = model.SaveAppRecord(rec)
@@ -804,20 +934,17 @@ func runUninstall(ctx context.Context, meta AppMeta) {
 		// 自定义卸载脚本（多版本 PHP / phpMyAdmin 等）
 		logf("执行自定义卸载脚本 ...")
 		if err := runCmdWithLogCtx(ctx, meta.UninstallScript, logPath, appInstallTimeout); err != nil {
+			// 脚本失败绝不能把状态卡在「卸载中」：按残留探测自动收尾。
+			// 脚本可能已删除大部分文件只是退出码非 0；若残留仍在则恢复为「已安装」并记录错误，
+			// 用户可查看日志重试，面板不会出现「一直在卸载」的死状态。
 			logf("自定义卸载脚本执行失败: %v", err)
+			ReportAppError(meta.Key, "uninstall", err.Error(), logPath)
+			if !finishUninstall(meta, logf) {
+				logf("卸载未完成：应用仍存在，状态已恢复为「已安装」")
+			}
 			return
 		}
-		rec, _ := model.GetAppRecord(meta.Key)
-		rec.Status = model.AppNotInstalled
-		rec.Version = ""
-		rec.Error = ""
-		rec.ServiceName = ""
-		rec.InstalledAt = nil
-		_ = model.SaveAppRecord(rec)
-		removeOpenPorts(meta, logf)
-		InvalidateAppsCache()
-		InvalidateEnvStatusCache() // 环境状态已变化，失效缓存待重新探测
-		logf("卸载完成")
+		finishUninstall(meta, logf)
 		return
 	}
 
@@ -830,38 +957,108 @@ func runUninstall(ctx context.Context, meta AppMeta) {
 		//   只 remove mysql-server 会因包不存在而"假成功"，mariadb-server 残留在系统里）
 		pkgs := append([]string{}, meta.AptPackages...)
 		pkgs = append(pkgs, meta.AptFallbackPackages...)
-		if len(pkgs) == 0 {
+		// AptRemovePatterns 通配前缀：Debian 上 postgresql 元包实际带的是 postgresql-17 等子包，
+		// apt remove postgresql 会报"包未安装"。卸载前先用 dpkg -l 筛出实际安装的匹配包，
+		// 只 remove 确实存在的包，避免"假成功"和通配无匹配时 apt 报错中断。
+		patterns := meta.AptRemovePatterns
+		if len(pkgs) == 0 && len(patterns) == 0 {
 			logf("该应用没有可卸载的软件包（缺少 AptPackages/UninstallScript），请检查应用定义")
+			if !finishUninstall(meta, logf) {
+				logf("卸载未完成：应用仍存在，状态已恢复为「已安装」")
+			}
 			return
 		}
-		cmd = fmt.Sprintf("apt-get remove -y --purge %s && apt-get autoremove -y", strings.Join(pkgs, " "))
+		var rmCmds []string
+		for _, pat := range patterns {
+			// 去尾 * 得到包名前缀，用 awk 精确匹配已安装包（^ii 行 = 已安装）
+			prefix := strings.TrimSuffix(pat, "*")
+			rmCmds = append(rmCmds, fmt.Sprintf(
+				"P=$(dpkg -l 2>/dev/null | awk '/^ii  %s/{print $2}' | tr '\\n' ' '); [ -n \"$P\" ] && apt-get remove -y --purge $P", prefix))
+		}
+		// 精确包同样先按 dpkg -s 过滤出实际安装的（Debian 上 mysql 可能装了 mariadb-server
+		// 替代包，mysql-server 未安装；整条 remove 只要有一个包不存在就中断，导致剩余包没删掉）
+		exact := make([]string, 0, len(pkgs))
+		for _, p := range pkgs {
+			exact = append(exact, fmt.Sprintf("dpkg -s %s >/dev/null 2>&1 && echo %s", p, p))
+		}
+		rmCmds = append(rmCmds, "R=$( "+strings.Join(exact, " ; ")+" ); [ -n \"$R\" ] && apt-get remove -y --purge $R")
+		cmd = strings.Join(rmCmds, "; ") + "; apt-get autoremove -y"
 	case "yum", "dnf":
 		if len(meta.YumPackages) == 0 {
 			logf("该应用没有可卸载的软件包（缺少 YumPackages/UninstallScript），请检查应用定义")
+			if !finishUninstall(meta, logf) {
+				logf("卸载未完成：应用仍存在，状态已恢复为「已安装」")
+			}
 			return
 		}
 		cmd = fmt.Sprintf("%s remove -y %s", pkgMgr, strings.Join(meta.YumPackages, " "))
 	default:
 		logf("不支持的包管理器: %s", pkgMgr)
+		if !finishUninstall(meta, logf) {
+			logf("卸载未完成：应用仍存在，状态已恢复为「已安装」")
+		}
 		return
 	}
 	logf("执行卸载命令: %s", cmd)
 	if err := runCmdWithLogCtx(ctx, cmd, logPath, appInstallTimeout); err != nil {
 		logf("卸载失败: %v", err)
+		// 自动修复：apt 卸载失败常见原因是 dpkg 半配置、依赖破损或 apt 锁。
+		// 先修复包管理器再重试一次；仍失败则按残留探测收尾，绝不卡在「卸载中」。
+		if pkgMgr == "apt" {
+			logf("尝试自动修复软件包管理器 ...")
+			_ = runCmdWithLogCtx(ctx, "apt-get -y -f install; dpkg --configure -a; apt-get -y -f install", logPath, 5*time.Minute)
+			logf("重试卸载 ...")
+			if err2 := runCmdWithLogCtx(ctx, cmd, logPath, appInstallTimeout); err2 == nil {
+				finishUninstall(meta, logf)
+				return
+			} else {
+				logf("重试卸载仍失败: %v", err2)
+				ReportAppError(meta.Key, "uninstall", err2.Error(), logPath)
+			}
+		}
+		if !finishUninstall(meta, logf) {
+			logf("卸载未完成：应用仍存在，状态已恢复为「已安装」")
+		}
 		return
 	}
 
+	finishUninstall(meta, logf)
+}
+
+// finishUninstall 卸载收尾：以残留探测结果为准确定最终状态，绝不把状态卡死在「卸载中」。
+// 返回 true 表示应用已真正卸载（标记为未安装）；false 表示残留仍在（恢复为已安装并记录错误，可重试）。
+func finishUninstall(meta AppMeta, logf func(format string, args ...any)) bool {
+	// 标记文件应用：卸载流程开始时即删除面板维护的标记文件（文件是否在，
+	// 是 isMetaInstalled 对该类应用判断的唯一依据）。放在探测前，
+	// 否则标记仍在会被探测为「残留」导致卸载状态错误回弹。
+	if meta.InstallMarkFile != "" {
+		mark := resolveInstallMark(meta.InstallMarkFile)
+		if err := os.Remove(mark); err == nil {
+			logf("已删除安装标记: %s", mark)
+		}
+	}
+	if !isMetaInstalled(meta) {
+		rec, _ := model.GetAppRecord(meta.Key)
+		rec.Status = model.AppNotInstalled
+		rec.Version = ""
+		rec.Error = ""
+		rec.ServiceName = ""
+		rec.InstalledAt = nil
+		_ = model.SaveAppRecord(rec)
+		removeOpenPorts(meta, logf)
+		InvalidateAppsCache()
+		InvalidateEnvStatusCache() // 环境状态已变化，失效缓存待重新探测
+		logf("卸载完成")
+		return true
+	}
 	rec, _ := model.GetAppRecord(meta.Key)
-	rec.Status = model.AppNotInstalled
-	rec.Version = ""
-	rec.Error = ""
-	rec.ServiceName = ""
-	rec.InstalledAt = nil
+	rec.Status = model.AppInstalled
+	rec.Error = "卸载失败，应用仍存在，请查看日志后重试"
 	_ = model.SaveAppRecord(rec)
-	removeOpenPorts(meta, logf)
 	InvalidateAppsCache()
-	InvalidateEnvStatusCache() // 环境状态已变化，失效缓存待重新探测
-	logf("卸载完成")
+	InvalidateEnvStatusCache()
+	logf("卸载未完成：探测到应用仍存在，状态已恢复为「已安装」")
+	return false
 }
 
 // removeOpenPorts 卸载成功后回收安装时自动放行的端口（OpenPorts）。

@@ -473,6 +473,9 @@ func CompareEnvForMigration(manifest *MigrateManifest, env MigrateEnvInfo) []Mis
 	if len(manifest.FTPs) > 0 && !env.FTP {
 		add("FTP 服务", "ftp", "ftp")
 	}
+	if missing == nil {
+		missing = []MissingEnv{} // 避免 JSON 序列化为 null，前端 plan.missing.length 直接崩溃
+	}
 	return missing
 }
 
@@ -492,14 +495,48 @@ type ImportRunRequest struct {
 	NewFTPPassword string   `json:"new_ftp_password"` // FTP 新密码（必须设置）
 }
 
+// 任务类型：前端重新打开搬家工具时据此跳回对应的 Tab
+const (
+	TaskKindExport = "export" // 迁出到对端面板（网站迁出 Tab）
+	TaskKindImport = "import" // 从源面板迁入本机（网站迁入 Tab）
+)
+
+// ItemResult 单个子任务的结果（用于前端按项展示成功/失败）
+type ItemResult struct {
+	Type    string `json:"type"`    // site / site-file / site-config / database / database-data / ftp
+	Name    string `json:"name"`    // 网站名/库名/FTP 用户
+	Status  string `json:"status"`  // success / failed / skipped
+	Message string `json:"message"` // 详细信息（失败原因 / 备注）
+}
+
 // ImportTask 迁移任务状态
 type ImportTask struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"` // running / success / failed
-	Logs      []string  `json:"logs"`
-	Error     string    `json:"error"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string       `json:"id"`
+	Kind      string       `json:"kind"`    // export / import，见 TaskKind*
+	Status    string       `json:"status"`  // running / success / failed
+	Logs      []string     `json:"logs"`
+	Error     string       `json:"error"`
+	Items     []ItemResult `json:"items"`   // 各子任务处理结果（建站/建库/伪静态/数据导入等）
+	UpdatedAt time.Time    `json:"updated_at"`
 	mu        sync.Mutex
+}
+
+// addItem 记录一个子任务的结果（线程安全）
+func (t *ImportTask) addItem(typ, name, status, msg string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Items = append(t.Items, ItemResult{Type: typ, Name: name, Status: status, Message: msg})
+	t.UpdatedAt = time.Now()
+}
+
+// hasFailedItemsLocked 判断是否有失败项（调用方需持有 t.mu）
+func (t *ImportTask) hasFailedItemsLocked() bool {
+	for _, it := range t.Items {
+		if it.Status == "failed" {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -507,8 +544,8 @@ var (
 	importTasksMu sync.Mutex
 )
 
-func newImportTask(id string) *ImportTask {
-	t := &ImportTask{ID: id, Status: "running", Logs: []string{}, UpdatedAt: time.Now()}
+func newImportTask(id, kind string) *ImportTask {
+	t := &ImportTask{ID: id, Kind: kind, Status: "running", Logs: []string{}, UpdatedAt: time.Now()}
 	importTasksMu.Lock()
 	importTasks[id] = t
 	importTasksMu.Unlock()
@@ -527,11 +564,36 @@ func ImportTaskStatus(id string) (*ImportTask, error) {
 	defer t.mu.Unlock()
 	return &ImportTask{
 		ID:        t.ID,
+		Kind:      t.Kind,
 		Status:    t.Status,
 		Logs:      append([]string{}, t.Logs...),
 		Error:     t.Error,
+		Items:     append([]ItemResult{}, t.Items...),
 		UpdatedAt: t.UpdatedAt,
 	}, nil
+}
+
+// ListImportTasks 列出全部迁移任务（按最近更新倒序）。
+// 前端重新打开搬家工具时用它找出「仍在进行中」的任务，直接跳回进度页继续查看，
+// 而不是每次都从第 1 步重新开始。
+func ListImportTasks() []*ImportTask {
+	importTasksMu.Lock()
+	defer importTasksMu.Unlock()
+	out := make([]*ImportTask, 0, len(importTasks))
+	for _, t := range importTasks {
+		t.mu.Lock()
+		out = append(out, &ImportTask{
+			ID:        t.ID,
+			Kind:      t.Kind,
+			Status:    t.Status,
+			Logs:      append([]string{}, t.Logs...),
+			Error:     t.Error,
+			UpdatedAt: t.UpdatedAt,
+		})
+		t.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out
 }
 
 // StartImport 开始迁入（异步执行，返回任务 ID）
@@ -543,7 +605,7 @@ func StartImport(req ImportRunRequest) (string, error) {
 		return "", errors.New("请至少选择一个迁移对象")
 	}
 	id := "import-" + time.Now().Format("20060102150405")
-	task := newImportTask(id)
+	task := newImportTask(id, TaskKindImport)
 	go runImport(task, req)
 	return id, nil
 }
@@ -729,6 +791,7 @@ func restoreSite(t *ImportTask, workDir string, ms *MigrateSite, req ImportRunRe
 		ProxyPass:      ms.ProxyPass,
 		Framework:      ms.Framework,
 		Remark:         ms.Remark,
+		Rewrite:        ms.Rewrite,
 	}
 	if ms.Domains != "" {
 		createReq.Domain = ms.Domain + "," + ms.Domains
@@ -922,20 +985,25 @@ func PanelVersion() string {
 
 // ImportPlanRequest 迁入计划请求
 type ImportPlanRequest struct {
-	PanelType  string   `json:"panel_type"` // 源面板类型：kypanel
+	PanelType  string   `json:"panel_type"`  // 源面板类型：kypanel
 	PanelURL   string   `json:"panel_url"`
 	PanelToken string   `json:"panel_token"`
-	Sites      []string `json:"sites"` // 选中的网站
+	Sites      []string `json:"sites"`      // 选中的网站
+	Databases  []string `json:"databases"`  // 选中的数据库（用于同名检测）
+	FTPs       []string `json:"ftps"`       // 选中的 FTP（用于同名检测）
 }
 
 // ImportPlanResult 迁入计划结果
 type ImportPlanResult struct {
-	PanelVersion string           `json:"panel_version"`
-	Env          MigrateEnvInfo   `json:"env"`
-	Sites        []map[string]any `json:"sites"`
-	Missing      []MissingEnv     `json:"missing"`
-	DBsCount     int              `json:"dbs_count"`
-	FTPsCount    int              `json:"ftps_count"`
+	PanelVersion   string           `json:"panel_version"`
+	Env            MigrateEnvInfo   `json:"env"`
+	Sites          []map[string]any `json:"sites"`
+	Missing        []MissingEnv     `json:"missing"`
+	ExistingSites  []string         `json:"existing_sites"`  // 本机已存在的同名网站（与选中网站对比）
+	ExistingDBs    []string         `json:"existing_dbs"`    // 本机已存在的同名数据库
+	ExistingFTPs   []string         `json:"existing_ftps"`   // 本机已存在的同名 FTP 账号
+	DBsCount       int              `json:"dbs_count"`
+	FTPsCount      int              `json:"ftps_count"`
 }
 
 // ExportPrecheckRequest 迁出前环境预检请求
@@ -998,7 +1066,7 @@ func ExportPrecheck(req ExportPrecheckRequest) (map[string]any, error) {
 			"all_ready":  len(missing) == 0,
 		}, nil
 	case "bt":
-		res, err := BTEnvCompare(req.PanelURL, req.PanelToken, req.Sites)
+		res, err := BTEnvCompare(req.PanelURL, req.PanelToken, req.Sites, req.Databases)
 		if err != nil {
 			return nil, err
 		}
@@ -1008,8 +1076,9 @@ func ExportPrecheck(req ExportPrecheckRequest) (map[string]any, error) {
 	}
 }
 
-// FetchRemoteSites 拉取源面板网站列表（不对比环境）
-func FetchRemoteSites(req ImportPlanRequest) ([]map[string]any, error) {
+// FetchRemoteSites 拉取源面板的网站/数据库/FTP 全量列表（不对比环境）
+// 返回结构：{sites: [], databases: [], ftps: []}，供前端三列多选使用
+func FetchRemoteSites(req ImportPlanRequest) (map[string]any, error) {
 	if req.PanelURL == "" || req.PanelToken == "" {
 		return nil, errors.New("请填写源面板地址和 API 密钥")
 	}
@@ -1019,12 +1088,147 @@ func FetchRemoteSites(req ImportPlanRequest) ([]map[string]any, error) {
 		if err := remote.Ping(); err != nil {
 			return nil, err
 		}
-		return remote.GetSites()
+		sites, err := remote.GetSites()
+		if err != nil {
+			return nil, err
+		}
+		// kypanel 源面板：databases/ftps 没有独立接口，按 sites.dbs/sites.ftps 聚合去重
+		dbSet := map[string]struct{}{}
+		ftpSet := map[string]struct{}{}
+		for _, s := range sites {
+			for _, d := range toStringSliceAny(s["dbs"]) {
+				dbSet[d] = struct{}{}
+			}
+			for _, f := range toStringSliceAny(s["ftps"]) {
+				ftpSet[f] = struct{}{}
+			}
+		}
+		var dbsList, ftpsList []map[string]any
+		for d := range dbSet {
+			dbsList = append(dbsList, map[string]any{"name": d, "type": "mysql"})
+		}
+		for f := range ftpSet {
+			ftpsList = append(ftpsList, map[string]any{"username": f})
+		}
+		return map[string]any{"sites": sites, "databases": dbsList, "ftps": ftpsList}, nil
 	case "bt":
-		return FetchBTSites(req.PanelURL, req.PanelToken)
+		client := NewBTClient(req.PanelURL, req.PanelToken)
+		sites, err := client.SiteList()
+		if err != nil {
+			return nil, fmt.Errorf("获取对端面板网站列表失败: %w", err)
+		}
+		dbs, _ := client.DatabaseList()
+		ftps, _ := client.FtpUserList()
+
+		// 整理 sites（含每个站点的 dbs/ftps 关联）
+		type btSiteView struct {
+			m           map[string]any
+			root, name  string
+		}
+		var siteViews []btSiteView
+		var siteOuts []map[string]any
+		for _, s := range sites {
+			name := toStr(s["name"])
+			if name == "" {
+				continue
+			}
+			root := toStr(s["path"])
+			phpVer := normBTPhpVersion(strFromAny(s["php_version"]))
+			projType := strFromAny(s["project_type"])
+			if projType == "" {
+				projType = strFromAny(s["type"])
+			}
+			typ := mapBTProjectType(projType)
+			domains := parseBTDomains(s["domain"])
+			primary := ""
+			if len(domains) > 0 {
+				primary = domains[0]
+			}
+			// 关联数据库：库名/用户名包含网站名
+			var siteDBs []string
+			for _, d := range dbs {
+				dbName := toStr(d["name"])
+				dbUser := toStr(d["db_user"])
+				if dbUser == "" {
+					dbUser = toStr(d["username"])
+				}
+				if dbName != "" && (dbName == name || dbUser == name || strings.Contains(dbName, name) || strings.Contains(dbUser, name)) {
+					siteDBs = append(siteDBs, dbName)
+				}
+			}
+			// 关联 FTP：家目录指向网站根目录
+			var siteFtps []string
+			for _, f := range ftps {
+				uname := toStr(f["username"])
+				upath := toStr(f["path"])
+				if uname != "" && root != "" && (upath == root || strings.HasPrefix(upath, root+"/")) {
+					siteFtps = append(siteFtps, uname)
+				}
+			}
+			siteOuts = append(siteOuts, map[string]any{
+				"name":         name,
+				"domain":       primary,
+				"domains":      strings.Join(domains, ","),
+				"type":         typ,
+				"php_version":  phpVer,
+				"root":         root,
+				"project_type": projType,
+				"dbs":          siteDBs,
+				"ftps":         siteFtps,
+				"migratable":   true,
+			})
+			siteViews = append(siteViews, btSiteView{m: s, root: root, name: name})
+		}
+
+		// 整理全量 databases 列表（去重）
+		dbSeen := map[string]bool{}
+		var dbOut []map[string]any
+		for _, d := range dbs {
+			n := toStr(d["name"])
+			if n == "" || dbSeen[n] {
+				continue
+			}
+			dbSeen[n] = true
+			dbOut = append(dbOut, map[string]any{
+				"name":     n,
+				"type":     "mysql",
+				"username": toStr(d["db_user"]),
+			})
+		}
+		// 整理全量 ftps 列表（去重）
+		ftpSeen := map[string]bool{}
+		var ftpOut []map[string]any
+		for _, f := range ftps {
+			n := toStr(f["username"])
+			if n == "" || ftpSeen[n] {
+				continue
+			}
+			ftpSeen[n] = true
+			ftpOut = append(ftpOut, map[string]any{
+				"username": n,
+				"path":     toStr(f["path"]),
+			})
+		}
+		_ = siteViews // 占位防止 unused
+		return map[string]any{"sites": siteOuts, "databases": dbOut, "ftps": ftpOut}, nil
 	default:
 		return nil, errors.New("不支持的面板类型，请先连接并识别面板")
 	}
+}
+
+// toStringSliceAny 把 any 转 []string（用于 sites 中 dbs/ftps 字段聚合）
+func toStringSliceAny(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, it := range x {
+			out = append(out, fmt.Sprint(it))
+		}
+		return out
+	}
+	return nil
 }
 
 // BuildImportPlan 连接源面板，拉取选中网站配置并对比本机环境
@@ -1069,12 +1273,14 @@ func BuildImportPlan(req ImportPlanRequest) (*ImportPlanResult, error) {
 		ms.DBs = toStringSlice(s["dbs"])
 		ms.FTPs = toStringSlice(s["ftps"])
 		manifest.Sites = append(manifest.Sites, ms)
-		for _, d := range ms.DBs {
-			manifest.Databases = append(manifest.Databases, MigrateDB{Name: d, User: d})
-		}
-		for _, f := range ms.FTPs {
-			manifest.FTPs = append(manifest.FTPs, MigrateFTP{Username: f})
-		}
+	}
+	// 环境对比只针对「用户实际勾选」的数据库/FTP，不把网站关联项算进去
+	// 否则用户只选了 PHP 网站、没勾 FTP 时也会被提示「缺少 FTP 服务」
+	for _, n := range req.Databases {
+		manifest.Databases = append(manifest.Databases, MigrateDB{Name: n, User: n})
+	}
+	for _, n := range req.FTPs {
+		manifest.FTPs = append(manifest.FTPs, MigrateFTP{Username: n})
 	}
 	if len(picked) == 0 {
 		return nil, errors.New("源面板上未找到选中的网站")
@@ -1082,14 +1288,52 @@ func BuildImportPlan(req ImportPlanRequest) (*ImportPlanResult, error) {
 
 	env := MigrateEnvStatus()
 	missing := CompareEnvForMigration(&manifest, env)
+	exSites, exDBs, exFTPs := resolveImportConflicts(req.Sites, req.Databases, req.FTPs)
 	return &ImportPlanResult{
-		PanelVersion: remote.Version,
-		Env:          env,
-		Sites:        picked,
-		Missing:      missing,
-		DBsCount:     len(manifest.Databases),
-		FTPsCount:    len(manifest.FTPs),
+		PanelVersion:  remote.Version,
+		Env:           env,
+		Sites:         picked,
+		Missing:       missing,
+		ExistingSites: exSites,
+		ExistingDBs:   exDBs,
+		ExistingFTPs:  exFTPs,
+		DBsCount:      len(manifest.Databases),
+		FTPsCount:     len(manifest.FTPs),
 	}, nil
+}
+
+// resolveImportConflicts 与本机现有同名项目做对比，返回已存在的子集（保持顺序）
+func resolveImportConflicts(sites, dbs, ftps []string) (exSites, exDBs, exFTPs []string) {
+	for _, n := range sites {
+		if _, ok := model.GetSiteByName(n); ok {
+			exSites = append(exSites, n)
+		}
+	}
+	if len(dbs) > 0 {
+		var rows []model.DatabaseAccount
+		model.DB.Where("db_name IN ?", dbs).Find(&rows)
+		for _, n := range dbs {
+			for _, r := range rows {
+				if r.DbName == n {
+					exDBs = append(exDBs, n)
+					break
+				}
+			}
+		}
+	}
+	if len(ftps) > 0 {
+		var rows []model.FtpUser
+		model.DB.Where("username IN ?", ftps).Find(&rows)
+		for _, n := range ftps {
+			for _, r := range rows {
+				if r.Username == n {
+					exFTPs = append(exFTPs, n)
+					break
+				}
+			}
+		}
+	}
+	return
 }
 
 // ---- 类型转换辅助 ----

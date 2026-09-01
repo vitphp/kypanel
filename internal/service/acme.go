@@ -298,8 +298,9 @@ func issueACME(s model.Site, brand, algorithm string, domains []string, email st
 		}
 	}
 
-	// 等待时间放宽到 5 分钟：LE 对域名有 primary + secondary 多路径验证，secondary 可能延迟数分钟
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	// 等待时间放宽到 10 分钟：LE 对域名有 primary + secondary 多路径验证，
+	// secondary 可能延迟数分钟；验证失败后的自动重试（见下）也会占用部分时间。
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 
 	client, _, err := newACMEClient(brand)
@@ -319,20 +320,48 @@ func issueACME(s model.Site, brand, algorithm string, domains []string, email st
 		return errors.New("生成 CSR 失败: " + err.Error())
 	}
 
+	// 域名验证（HTTP-01）自动重试：
+	// LE 对每个域名有 primary + secondary 多路径验证，secondary 节点可能延迟数分钟
+	// 才从另一节点发起请求，且该节点可能未及时拉取到验证文件，导致首次验证失败、
+	// 稍后重试成功（面板日志里常见的"第一次失败第二次成功"）。因此验证失败后
+	// 等待片刻再重新创建订单（旧订单验证失败后已不可复用）并重试一次，能显著
+	// 提高首次申请成功率，用户无需反复手动点「申请」。
+	const maxVerifyAttempts = 2
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
 	if err != nil {
 		return errors.New("创建订单失败: " + err.Error())
 	}
-
 	order, err = client.GetOrder(ctx, order.URI)
 	if err != nil {
 		return errors.New("获取订单失败: " + err.Error())
 	}
-
-	if order.Status != acme.StatusReady {
+	verified := false
+	for attempt := 1; attempt <= maxVerifyAttempts && !verified; attempt++ {
+		if order.Status == acme.StatusReady {
+			verified = true
+			break
+		}
 		if err := solveHTTP01Challenges(ctx, client, order, webRoot); err != nil {
+			if attempt < maxVerifyAttempts {
+				// 等待 LE secondary 验证节点就绪后重试
+				select {
+				case <-time.After(10 * time.Second):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				order, err = client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
+				if err != nil {
+					return errors.New("创建订单失败: " + err.Error())
+				}
+				order, err = client.GetOrder(ctx, order.URI)
+				if err != nil {
+					return errors.New("获取订单失败: " + err.Error())
+				}
+				continue
+			}
 			return err
 		}
+		verified = true
 	}
 
 	// CSR 必须提交到 finalize 端点（order.FinalizeURL），而非订单端点（order.URI）。

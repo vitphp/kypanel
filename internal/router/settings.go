@@ -110,6 +110,27 @@ func setupSettingsRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, gin.H{"name": req.Name, "sub": req.Sub})
 	})
 
+	// 用户体验改善计划：错误上报开关（开启后应用安装/卸载失败自动上报官网）
+	g.POST("/settings/report", func(c *gin.Context) {
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, 400, "参数错误")
+			return
+		}
+		if err := service.SetReportErrors(req.Enabled); err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
+		state := "关闭"
+		if req.Enabled {
+			state = "开启"
+		}
+		recordOpForCtx(c, "settings.report", "用户体验改善计划（错误上报）"+state, "success")
+		utils.Ok(c, gin.H{"enabled": req.Enabled})
+	})
+
 	// 保存 MySQL root 密码
 	g.POST("/settings/mysql-password", func(c *gin.Context) {
 		var req struct {

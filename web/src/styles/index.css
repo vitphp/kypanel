@@ -125,12 +125,18 @@ h1, h2, h3, h4 { color: #0f172a; font-weight: 600; }
 /* el-drawer 标题加粗 */
 .el-drawer__header { margin-bottom: 12px; font-weight: 600; }
 
-/* ============= 弹窗高度限制 =============
-   弹窗过高（内容多如统计归属地 50 行）时整体可滚动，避免内容溢出视口。
-   顶部 4vh 间距，弹窗占 92vh；body 区域 flex: 1 内部 overflow-y 滚动。 */
+/* ============= 弹窗垂直居中 + 高度限制 =============
+   弹窗在视口垂直/水平居中；过高（内容多如统计归属地 50 行）时整体可滚动，
+   避免内容溢出视口。弹窗占 92vh；body 区域 flex: 1 内部 overflow-y 滚动。 */
+.el-overlay-dialog {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
 .el-dialog {
   max-height: 92vh !important;
-  margin-top: 4vh !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
   display: flex !important;
   flex-direction: column !important;
 }

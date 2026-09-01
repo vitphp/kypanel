@@ -24,6 +24,7 @@ func Init(path string) error {
 		&Admin{},
 		&OperationLog{},
 		&AppRecord{},
+		&AppChannel{},
 		&Site{},
 		&Cron{},
 		&FtpUser{},
