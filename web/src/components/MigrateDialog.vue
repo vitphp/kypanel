@@ -186,10 +186,17 @@
             <el-tag v-if="task && task.status === 'running'" type="warning" size="small">进行中</el-tag>
             <el-tag v-else-if="task && task.status === 'success'" type="success" size="small">完成</el-tag>
             <el-tag v-else-if="task && task.status === 'failed'" type="danger" size="small">失败</el-tag>
+            <el-tag v-else-if="task && task.status === 'canceled'" type="info" size="small">已取消</el-tag>
           </div>
+
           <pre ref="expTaskLog" class="task-log">{{ task && task.logs ? task.logs.join('\n') : '等待开始...' }}</pre>
-          <div v-if="task && task.status === 'failed'" class="mig-back-btn">
-            <el-button type="primary" @click="expStep = 2">返回上一步</el-button>
+
+          <div v-if="task && task.status === 'running'" class="mig-back-btn">
+            <el-button type="danger" plain :loading="canceling" @click="cancelTask(task.id)">取消迁移</el-button>
+          </div>
+          <div v-if="task && (task.status === 'failed' || task.status === 'canceled')" class="mig-back-btn">
+            <el-button @click="expStep = 2">返回上一步</el-button>
+            <el-button type="primary" @click="doBTExport({})">继续迁移</el-button>
           </div>
         </div>
 
@@ -440,10 +447,17 @@
             <el-tag v-if="task && task.status === 'running'" type="warning" size="small">进行中</el-tag>
             <el-tag v-else-if="task && task.status === 'success'" type="success" size="small">完成</el-tag>
             <el-tag v-else-if="task && task.status === 'failed'" type="danger" size="small">失败</el-tag>
+            <el-tag v-else-if="task && task.status === 'canceled'" type="info" size="small">已取消</el-tag>
           </div>
+
           <pre ref="impTaskLog" class="task-log">{{ task && task.logs ? task.logs.join('\n') : '等待开始...' }}</pre>
-          <div v-if="task && task.status === 'failed'" class="mig-back-btn">
-            <el-button type="primary" @click="impStep = 2">返回上一步</el-button>
+
+          <div v-if="task && task.status === 'running'" class="mig-back-btn">
+            <el-button type="danger" plain :loading="canceling" @click="cancelTask(task.id)">取消迁移</el-button>
+          </div>
+          <div v-if="task && (task.status === 'failed' || task.status === 'canceled')" class="mig-back-btn">
+            <el-button @click="impStep = 2">返回上一步</el-button>
+            <el-button type="primary" @click="startImport()">继续迁移</el-button>
           </div>
         </div>
 
@@ -543,6 +557,7 @@ const plan = ref(null)
 const autoInstall = ref([])
 const overwrite = ref(false)
 const importing = ref(false)
+const canceling = ref(false)
 
 const task = ref(null)
 let taskTimer = null
@@ -987,11 +1002,14 @@ function pollTask(id, onDone) {
     try {
       const res = await request.get(`/migrate/tasks/${id}`)
       task.value = res.data
-      if (res.data.status === 'success' || res.data.status === 'failed') {
+      const st = res.data.status
+      if (st === 'success' || st === 'failed' || st === 'canceled') {
         clearInterval(taskTimer)
-        if (res.data.status === 'success') {
+        if (st === 'success') {
           ElMessage.success('操作完成')
           if (onDone) onDone()
+        } else if (st === 'canceled') {
+          ElMessage.info('迁移已取消')
         } else {
           ElMessage.error(res.data.error || '操作失败')
         }
@@ -1000,6 +1018,19 @@ function pollTask(id, onDone) {
       clearInterval(taskTimer)
     }
   }, 2000)
+}
+
+// 取消进行中的迁移：后端立即中断下载/导入，轮询会在下一次刷新时切换到「已取消」状态
+async function cancelTask(id) {
+  canceling.value = true
+  try {
+    await request.post(`/migrate/tasks/${id}/cancel`)
+    ElMessage.success('已发送取消请求，正在中断...')
+  } catch (e) {
+    ElMessage.error('取消失败：' + (e.response?.data?.msg || e.message))
+  } finally {
+    canceling.value = false
+  }
 }
 
 // ---------- 工具 ----------

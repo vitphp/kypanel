@@ -169,7 +169,7 @@ func copyRecursive(src, dst string) error {
 		return os.Symlink(target, dst)
 	}
 	if info.IsDir() {
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		if err := os.MkdirAll(dst, 0o755); err != nil {
 			return err
 		}
 		entries, err := os.ReadDir(src)
@@ -188,7 +188,7 @@ func copyRecursive(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
@@ -227,7 +227,11 @@ func CopyPath(srcPath, dstDir string) error {
 	if _, err := os.Lstat(target); err == nil {
 		return errors.New("目标位置已存在同名文件: " + filepath.Base(src))
 	}
-	return copyRecursive(src, target)
+	if err := copyRecursive(src, target); err != nil {
+		return err
+	}
+	_ = ChownToWebUser(target, true)
+	return nil
 }
 
 // MovePath 移动文件/目录到目标目录（跨设备自动回退复制+删除）

@@ -561,6 +561,8 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 		sb.WriteString("        fastcgi_index index.php;\n")
 		sb.WriteString("        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n")
 		sb.WriteString("        include fastcgi_params;\n")
+		// 防跨站：将 PHP 文件操作限制在本站点根目录与 /tmp，避免一站被黑读写/污染其他站点
+		fmt.Fprintf(&sb, "        fastcgi_param PHP_ADMIN_VALUE \"open_basedir=%s/:/tmp/\";\n", strings.TrimRight(s.Root, "/"))
 		sb.WriteString("    }\n\n")
 	default: // node / python / go / proxy：反向代理到本地端口或任意 URL
 		sb.WriteString("    location / {\n")
@@ -1318,6 +1320,7 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 			}
 			// 生成默认 index.html 与 404.html（不生成假 index.php）
 			writeDefaultPages(s.Root, s.Name)
+		_ = ChownToWebUser(s.Root, true)
 			// 可选：创建数据库
 			if req.CreateDB {
 				dbName := req.DBName
@@ -1345,6 +1348,7 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		} else {
 			// 静态站点：生成默认 index.html 与 404.html
 			writeDefaultPages(s.Root, s.Name)
+		_ = ChownToWebUser(s.Root, true)
 		}
 
 	default: // proxy 反向代理

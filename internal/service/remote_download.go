@@ -128,7 +128,7 @@ func runRemoteDownload(task *RemoteDownloadTask) {
 	}
 
 	dst := filepath.Join(task.Dir, task.Name)
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		finishRemoteTask(task, "failed", err.Error())
 		return

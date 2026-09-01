@@ -113,6 +113,9 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 	// 注：单个网站失败不中断整体，让所有失败都能在前端展示，
 	//     整体 Status 在末尾根据 Items 是否有 failed 决定。
 	for _, ms := range exp.Manifest.Sites {
+		if t.canceled() {
+			return
+		}
 		domains := ms.Domain
 		if ms.Domains != "" {
 			domains += "," + ms.Domains
@@ -227,6 +230,9 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		}
 	}
 	for _, db := range exp.Manifest.Databases {
+		if t.canceled() {
+			return
+		}
 		pass := req.DBPassword
 		if pass == "" {
 			pass = db.Password
@@ -348,6 +354,9 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		}
 	}
 	for _, f := range exp.Manifest.FTPs {
+		if t.canceled() {
+			return
+		}
 		if btFtpExist[f.Username] {
 			if !req.FtpOverwrite[f.Username] {
 				t.logf("FTP 账号 %s 在对端面板已存在，按选择跳过", f.Username)

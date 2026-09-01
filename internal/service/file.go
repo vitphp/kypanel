@@ -227,7 +227,7 @@ func SaveUploadAppend(dstPath, fileID string, offset int64, totalSize int64, src
 
 	// 未携带 file_id 的直传场景：直接写最终文件（脚本 / 兼容旧调用）
 	if fileID == "" {
-		out, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		out, err := os.OpenFile(clean, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			return 0, false, err
 		}
@@ -251,7 +251,7 @@ func SaveUploadAppend(dstPath, fileID string, offset int64, totalSize int64, src
 		}
 	}
 
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o755)
 	if err != nil {
 		return 0, false, err
 	}

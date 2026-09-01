@@ -12,6 +12,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/tls"
 	"encoding/hex"
@@ -688,14 +689,31 @@ func (c *BTClient) Unzip(zipPath, destDir string) error {
 }
 
 // ZipDir 在对端面板服务器上压缩目录/文件到指定压缩包（files?action=Zip）。
-// sfile: 源绝对路径（目录）；dfile: 目标目录（必须已存在，通常 /www/backup）；
-// zfile: 压缩包文件名；zipType: "zip" 或 "tar.gz"。压缩结果位于 dfile/zfile。
-func (c *BTClient) ZipDir(sfile, dfile, zfile, zipType string) error {
+// sfile: 源目录绝对路径；destFile: 压缩包完整目标路径（含目录与文件名）；
+// zipType: "zip" 或 "tar.gz"。
+// 参数随宝塔版本有差异：新版为 path（源父目录）+ sfile（相对名）+ dfile（目标完整路径）+
+// z_type（类型），老版本为 sfile（绝对路径）+ dfile（目标目录）+ type + z_file（文件名），
+// 新版参数失败时回退老参数。
+func (c *BTClient) ZipDir(sfile, destFile, zipType string) error {
+	trimmed := strings.TrimRight(sfile, "/")
+	parent, relName := "/", trimmed
+	if idx := strings.LastIndex(trimmed, "/"); idx >= 0 {
+		parent = trimmed[:idx+1]
+		relName = trimmed[idx+1:]
+	}
 	params := url.Values{}
+	params.Set("path", parent)
+	params.Set("sfile", relName)
+	params.Set("dfile", destFile)
+	params.Set("z_type", zipType)
+	if _, err := c.btRequest("files", "Zip", params); err == nil {
+		return nil
+	}
+	params = url.Values{}
 	params.Set("sfile", sfile)
-	params.Set("dfile", dfile)
+	params.Set("dfile", filepath.Dir(destFile))
 	params.Set("type", zipType)
-	params.Set("z_file", zfile)
+	params.Set("z_file", filepath.Base(destFile))
 	_, err := c.btRequest("files", "Zip", params)
 	return err
 }
@@ -707,6 +725,14 @@ func (c *BTClient) DeleteFile(path string) error {
 	params.Set("path", path)
 	_, err := c.btRequest("files", "DeleteFile", params)
 	return err
+}
+
+// CreateRemoteDir 在对端面板服务器上创建目录（files?action=CreateDir）。
+// 目录已存在时宝塔会返回错误，此处静默忽略，仅尽力而为。
+func (c *BTClient) CreateRemoteDir(dir string) {
+	params := url.Values{}
+	params.Set("dpath", dir)
+	_, _ = c.btRequest("files", "CreateDir", params)
 }
 
 // ---------------- 备份与下载 ----------------
@@ -764,14 +790,6 @@ func (c *BTClient) DatabaseBackupList(dbID string) ([]map[string]any, error) {
 		return nil, err
 	}
 	return btParseDataList(res2)
-}
-
-// BackupSiteNow 立即触发网站备份（site?action=BackupSite，参数 name=站点名）。
-func (c *BTClient) BackupSiteNow(siteName string) error {
-	params := url.Values{}
-	params.Set("name", siteName)
-	_, err := c.btRequest("site", "BackupSite", params)
-	return err
 }
 
 // WaitSiteBackup 轮询等待对端面板网站备份完成，返回备份文件的远程绝对路径。
@@ -872,15 +890,6 @@ func (c *BTClient) NewestDBBackup(dbName string) string {
 	return ""
 }
 
-// CopyFile 在对端面板服务器上复制文件（files?action=CopyFile，sfile/dfile）
-func (c *BTClient) CopyFile(sfile, dfile string) error {
-	params := url.Values{}
-	params.Set("sfile", sfile)
-	params.Set("dfile", dfile)
-	_, err := c.btRequest("files", "CopyFile", params)
-	return err
-}
-
 // ReadRemoteFile 读取对端面板服务器上文本文件内容（files?action=GetFileBody）
 func (c *BTClient) ReadRemoteFile(path string) (string, error) {
 	params := url.Values{}
@@ -896,107 +905,184 @@ func (c *BTClient) ReadRemoteFile(path string) (string, error) {
 	return "", errors.New("读取对端面板文件失败")
 }
 
-// GetSiteWebRoot 解析对端面板站点 nginx 配置中的 root 目录（用于临时放置可下载文件）
+// GetSiteWebRoot 解析对端面板站点 nginx 配置中的 root 目录（用于临时放置可下载文件）。
+// 兼容不同版本宝塔的 vhost 路径，且配置文件可能以主域名或站点名命名，逐一尝试。
 func (c *BTClient) GetSiteWebRoot(domain string) string {
-	conf, err := c.ReadRemoteFile("/www/server/panel/vhost/nginx/" + domain + ".conf")
-	if err != nil {
-		return ""
+	candidates := []string{
+		"/www/server/panel/vhost/nginx/" + domain + ".conf",
+		"/www/server/nginx/conf/vhost/" + domain + ".conf",
 	}
-	// GetFileBody 返回的 JSON 中换行是转义字面量（\n），先还原成真实换行再解析
-	conf = strings.ReplaceAll(conf, "\\n", "\n")
-	re := regexp.MustCompile(`(?m)^\s*root\s+([^;#\s]+)`)
-	if m := re.FindStringSubmatch(conf); len(m) > 1 {
-		root := strings.TrimSpace(m[1])
-		if root != "" && strings.HasPrefix(root, "/") {
-			return root
+	for _, p := range candidates {
+		conf, err := c.ReadRemoteFile(p)
+		if err != nil || strings.TrimSpace(conf) == "" {
+			continue
+		}
+		// GetFileBody 返回的 JSON 中换行是转义字面量（\n），先还原成真实换行再解析
+		conf = strings.ReplaceAll(conf, "\\n", "\n")
+		re := regexp.MustCompile(`(?m)^\s*root\s+([^;#\s]+)`)
+		if m := re.FindStringSubmatch(conf); len(m) > 1 {
+			root := strings.Trim(strings.TrimSpace(m[1]), `"'`)
+			if root != "" && strings.HasPrefix(root, "/") {
+				return root
+			}
 		}
 	}
 	return ""
 }
 
-// btSiteConfServerNames 解析对端面板站点 nginx 配置中的 server_name 列表
-// （部分站点记录里 domain 字段为空或为数字，需从配置里取真实域名用于文件直链）
-func (c *BTClient) btSiteConfServerNames(domain string) []string {
+// GetSiteRewrite 读取对端面板站点的伪静态规则内容。
+// 宝塔伪静态配置路径为 /www/server/panel/vhost/rewrite/<网站名>.conf，
+// 部分场景按主域名命名，故 name 与 domain 都尝试一遍，命中非空即返回。
+func (c *BTClient) GetSiteRewrite(name, domain string) string {
+	for _, cand := range []string{name, domain} {
+		if cand == "" {
+			continue
+		}
+		confPath := "/www/server/panel/vhost/rewrite/" + cand + ".conf"
+		content, err := c.ReadRemoteFile(confPath)
+		if err == nil {
+			if s := strings.TrimSpace(content); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// GetSiteSSLCert 从对端面板站点 nginx 配置中提取 SSL 证书与私钥内容。
+// 直接解析 nginx 配置文件中的 ssl_certificate / ssl_certificate_key 路径并读取，
+// 兼容不同版本宝塔的证书存放位置（vhost/cert 或 vhost/ssl），无需猜测具体目录。
+// 站点未启用 HTTPS 或无证书时返回空字符串。
+func (c *BTClient) GetSiteSSLCert(domain string) (cert, key string) {
+	if domain == "" {
+		return "", ""
+	}
 	conf, err := c.ReadRemoteFile("/www/server/panel/vhost/nginx/" + domain + ".conf")
 	if err != nil {
-		return nil
+		return "", ""
 	}
+	// GetFileBody 返回的 JSON 中换行是转义字面量（\n），先还原成真实换行再解析
 	conf = strings.ReplaceAll(conf, "\\n", "\n")
-	re := regexp.MustCompile(`(?m)^\s*server_name\s+([^;]+)`)
-	var out []string
-	for _, m := range re.FindAllStringSubmatch(conf, -1) {
-		for _, d := range strings.Fields(m[1]) {
-			d = strings.TrimSpace(d)
-			if d != "" {
-				out = append(out, d)
-			}
-		}
+	reCert := regexp.MustCompile(`(?m)^\s*ssl_certificate\b\s+([^;#\s]+)`)
+	reKey := regexp.MustCompile(`(?m)^\s*ssl_certificate_key\b\s+([^;#\s]+)`)
+	certPath, keyPath := "", ""
+	if m := reCert.FindStringSubmatch(conf); len(m) > 1 {
+		certPath = strings.TrimSpace(m[1])
 	}
-	return out
+	if m := reKey.FindStringSubmatch(conf); len(m) > 1 {
+		keyPath = strings.TrimSpace(m[1])
+	}
+	if certPath == "" || keyPath == "" || !strings.HasPrefix(certPath, "/") || !strings.HasPrefix(keyPath, "/") {
+		return "", ""
+	}
+	certContent, err1 := c.ReadRemoteFile(certPath)
+	keyContent, err2 := c.ReadRemoteFile(keyPath)
+	if err1 != nil || err2 != nil || strings.TrimSpace(certContent) == "" || strings.TrimSpace(keyContent) == "" {
+		return "", ""
+	}
+	return strings.TrimSpace(certContent), strings.TrimSpace(keyContent)
 }
 
-// DownloadViaWeb 从对端面板传输文件（单域名版，内部走 DownloadViaWebCandidates）
-func (c *BTClient) DownloadViaWeb(remotePath, domain, dest string) error {
-	return c.DownloadViaWebCandidates(remotePath, []string{domain}, dest)
-}
+// btSiteConfServerNames 已移除：文件直链下载方式整体废弃，统一走面板端口 /download。
 
-// DownloadViaWebCandidates 从对端面板传输文件：把远程文件复制到候选站点 web 根目录，
-// 通过站点 HTTPS 直链下载到本地（兼容宝塔新版无下载 API 的面板）。
-// 逐个候选域名尝试：获取该域名站点根目录 → CopyFile → HEAD 探测 → 断点续传下载，
-// 避免单个域名（如站内 API 域名）不可公网访问导致整个迁移中断。
-func (c *BTClient) DownloadViaWebCandidates(remotePath string, domains []string, dest string) error {
-	if len(domains) == 0 {
-		return errors.New("无可用的对端传输域名")
-	}
-	tmpName := "kypanel_" + btMD5(remotePath)[:12] + ".bin"
-	var tried []string
-	for _, domain := range domains {
-		domain = strings.TrimSpace(domain)
-		if domain == "" {
-			continue
-		}
-		webRoot := c.GetSiteWebRoot(domain)
-		if webRoot == "" {
-			tried = append(tried, domain+":无站点配置")
-			continue
-		}
-		tmpPath := strings.TrimRight(webRoot, "/") + "/" + tmpName
-		if err := c.CopyFile(remotePath, tmpPath); err != nil {
-			tried = append(tried, domain+":复制失败")
-			continue
-		}
-		u := "https://" + domain + "/" + tmpName
-		if !probeURL(u) {
-			tried = append(tried, domain+":不可访问")
-			_ = c.DeleteFile(tmpPath)
-			continue
-		}
-		// 清理临时文件失败只告警，不影响迁移结果
-		defer func(p string) {
-			if err := c.DeleteFile(p); err != nil {
-				slog.Warn("清理对端面板临时文件失败（可到对端面板手动删除）", "path", p, "err", err)
-			}
-		}(tmpPath)
-		return resumeDownloadHTTP(u, dest)
-	}
-	return fmt.Errorf("对端面板临时文件不可访问（已尝试 %v）", tried)
-}
-
-// probeURL 探测对端站点 HTTPS 直链是否可访问（跳过证书校验，兼容自签名证书）
-func probeURL(u string) bool {
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-	resp, err := client.Head(u)
+// DownloadViaPanel 通过对端面板端口直接下载文件（BTPanel /download 路由，
+// 面板内「下载数据库备份/网站备份」即走此路由），不依赖站点域名/SSL/伪静态。
+// 依次尝试 GET（query 鉴权）与 POST（form 鉴权），内容校验通过才认为成功。
+// isZipFile 检查文件是否为 zip 压缩（魔数 PK\x03\x04）
+func isZipFile(path string) bool {
+	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return false
+	}
+	return magic[0] == 'P' && magic[1] == 'K' && magic[2] == 0x03 && magic[3] == 0x04
 }
+
+// isTransferArchive 检查文件是否为迁移传输对象的有效压缩格式（gzip 或 zip）。
+// 网站包为 tar.gz（gzip 流）；数据库备份新版宝塔为 .sql.zip，老版本为 .sql.gz。
+func isTransferArchive(path string) bool {
+	return isGzipFile(path) || isZipFile(path)
+}
+
+// DownloadViaPanel 通过对端面板端口直接下载文件（BTPanel /download 路由，
+// 面板内「下载数据库备份/网站备份」即走此路由），不依赖站点域名/SSL/伪静态。
+// 依次尝试 GET（query 鉴权）与 POST（form 鉴权），内容校验通过才认为成功。
+func (c *BTClient) DownloadViaPanel(ctx context.Context, remotePath, dest string, onProgress func(done, total int64)) error {
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	token := btMD5(ts + btMD5(c.ApiSK))
+	q := url.Values{}
+	q.Set("filename", remotePath)
+	q.Set("request_token", token)
+	q.Set("request_time", ts)
+
+	attempts := []struct{ url, body string }{
+		{url: c.BaseURL + "/download?" + q.Encode()},
+		{url: c.BaseURL + "/download", body: "filename=" + url.QueryEscape(remotePath) +
+			"&request_token=" + token + "&request_time=" + ts},
+	}
+
+	var lastErr error
+	for _, attempt := range attempts {
+		if err := ctx.Err(); err != nil {
+			_ = os.Remove(dest)
+			return err
+		}
+		method, body := "GET", io.Reader(nil)
+		if attempt.body != "" {
+			method, body = "POST", strings.NewReader(attempt.body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, attempt.url, body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if attempt.body != "" {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		req.Header.Set("User-Agent", "kypanel-migrate/1.0")
+		resp, err := c.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("请求面板下载失败: %w", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("面板 /download 返回 HTTP %d", resp.StatusCode)
+			continue
+		}
+		f, err := os.Create(dest)
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		pw := &progressWriter{w: f, total: resp.ContentLength, lastReport: time.Now(), onProgress: onProgress}
+		_, copyErr := io.Copy(pw, resp.Body)
+		f.Close()
+		resp.Body.Close()
+		if copyErr != nil {
+			_ = os.Remove(dest)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			lastErr = copyErr
+			continue
+		}
+		if !isTransferArchive(dest) {
+			_ = os.Remove(dest)
+			lastErr = errors.New("面板 /download 返回内容不是压缩包（鉴权未通过或路径无效）")
+			continue
+		}
+		return nil
+	}
+	_ = os.Remove(dest)
+	return lastErr
+}
+
+
 
 // btBackupRemotePath 从备份记录中提取远程完整路径：优先 filename（完整路径），
 // 其次用 name + 默认备份目录。

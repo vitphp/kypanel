@@ -202,6 +202,15 @@ func setupMigrateRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, t)
 	})
 
+	// ---- 取消进行中的迁移（下载/导入中途立即中断）----
+	g.POST("/migrate/tasks/:id/cancel", func(c *gin.Context) {
+		if err := service.CancelImportTask(c.Param("id")); err != nil {
+			utils.Fail(c, 400, err.Error())
+			return
+		}
+		utils.Ok(c, nil)
+	})
+
 	// ---- 源面板对外接口（供目标面板迁入时调用）----
 	setupMigrateRemoteRoutes(g)
 }

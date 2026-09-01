@@ -4,12 +4,10 @@ package service
 // 通过对端面板官方 API 将对端面板网站/数据库/FTP 迁入本面板。
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +75,9 @@ func FetchBTSites(panelURL, apiSK string) ([]map[string]any, error) {
 		}
 
 		out = append(out, map[string]any{
+			// 宝塔站点 id 是 JSON 数字（解码为 float64），必须用 strFromAny 转字符串，
+			// site?action=BackupSite 等接口按 id 定位站点，缺失会导致「指定参数无效」
+			"id":           strFromAny(s["id"]),
 			"name":         name,
 			"domain":       primary,
 			"domains":      strings.Join(domains, ","),
@@ -128,7 +129,8 @@ func BuildBTImportPlan(req ImportPlanRequest) (*ImportPlanResult, error) {
 	for _, n := range req.FTPs {
 		manifest.FTPs = append(manifest.FTPs, MigrateFTP{Username: n})
 	}
-	if len(picked) == 0 {
+	// 只有勾选了网站却一个都没匹配上才报错；允许只迁移数据库/FTP 而不迁网站
+	if len(req.Sites) > 0 && len(picked) == 0 {
 		return nil, errors.New("对端面板上未找到选中的网站")
 	}
 	env := MigrateEnvStatus()
@@ -180,8 +182,14 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 	if len(req.AutoInstall) > 0 {
 		t.logf("开始安装缺失环境：%s ...", strings.Join(req.AutoInstall, ", "))
 		for _, key := range req.AutoInstall {
+			if t.canceled() {
+				return
+			}
 			t.logf("安装 %s 中...", key)
 			if err := installAppSync(key); err != nil {
+				if t.canceled() {
+					return
+				}
 				t.fail("环境安装失败（" + key + "）: " + err.Error())
 				return
 			}
@@ -189,6 +197,9 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 		}
 	}
 
+	if t.canceled() {
+		return
+	}
 	workDir := filepath.Join(migrateRoot(), "import-bt-"+t.ID)
 	_ = os.MkdirAll(workDir, 0o755)
 	defer os.RemoveAll(workDir)
@@ -196,6 +207,9 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 	// 恢复网站
 	restored := 0
 	for _, name := range req.Sites {
+		if t.canceled() {
+			return
+		}
 		var btSite map[string]any
 		for _, s := range sites {
 			if toStr(s["name"]) == name {
@@ -209,6 +223,9 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 		}
 		t.logf("迁移网站 %s ...", name)
 		if err := restoreBTSite(t, client, btSite, workDir, req); err != nil {
+			if t.canceled() {
+				return
+			}
 			if req.Overwrite {
 				t.logf("网站 %s 迁移失败: %v", name, err)
 				continue
@@ -220,37 +237,16 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 		t.logf("网站 %s 迁移完成", name)
 	}
 
-	// 恢复数据库（对端文件直链传输的中转域名：优先用本次迁移的站点域名，确保可公网访问）
-	webDomains := []string{}
-	seen := map[string]bool{}
-	for _, name := range req.Sites {
-		for _, s := range sites {
-			if toStr(s["name"]) != name {
-				continue
-			}
-			for _, d := range buildBTDownloadDomains(client, s) {
-				if !seen[d] {
-					seen[d] = true
-					webDomains = append(webDomains, d)
-				}
-			}
-			break
-		}
-	}
-	// 兜底：全部站点里的域名
-	if len(webDomains) == 0 {
-		for _, s := range sites {
-			for _, d := range buildBTDownloadDomains(client, s) {
-				if !seen[d] {
-					seen[d] = true
-					webDomains = append(webDomains, d)
-				}
-			}
-		}
-	}
+	// 恢复数据库（备份文件通过对端面板端口 /download 直下，不经过站点域名）
 	for _, dbName := range req.Databases {
+		if t.canceled() {
+			return
+		}
 		t.logf("迁移数据库 %s ...", dbName)
-		if err := restoreBTDatabase(t, client, dbs, dbName, workDir, req.NewDBPassword, webDomains); err != nil {
+		if err := restoreBTDatabase(t, client, dbs, dbName, workDir, req.NewDBPassword); err != nil {
+			if t.canceled() {
+				return
+			}
 			t.fail("数据库 " + dbName + " 迁移失败: " + err.Error())
 			return
 		}
@@ -259,6 +255,9 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 
 	// 恢复 FTP
 	for _, uname := range req.FTPs {
+		if t.canceled() {
+			return
+		}
 		pass := req.NewFTPPassword
 		if pass == "" {
 			pass = randomPassword(12)
@@ -274,6 +273,9 @@ func runImportFromBT(t *ImportTask, req ImportRunRequest) {
 		}
 		t.logf("创建 FTP 账号 %s（密码 %s）...", uname, pass)
 		if err := CreateFtpUser(CreateFtpUserReq{Username: uname, Password: pass, HomeDir: home}); err != nil {
+			if t.canceled() {
+				return
+			}
 			t.fail("FTP 账号 " + uname + " 创建失败: " + err.Error())
 			return
 		}
@@ -351,7 +353,7 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 
 	pkgFile := filepath.Join(workDir, name+".tar.gz")
 	t.logf("下载网站 %s 文件中...", name)
-	if err := downloadBTSitePackage(client, btSite, pkgFile); err != nil {
+	if err := downloadBTSitePackage(t, client, btSite, pkgFile); err != nil {
 		return err
 	}
 
@@ -362,20 +364,62 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 		if err := ungzTar(pkgFile, s.Root); err != nil {
 			return fmt.Errorf("解压网站文件失败: %w", err)
 		}
+		// 宝塔压缩包通常会把站点目录本身包一层（如解压后出现 /root/api.vitphp.cn/），
+		// 需要把这一层子目录里的文件上移到网站根目录，避免访问路径多套一层。
+		if err := flattenBTSiteRoot(s.Root, name); err != nil {
+			return fmt.Errorf("整理网站目录层级失败: %w", err)
+		}
+		// 解压后的文件带的是宝塔源端属主/权限（常为 root），统一改为本机 Web 运行用户
+		// （www-data 等），避免属主为 root 导致权限过高、被入侵后波及整台服务器的风险。
+		if err := ChownToWebUser(s.Root, true); err != nil {
+			t.logf("网站 %s 文件归属调整失败（可忽略）: %v", name, err)
+		}
+		// 清理源面板残留的 .user.ini（宝塔等会带，且常带 immutable 位），
+		// 避免其 open_basedir 干扰本面板生成的配置，也防止 immutable 位导致文件无法在管理器内删除
+		_, _ = ExecCommand("chattr -i "+shellQuote(filepath.Join(s.Root, ".user.ini")), 5*time.Second)
+		_ = os.Remove(filepath.Join(s.Root, ".user.ini"))
 	}
 
 	// 运行目录：源站 nginx 的 root 相对站点 path 的路径（如 public），
 	// 让迁移后的 PHP 站点 root 指向实际可访问目录（ThinkPHP/Laravel 等框架）
 	if typ == model.SiteTypePHP {
-		if rd := btSiteRunDir(client, btSite); rd != "" {
+		if rd := btSiteRunDir(client, btSite, primary, name, s.Root); rd != "" {
 			s.RuntimeDir = rd
-			model.DB.Save(s)
-			if err := writeSiteConfAndReload(s); err != nil {
-				t.logf("设置网站 %s 运行目录 %s 失败（可到站点设置里手动配置）: %v", name, rd, err)
-			} else {
-				t.logf("网站 %s 运行目录设置为 %s", name, rd)
-			}
+			t.logf("网站 %s 运行目录设置为 %s", name, rd)
 		}
+	}
+
+	// 伪静态：读取源站点的 rewrite 规则并写入本机
+	if typ == model.SiteTypePHP || typ == model.SiteTypeStatic {
+		if rw := client.GetSiteRewrite(name, primary); rw != "" {
+			s.Rewrite = rw
+			t.logf("网站 %s 伪静态规则已读取", name)
+		}
+	}
+
+	// SSL 证书：读取源站点证书与私钥并写入本机（兼容宝塔不同版本证书存放路径）
+	if cert, key := client.GetSiteSSLCert(primary); cert != "" && key != "" {
+		certPath, keyPath := siteSSLPath(s.Name)
+		if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+			t.logf("创建证书目录失败（跳过 SSL）: %v", err)
+		} else if err := os.WriteFile(certPath, []byte(cert), 0o600); err != nil {
+			t.logf("写入证书文件失败（跳过 SSL）: %v", err)
+		} else if err := os.WriteFile(keyPath, []byte(key), 0o600); err != nil {
+			t.logf("写入私钥文件失败（跳过 SSL）: %v", err)
+		} else {
+			s.SslEnabled = true
+			s.SslCertPath = certPath
+			s.SslKeyPath = keyPath
+			t.logf("网站 %s SSL 证书已恢复", name)
+		}
+	}
+
+	// 统一保存配置并生成站点配置
+	if err := model.DB.Save(s).Error; err != nil {
+		return fmt.Errorf("保存网站 %s 配置失败: %w", name, err)
+	}
+	if err := writeSiteConfAndReload(s); err != nil {
+		t.logf("生成网站 %s 配置失败（可到站点设置里手动配置）: %v", name, err)
 	}
 
 	if err := webReload(); err != nil {
@@ -384,141 +428,114 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 	return nil
 }
 
-// btSiteRunDir 计算源站运行目录：nginx root 相对站点 path 的相对路径（如 public），
-// 若 root 与站点 path 相同则返回空（使用站点根目录）
-func btSiteRunDir(client *BTClient, btSite map[string]any) string {
-	sitePath := strings.TrimRight(toStr(btSite["path"]), "/")
-	if sitePath == "" {
-		return ""
+// flattenBTSiteRoot 整理宝塔站点备份多包的一层目录。
+// 宝塔压缩站点目录时通常会把 /www/wwwroot/<name> 整体打包，解压到网站根目录后
+// 会多出一层 <name>/ 子目录。本函数把该子目录里的所有文件/目录上移到网站根目录，
+// 并覆盖根目录下同名文件（如 kypanel 默认生成的 index.html/404.html），最后删除空子目录。
+func flattenBTSiteRoot(root, name string) error {
+	nested := filepath.Join(root, name)
+	info, err := os.Stat(nested)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
-	domain := toStr(btSite["domain"])
-	if domain == "" {
-		domain = toStr(btSite["name"])
+	if !info.IsDir() {
+		return nil
 	}
-	webRoot := client.GetSiteWebRoot(domain)
-	if webRoot == "" {
-		return ""
-	}
-	webRoot = strings.TrimRight(webRoot, "/")
-	if webRoot == sitePath {
-		return ""
-	}
-	if strings.HasPrefix(webRoot, sitePath+"/") {
-		return strings.TrimPrefix(webRoot, sitePath+"/")
-	}
-	return ""
-}
-
-// resumeDownloadHTTP 从 URL 断点续传下载到本地文件（对端站点备份可能很大）
-func resumeDownloadHTTP(url, dest string) error {
-	client := &http.Client{
-		Timeout: 0,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	entries, err := os.ReadDir(nested)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	offset, _ := f.Seek(0, io.SeekEnd)
-	attempts := 0
-	for {
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
+	for _, e := range entries {
+		src := filepath.Join(nested, e.Name())
+		dst := filepath.Join(root, e.Name())
+		if _, err := os.Stat(dst); err == nil {
+			if err := os.RemoveAll(dst); err != nil {
+				return fmt.Errorf("清理目标 %s 失败: %w", dst, err)
+			}
+		} else if !os.IsNotExist(err) {
 			return err
 		}
-		if offset > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("移动 %s -> %s 失败: %w", src, dst, err)
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			if attempts < 3 {
-				attempts++
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			return fmt.Errorf("下载对端面板文件失败: %w", err)
-		}
-		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-			resp.Body.Close()
-			return nil // 已下载完成
-		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			return fmt.Errorf("下载对端面板文件失败: HTTP %d", resp.StatusCode)
-		}
-		n, err := io.Copy(f, resp.Body)
-		resp.Body.Close()
-		offset += n
-		if err != nil {
-			if attempts < 3 {
-				attempts++
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			return fmt.Errorf("下载对端面板文件失败: %w", err)
-		}
-		// 无 Range 响应或下载长度 < 块大小说明已完成（服务器可能不支持 Range，一次拉完）
-		return nil
 	}
-}
-
-// downloadBTSitePackage 下载对端面板网站文件：优先用已有备份，否则触发备份，
-// 再通过对端站点 web 根目录直链传输（兼容宝塔新版无文件下载/打包 API 的面板）。
-//
-// 备份查找用 GetDirNew 直列 /www/backup/site/<站点名>/ 目录，而不是 backup 表：
-// 宝塔 backup 表按 id 查会返回全表（id 是备份自增主键，与站点 id 无关），
-// 曾导致拿错数据库备份当网站包下载，解压报 "This does not look like a tar archive"。
-func downloadBTSitePackage(client *BTClient, btSite map[string]any, dest string) error {
-	name := toStr(btSite["name"])
-	remotePath := client.NewestSiteBackup(name)
-	if remotePath == "" {
-		if err := client.BackupSiteNow(name); err != nil {
-			return fmt.Errorf("对端面板网站备份失败: %w", err)
-		}
-		p, err := client.WaitSiteBackup(name, 10*time.Minute)
-		if err != nil {
-			return err
-		}
-		remotePath = p
-	}
-	domains := buildBTDownloadDomains(client, btSite)
-	if err := client.DownloadViaWebCandidates(remotePath, domains, dest); err != nil {
-		return err
-	}
-	// 下载后再校验是 gzip 包，避免拿到非 tar 文件时才在解压阶段报出难懂的错
-	if !isGzipFile(dest) {
-		return fmt.Errorf("下载的网站备份不是有效的 tar.gz 文件（对端路径 %s，请检查该站点的备份文件）", remotePath)
+	if err := os.Remove(nested); err != nil {
+		return fmt.Errorf("删除空目录 %s 失败: %w", nested, err)
 	}
 	return nil
 }
 
-// buildBTDownloadDomains 构建对端面板文件直链传输的候选域名列表：
-// 站点记录里的 domain 字段 + 站点名 + nginx 配置里的 server_name
-func buildBTDownloadDomains(client *BTClient, btSite map[string]any) []string {
-	var out []string
-	seen := map[string]bool{}
-	add := func(d string) {
-		d = strings.TrimSpace(d)
-		if d != "" && !seen[d] {
-			seen[d] = true
-			out = append(out, d)
+// zipBTSiteDir 用 files?action=Zip 把站点目录压缩到对端备份目录，
+// 作为 BackupSite 接口失败时的兜底（仅依赖文件压缩，不依赖站点备份功能）。
+// 压缩产物落在 /www/backup/site/<站点名>/ 下，WaitSiteBackup/NewestSiteBackup 可直接发现。
+func zipBTSiteDir(client *BTClient, btSite map[string]any, name string) error {
+	sitePath := strings.TrimRight(toStr(btSite["path"]), "/")
+	if sitePath == "" {
+		return errors.New("站点根目录为空")
+	}
+	dir := "/www/backup/site/" + name
+	client.CreateRemoteDir(dir)
+	zfile := fmt.Sprintf("%s_web_%s.tar.gz", name, time.Now().Format("20060102_150405"))
+	return client.ZipDir(sitePath, dir+"/"+zfile, "tar.gz")
+}
+
+// btSiteRunDir 计算源站运行目录：nginx root 相对站点 path 的相对路径（如 public），
+// 若 root 与站点 path 相同则返回空（使用站点根目录）。
+// primary 为源站主域名，name 为源站站点名（宝塔 vhost 配置可能按二者之一命名），
+// rootDir 为本机解压后的站点根目录，用于源端配置解析失败时兜底探测常见框架运行目录。
+func btSiteRunDir(client *BTClient, btSite map[string]any, primary, name, rootDir string) string {
+	sitePath := strings.TrimRight(toStr(btSite["path"]), "/")
+	if sitePath == "" {
+		sitePath = rootDir
+	}
+	if primary == "" {
+		primary = name
+	}
+	// 优先从对端 nginx 配置解析运行目录（配置文件可能以主域名或站点名命名）
+	webRoot := client.GetSiteWebRoot(primary)
+	if webRoot == "" && name != "" && name != primary {
+		webRoot = client.GetSiteWebRoot(name)
+	}
+	webRoot = strings.TrimRight(webRoot, "/")
+	if webRoot != "" && webRoot != sitePath && strings.HasPrefix(webRoot, sitePath+"/") {
+		return strings.TrimPrefix(webRoot, sitePath+"/")
+	}
+	// 兜底：源端配置无法解析时，探测本机解压目录下的常见 PHP 框架运行目录
+	// （站点文件已下载到 rootDir，存在 public/index.php 等即视为框架入口目录）
+	for _, cand := range []string{"public", "public_html", "web", "dist"} {
+		if info, err := os.Stat(filepath.Join(rootDir, cand, "index.php")); err == nil && !info.IsDir() {
+			return cand
 		}
 	}
-	for _, d := range parseBTDomains(btSite["domain"]) {
-		add(d)
+	return ""
+}
+
+// downloadBTSitePackage 下载对端面板网站文件：
+// 直接用 files?action=Zip 压缩站点目录（不走宝塔网站备份接口，各版本参数差异大），
+// 再通过对端面板端口 /download 直下（不依赖站点域名/SSL/伪静态）。
+func downloadBTSitePackage(t *ImportTask, client *BTClient, btSite map[string]any, dest string) error {
+	name := toStr(btSite["name"])
+	if err := zipBTSiteDir(client, btSite, name); err != nil {
+		return fmt.Errorf("对端面板压缩网站目录失败: %w", err)
 	}
-	add(toStr(btSite["domain"]))
-	add(toStr(btSite["name"]))
-	// 从站点 nginx 配置补充 server_name（部分站点 domain 字段为空或为数字）
-	for _, cand := range out {
-		for _, d := range client.btSiteConfServerNames(cand) {
-			add(d)
+	p, err := client.WaitSiteBackup(name, 10*time.Minute)
+	if err != nil {
+		return err
+	}
+	if err := client.DownloadViaPanel(t.Ctx(), p, dest, func(done, total int64) {
+		t.setProgress("downloading_site", "下载网站文件", name, done, total)
+	}); err != nil {
+		t.clearProgress()
+		if t.canceled() {
+			return err
 		}
+		return fmt.Errorf("下载网站文件失败: %w", err)
 	}
-	return out
+	t.clearProgress()
+	return nil
 }
 
 // isGzipFile 校验文件是否为 gzip 压缩（读取魔数 1f 8b）
@@ -536,7 +553,7 @@ func isGzipFile(p string) bool {
 }
 
 // restoreBTDatabase 从对端面板恢复单个数据库到本机
-func restoreBTDatabase(t *ImportTask, client *BTClient, btDbs []map[string]any, dbName, workDir, newPassword string, webDomains []string) error {
+func restoreBTDatabase(t *ImportTask, client *BTClient, btDbs []map[string]any, dbName, workDir, newPassword string) error {
 	var dbID, srcPassword string
 	for _, d := range btDbs {
 		if toStr(d["name"]) == dbName {
@@ -569,9 +586,16 @@ func restoreBTDatabase(t *ImportTask, client *BTClient, btDbs []map[string]any, 
 
 	t.logf("下载数据库 %s 备份（%s）...", dbName, remotePath)
 	sqlFile := filepath.Join(workDir, dbName+".sql.gz")
-	if err := client.DownloadViaWebCandidates(remotePath, webDomains, sqlFile); err != nil {
-		return fmt.Errorf("下载对端面板数据库备份失败: %w", err)
+	if err := client.DownloadViaPanel(t.Ctx(), remotePath, sqlFile, func(done, total int64) {
+		t.setProgress("downloading_db", "下载数据库备份", dbName, done, total)
+	}); err != nil {
+		t.clearProgress()
+		if t.canceled() {
+			return err
+		}
+		return fmt.Errorf("下载数据库备份失败: %w", err)
 	}
+	t.clearProgress()
 
 	pass := newPassword
 	if pass == "" {
@@ -585,9 +609,13 @@ func restoreBTDatabase(t *ImportTask, client *BTClient, btDbs []map[string]any, 
 	if err != nil && !strings.Contains(err.Error(), "已存在") {
 		return err
 	}
+	// 导入由 MySQL 服务端执行，无法精确计算百分比，仅给出阶段提示避免界面长时间无变化
+	t.setProgress("importing_db", "导入数据库", dbName, 0, 0)
 	if err := DatabaseImport("mysql", dbName, sqlFile); err != nil {
+		t.clearProgress()
 		return fmt.Errorf("导入数据库失败: %w", err)
 	}
+	t.clearProgress()
 	return nil
 }
 

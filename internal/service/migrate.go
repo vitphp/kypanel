@@ -13,10 +13,14 @@ package service
 // 迁入时重建同名账号并重置密码（由用户输入或自动生成）。
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -509,16 +513,39 @@ type ItemResult struct {
 	Message string `json:"message"` // 详细信息（失败原因 / 备注）
 }
 
+// TaskProgress 迁移任务当前步骤的实时进度。
+// 用于下载迁移包/网站文件、导入数据库等可能持续数分钟且原本毫无输出的步骤，
+// 避免前端长时间停在一条日志上让用户误以为卡死。
+type TaskProgress struct {
+	Phase     string  `json:"phase"`      // 阶段标识（downloading_site / downloading_db / importing_db 等）
+	Label     string  `json:"label"`      // 阶段名，如「下载网站文件」
+	Name      string  `json:"name"`       // 当前对象名（网站名/库名）
+	Done      int64   `json:"done"`       // 已完成字节数
+	Total     int64   `json:"total"`      // 总字节数（0 表示源端未提供长度，前端按不确定模式显示）
+	Percent   float64 `json:"percent"`    // 0-100（Total 为 0 时恒为 0）
+	Speed     int64   `json:"speed"`      // 瞬时速度（字节/秒）
+	SpeedText string  `json:"speed_text"` // 速度可读文本，如「1.2 MB/s」
+	Detail    string  `json:"detail"`     // 一行完整描述，供日志/提示直接展示
+}
+
 // ImportTask 迁移任务状态
 type ImportTask struct {
-	ID        string       `json:"id"`
-	Kind      string       `json:"kind"`    // export / import，见 TaskKind*
-	Status    string       `json:"status"`  // running / success / failed
-	Logs      []string     `json:"logs"`
-	Error     string       `json:"error"`
-	Items     []ItemResult `json:"items"`   // 各子任务处理结果（建站/建库/伪静态/数据导入等）
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID        string        `json:"id"`
+	Kind      string        `json:"kind"`              // export / import，见 TaskKind*
+	Status    string        `json:"status"`            // running / success / failed / canceled
+	Logs      []string      `json:"logs"`
+	Error     string        `json:"error"`
+	Items     []ItemResult  `json:"items"`             // 各子任务处理结果（建站/建库/伪静态/数据导入等）
+	Progress  *TaskProgress `json:"progress,omitempty"` // 当前步骤实时进度（无进度时为 nil）
+	UpdatedAt time.Time     `json:"updated_at"`
 	mu        sync.Mutex
+	ctx       context.Context    // 取消信号：用户点「取消迁移」后 Done 关闭
+	cancel    context.CancelFunc // 中断下载等阻塞操作
+	// 速度计算用：上次采样时的已完成字节数与时刻
+	lastDone int64
+	lastAt   time.Time
+	// 上次往任务日志写下载进度的时刻（每 3 秒输出一条，替代前端进度条）
+	lastProgLog time.Time
 }
 
 // addItem 记录一个子任务的结果（线程安全）
@@ -545,11 +572,216 @@ var (
 )
 
 func newImportTask(id, kind string) *ImportTask {
-	t := &ImportTask{ID: id, Kind: kind, Status: "running", Logs: []string{}, UpdatedAt: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &ImportTask{ID: id, Kind: kind, Status: "running", Logs: []string{}, UpdatedAt: time.Now(), ctx: ctx, cancel: cancel}
 	importTasksMu.Lock()
 	importTasks[id] = t
 	importTasksMu.Unlock()
 	return t
+}
+
+// canceled 任务是否已被用户取消。耗时的循环/下载应在合适位置调用它及时退出。
+func (t *ImportTask) canceled() bool {
+	if t.ctx == nil {
+		return false
+	}
+	select {
+	case <-t.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// Ctx 返回任务取消上下文，供下载等阻塞操作在取消时立刻中断
+func (t *ImportTask) Ctx() context.Context {
+	if t.ctx == nil {
+		return context.Background()
+	}
+	return t.ctx
+}
+
+// setProgress 更新当前步骤的实时进度（下载迁移包/网站文件、导入数据库等）。
+// 速度按相邻两次采样的增量计算；采样间隔不足 0.5s 时沿用上次速度，避免数值剧烈抖动。
+func (t *ImportTask) setProgress(phase, label, name string, done, total int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	var speed int64
+	switch {
+	case t.lastAt.IsZero():
+		t.lastDone, t.lastAt = done, now
+	case now.Sub(t.lastAt).Seconds() >= 0.5:
+		elapsed := now.Sub(t.lastAt).Seconds()
+		if delta := done - t.lastDone; delta > 0 {
+			speed = int64(float64(delta) / elapsed)
+		}
+		t.lastDone, t.lastAt = done, now
+	case t.Progress != nil:
+		speed = t.Progress.Speed
+	}
+	p := &TaskProgress{Phase: phase, Label: label, Name: name, Done: done, Total: total, Speed: speed}
+	switch {
+	case total > 0:
+		p.Percent = float64(done) / float64(total) * 100
+		if p.Percent > 100 {
+			p.Percent = 100
+		}
+		p.Detail = fmt.Sprintf("%s %s：%s / %s（%.1f%%）%s", label, name, FormatBytes(done), FormatBytes(total), p.Percent, FormatBytes(speed)+"/s")
+	case done > 0:
+		p.Detail = fmt.Sprintf("%s %s：已传输 %s（%s）", label, name, FormatBytes(done), FormatBytes(speed)+"/s")
+	default:
+		p.Detail = fmt.Sprintf("%s %s 进行中...", label, name)
+	}
+	p.SpeedText = FormatBytes(speed) + "/s"
+	t.Progress = p
+	t.UpdatedAt = now
+	// 下载进度每 3 秒打一条进任务日志（与日志框同屏展示，替代前端进度条）；
+	// 仅在确有字节流动时输出，避免导入数据库等无进度阶段刷屏
+	if done > 0 && now.Sub(t.lastProgLog) >= 3*time.Second {
+		t.lastProgLog = now
+		t.Logs = append(t.Logs, "["+now.Format("15:04:05")+"] "+p.Detail)
+	}
+}
+
+// clearProgress 步骤结束后清除进度，避免前端继续展示上一个步骤的进度条
+func (t *ImportTask) clearProgress() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Progress = nil
+	t.lastDone, t.lastAt = 0, time.Time{}
+	t.UpdatedAt = time.Now()
+}
+
+// CancelImportTask 取消进行中的迁移任务（前端「取消迁移」按钮）。
+// 只置状态并触发 ctx 取消，真正的中断由下载/循环检查 ctx 完成，从而能立刻停止传输。
+func CancelImportTask(id string) error {
+	importTasksMu.Lock()
+	t, ok := importTasks[id]
+	importTasksMu.Unlock()
+	if !ok {
+		return errors.New("任务不存在")
+	}
+	t.mu.Lock()
+	if t.Status != "running" {
+		t.mu.Unlock()
+		return errors.New("任务已结束，无需取消")
+	}
+	t.Status = "canceled"
+	t.Error = "已取消"
+	t.Progress = nil
+	t.mu.Unlock()
+	if t.cancel != nil {
+		t.cancel()
+	}
+	t.logf("迁移已被用户取消")
+	return nil
+}
+
+// progressWriter 统计已写入字节并按固定间隔回调进度，
+// 避免 io.Copy 每 32KB 一块就回调一次导致频繁加锁与进度刷屏。
+type progressWriter struct {
+	w          io.Writer
+	done       int64
+	total      int64
+	lastReport time.Time
+	onProgress func(done, total int64)
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.w.Write(p)
+	pw.done += int64(n)
+	if pw.onProgress != nil && (time.Since(pw.lastReport) >= 500*time.Millisecond || err != nil) {
+		pw.lastReport = time.Now()
+		pw.onProgress(pw.done, pw.total)
+	}
+	return n, err
+}
+
+// downloadWithProgress 带进度回调与取消支持的断点续传下载。
+//   - ctx 取消时立即中断传输并返回 ctx.Err()，用于「取消迁移」立刻停手；
+//   - onProgress(done, total) 约每 500ms 回调一次；total 为 0 表示源端未提供总长度；
+//   - 传输意外中断自动重试，已下载部分通过 Range 续传，不重复拉取。
+func downloadWithProgress(ctx context.Context, rawURL, dest string, onProgress func(done, total int64)) error {
+	client := &http.Client{
+		Timeout:   0,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	offset, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	var total int64
+	attempts := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+		if err != nil {
+			return err
+		}
+		if offset > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if attempts < 3 {
+				attempts++
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			return fmt.Errorf("下载失败: %w", err)
+		}
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			resp.Body.Close()
+			return nil // 已完整下载
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+		}
+		// 总大小：续传响应用 Content-Range 末尾的 total，完整响应用 Content-Length
+		if cr := resp.Header.Get("Content-Range"); cr != "" {
+			if idx := strings.LastIndex(cr, "/"); idx >= 0 {
+				fmt.Sscanf(cr[idx+1:], "%d", &total)
+			}
+		} else if resp.ContentLength > 0 {
+			total = resp.ContentLength
+		}
+		if total == 0 && resp.ContentLength > 0 {
+			total = offset + resp.ContentLength
+		}
+		cur, _ := f.Seek(0, io.SeekEnd)
+		offset = cur
+		pw := &progressWriter{w: f, done: offset, total: total, lastReport: time.Now(), onProgress: onProgress}
+		n, copyErr := io.Copy(pw, resp.Body)
+		resp.Body.Close()
+		offset += n
+		if pw.onProgress != nil {
+			pw.onProgress(offset, total)
+		}
+		if copyErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if attempts < 3 {
+				attempts++
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			return fmt.Errorf("下载失败: %w", copyErr)
+		}
+		return nil
+	}
 }
 
 // ImportTaskStatus 查询迁移任务状态（返回加锁后的副本，避免并发读写竞态）
@@ -562,6 +794,11 @@ func ImportTaskStatus(id string) (*ImportTask, error) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	var prog *TaskProgress
+	if t.Progress != nil {
+		cp := *t.Progress
+		prog = &cp
+	}
 	return &ImportTask{
 		ID:        t.ID,
 		Kind:      t.Kind,
@@ -569,6 +806,7 @@ func ImportTaskStatus(id string) (*ImportTask, error) {
 		Logs:      append([]string{}, t.Logs...),
 		Error:     t.Error,
 		Items:     append([]ItemResult{}, t.Items...),
+		Progress:  prog,
 		UpdatedAt: t.UpdatedAt,
 	}, nil
 }
@@ -582,12 +820,18 @@ func ListImportTasks() []*ImportTask {
 	out := make([]*ImportTask, 0, len(importTasks))
 	for _, t := range importTasks {
 		t.mu.Lock()
+		var prog *TaskProgress
+		if t.Progress != nil {
+			cp := *t.Progress
+			prog = &cp
+		}
 		out = append(out, &ImportTask{
 			ID:        t.ID,
 			Kind:      t.Kind,
 			Status:    t.Status,
 			Logs:      append([]string{}, t.Logs...),
 			Error:     t.Error,
+			Progress:  prog,
 			UpdatedAt: t.UpdatedAt,
 		})
 		t.mu.Unlock()
@@ -653,9 +897,15 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 		}
 		t.logf("源端打包完成，正在下载迁移包...")
 
-		// 3. 下载迁移包
-		local, err := remote.Download(pkgID)
+		// 3. 下载迁移包（带实时进度，取消时立即中断）
+		local, err := remote.Download(t.Ctx(), pkgID, func(done, total int64) {
+			t.setProgress("downloading_package", "下载迁移包", "", done, total)
+		})
+		t.clearProgress()
 		if err != nil {
+			if t.canceled() {
+				return
+			}
 			t.fail("下载迁移包失败: " + err.Error())
 			return
 		}
@@ -681,8 +931,14 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 	if len(req.AutoInstall) > 0 {
 		t.logf("开始安装缺失环境：%s ...", strings.Join(req.AutoInstall, ", "))
 		for _, key := range req.AutoInstall {
+			if t.canceled() {
+				return
+			}
 			t.logf("安装 %s 中...", key)
 			if err := installAppSync(key); err != nil {
+				if t.canceled() {
+					return
+				}
 				t.fail("环境安装失败（" + key + "）: " + err.Error())
 				return
 			}
@@ -693,6 +949,9 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 	}
 
 	// 6. 解压迁移包
+	if t.canceled() {
+		return
+	}
 	workDir := filepath.Join(migrateRoot(), "import-"+t.ID)
 	_ = os.MkdirAll(workDir, 0o755)
 	defer os.RemoveAll(workDir)
@@ -705,11 +964,32 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 	// 7. 恢复网站
 	restored := 0
 	for _, s := range manifest.Sites {
+		if t.canceled() {
+			return
+		}
 		if !containsStr(req.Sites, s.Name) {
 			continue
 		}
+		// 目标已存在处理：覆盖=删旧重建，不覆盖=跳过该网站（不影响其他项）
+		var oldSite model.Site
+		if model.DB.Where("name = ?", s.Name).First(&oldSite).Error == nil {
+			if !req.Overwrite {
+				t.logf("网站 %s 已存在于目标面板，按选择跳过", s.Name)
+				t.addItem("site", s.Name, "skipped", "目标已存在，未勾选覆盖")
+				continue
+			}
+			t.logf("网站 %s 已存在，按覆盖删除旧站点后重建...", s.Name)
+			if _, err := DeleteSite(DeleteSiteReq{ID: oldSite.ID}); err != nil {
+				t.logf("删除旧网站 %s 失败: %v", s.Name, err)
+				t.addItem("site", s.Name, "failed", "删除旧网站失败："+err.Error())
+				continue
+			}
+		}
 		t.logf("恢复网站 %s（%s）...", s.Name, s.Type)
 		if err := restoreSite(t, workDir, &s, req); err != nil {
+			if t.canceled() {
+				return
+			}
 			if req.Overwrite {
 				t.logf("网站 %s 恢复失败: %v", s.Name, err)
 				continue
@@ -723,11 +1003,40 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 
 	// 8. 恢复数据库
 	for _, db := range manifest.Databases {
+		if t.canceled() {
+			return
+		}
 		if !containsStr(req.Databases, db.Name) {
 			continue
 		}
+		// 目标已存在处理：覆盖=删旧库重建，不覆盖=跳过导入（不影响其他项）
+		dbExists := false
+		if dbs, err := ListDatabases(); err == nil {
+			for _, d := range dbs {
+				if d.Name == db.Name {
+					dbExists = true
+					break
+				}
+			}
+		}
+		if dbExists {
+			if !req.Overwrite {
+				t.logf("数据库 %s 已存在，按选择跳过", db.Name)
+				t.addItem("database", db.Name, "skipped", "目标已存在，未勾选覆盖")
+				continue
+			}
+			t.logf("数据库 %s 已存在，按覆盖删除旧库后重建...", db.Name)
+			if err := DeleteDatabase(db.Name); err != nil {
+				t.logf("删除旧数据库 %s 失败: %v", db.Name, err)
+				t.addItem("database", db.Name, "failed", "删除旧库失败："+err.Error())
+				continue
+			}
+		}
 		t.logf("恢复数据库 %s ...", db.Name)
 		if err := restoreDatabase(t, workDir, &db, req.NewDBPassword); err != nil {
+			if t.canceled() {
+				return
+			}
 			t.fail("数据库 " + db.Name + " 恢复失败: " + err.Error())
 			return
 		}
@@ -736,8 +1045,26 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 
 	// 9. 恢复 FTP
 	for _, f := range manifest.FTPs {
+		if t.canceled() {
+			return
+		}
 		if !containsStr(req.FTPs, f.Username) {
 			continue
+		}
+		// 目标已存在处理：覆盖=删旧账号重建，不覆盖=跳过（不影响其他项）
+		var oldFTP model.FtpUser
+		if model.DB.Where("username = ?", f.Username).First(&oldFTP).Error == nil {
+			if !req.Overwrite {
+				t.logf("FTP 账号 %s 已存在，按选择跳过", f.Username)
+				t.addItem("ftp", f.Username, "skipped", "目标已存在，未勾选覆盖")
+				continue
+			}
+			t.logf("FTP 账号 %s 已存在，按覆盖删除后重建...", f.Username)
+			if err := DeleteFtpUser(oldFTP.ID); err != nil {
+				t.logf("删除旧 FTP 账号 %s 失败: %v", f.Username, err)
+				t.addItem("ftp", f.Username, "failed", "删除旧FTP失败："+err.Error())
+				continue
+			}
 		}
 		pass := req.NewFTPPassword
 		if pass == "" {
@@ -749,6 +1076,9 @@ func runImport(t *ImportTask, req ImportRunRequest) {
 			home = filepath.Join(webRootBase, f.Username)
 		}
 		if err := CreateFtpUser(CreateFtpUserReq{Username: f.Username, Password: pass, HomeDir: home}); err != nil {
+			if t.canceled() {
+				return
+			}
 			t.fail("FTP 账号 " + f.Username + " 创建失败: " + err.Error())
 			return
 		}
@@ -771,12 +1101,8 @@ func (t *ImportTask) fail(msg string) {
 
 // restoreSite 恢复单个网站
 func restoreSite(t *ImportTask, workDir string, ms *MigrateSite, req ImportRunRequest) error {
-	// 检查是否已存在
-	var count int64
-	model.DB.Model(&model.Site{}).Where("name = ?", ms.Name).Count(&count)
-	if count > 0 {
-		return errors.New("同名网站已存在（如需覆盖请勾选覆盖选项）")
-	}
+	// 注：同名网站的「覆盖删除 / 跳过」已在 runImport 循环里统一处理，
+	// 此处仅负责把网站重建出来（旧站若需覆盖，外层已先删除）。
 
 	// 创建站点（Root 留空由目标面板按自身规则推断，保证目录存在）
 	createReq := CreateSiteReq{
@@ -1282,7 +1608,8 @@ func BuildImportPlan(req ImportPlanRequest) (*ImportPlanResult, error) {
 	for _, n := range req.FTPs {
 		manifest.FTPs = append(manifest.FTPs, MigrateFTP{Username: n})
 	}
-	if len(picked) == 0 {
+	// 只有勾选了网站却一个都没匹配上才报错；允许只迁移数据库/FTP 而不迁网站
+	if len(req.Sites) > 0 && len(picked) == 0 {
 		return nil, errors.New("源面板上未找到选中的网站")
 	}
 

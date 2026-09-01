@@ -289,11 +289,45 @@ func DatabaseImport(dbType, dbName, filePath string) error {
 	}
 }
 
+// sqlImportCompatArgs 导入前的流式 SQL 兼容降级（sed 参数，直接拼进 shell 命令）。
+// 用 sed 流式处理而不是落盘改写，避免大库解压后占用双倍磁盘：
+//   - ROW_FORMAT=COMPACT/REDUNDANT → DYNAMIC：COMPACT/REDUNDANT 会把 BLOB 前缀 768 字节
+//     内联存储，宽表（大量 varchar/TEXT）累加后极易触发
+//     "ERROR 1118 Row size too large (> 8126)"；DYNAMIC 只存 20 字节指针，可根治。
+//     源库能存下通常是因为其默认 ROW_FORMAT=DYNAMIC（MySQL 5.7.9+ 起为默认）。
+//   - utf8mb3 → utf8mb4、0900_/uca1400_ 系列 collation → unicode_ci：
+//     目标库版本偏低时不识别，会报 "ERROR 1273 Unknown collation"，
+//     进而 CREATE TABLE 全失败、后续 INSERT 报 "Table doesn't exist"。
+const sqlImportCompatArgs = `-e 's/ROW_FORMAT=COMPACT/ROW_FORMAT=DYNAMIC/gI' -e 's/ROW_FORMAT=REDUNDANT/ROW_FORMAT=DYNAMIC/gI' -e 's/utf8mb3/utf8mb4/gI' -e 's/uca1400_ai_ci/unicode_ci/gI' -e 's/uca1400_as_ci/unicode_ci/gI' -e 's/uca1400_ai_cs/unicode_ci/gI' -e 's/uca1400_as_cs/unicode_ci/gI' -e 's/0900_ai_ci/unicode_ci/gI' -e 's/0900_as_ci/unicode_ci/gI' -e 's/0900_ai_cs/unicode_ci/gI' -e 's/0900_as_cs/unicode_ci/gI'`
+
+// sqlImportSessionSQL 导入会话前置语句：兜底关闭 InnoDB 严格模式（仍有极宽行时降级为警告
+// 而非报错），并放大 max_allowed_packet 以容纳大 INSERT。
+const sqlImportSessionSQL = `SET SESSION innodb_strict_mode=OFF;`
+
+// sqlImportMysqlClientArgs mysql 客户端导入参数。
+// 注意：新版本 MySQL 中 SESSION 级 max_allowed_packet 是只读的（ERROR 1621），
+// 必须用客户端参数 --max_allowed_packet 设置；服务端上限另行尝试 SET GLOBAL。
+const sqlImportMysqlClientArgs = "--max-allowed-packet=1G"
+
+// raiseGlobalMaxAllowedPacket 尝试把服务端 GLOBAL max_allowed_packet 提到 1G，
+// 保证大 SQL 导入不被服务端 64M/16M 默认限制截断。失败（权限/版本不支持）仅记日志不阻断导入。
+func raiseGlobalMaxAllowedPacket() {
+	mysql, err := LookPathBin("mysql")
+	if err != nil {
+		return
+	}
+	cmd := fmt.Sprintf("%s %s -e %s", shellQuote(mysql), mysqlBaseArgs(),
+		shellQuote("SET GLOBAL max_allowed_packet=1073741824"))
+	_, _ = ExecCommand(cmd, 15*time.Second)
+}
+
 // importMysqlFile 把 SQL 文件导入 MySQL。
 // 兼容 .sql / .sql.gz / .sql.zip（宝塔新版数据库手动备份为 .sql.zip，zip 内是单个 .sql）。
 func importMysqlFile(dbName, path string) error {
-	// zip 备份先用 Go archive/zip 解出 .sql 再导入（不依赖系统 unzip）
-	if strings.HasSuffix(strings.ToLower(path), ".zip") {
+	// zip 备份先用 Go archive/zip 解出 .sql 再导入（不依赖系统 unzip）。
+	// 按魔数识别而非文件后缀：迁移场景下载的对端备份统一落地为 .sql.gz 命名，
+	// 但宝塔新版数据库备份实际是 zip 格式，按后缀会错误走 gunzip 分支。
+	if isZipFile(path) {
 		sqlPath, cleanup, err := extractSQLFromZip(path)
 		if err != nil {
 			return err
@@ -314,11 +348,17 @@ func importMysqlFile(dbName, path string) error {
 	if res1.ExitCode != 0 {
 		return errors.New(res1.Stderr)
 	}
+	// 导入：先 SET 会话变量，再流式做兼容降级后灌入 mysql
+	raiseGlobalMaxAllowedPacket()
 	var cmd2 string
 	if strings.HasSuffix(strings.ToLower(path), ".gz") {
-		cmd2 = fmt.Sprintf("gunzip -c %s | %s %s %s", shellQuote(path), shellQuote(mysql), mysqlBaseArgs(), shellQuote(dbName))
+		cmd2 = fmt.Sprintf("{ echo %s; gunzip -c %s | sed %s; } | %s %s %s %s",
+			shellQuote(sqlImportSessionSQL), shellQuote(path), sqlImportCompatArgs,
+			shellQuote(mysql), mysqlBaseArgs(), sqlImportMysqlClientArgs, shellQuote(dbName))
 	} else {
-		cmd2 = fmt.Sprintf("%s %s %s < %s", shellQuote(mysql), mysqlBaseArgs(), shellQuote(dbName), shellQuote(path))
+		cmd2 = fmt.Sprintf("{ echo %s; sed %s %s; } | %s %s %s %s",
+			shellQuote(sqlImportSessionSQL), sqlImportCompatArgs, shellQuote(path),
+			shellQuote(mysql), mysqlBaseArgs(), sqlImportMysqlClientArgs, shellQuote(dbName))
 	}
 	res2, err := ExecCommand(cmd2, 300*time.Second)
 	if err != nil {

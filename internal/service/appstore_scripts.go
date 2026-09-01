@@ -272,8 +272,12 @@ if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y curl lsb-release ca-certificates gnupg2 >/dev/null 2>&1 || apt-get install -y curl lsb-release ca-certificates >/dev/null 2>&1
+    # 注意：apt-cache policy 对"包名已知但无安装候选"的情况同样会输出 "Candidate: (none)",
+    # 只 grep 'Candidate:' 会误判为官方源已提供该版本,从而跳过 sury 仓库导致安装失败
+    # (典型案例: Debian 13 安装 php7.4)。故必须匹配具体版本号。
+    have_php() { apt-cache policy "php{{VER}}-fpm" 2>/dev/null | grep -qE 'Candidate: [0-9]'; }
     # 官方源已包含目标版本（如 Debian 13 自带 PHP 8.4）时无需 sury 仓库
-    if ! apt-cache policy php{{VER}}-fpm 2>/dev/null | grep -q 'Candidate:'; then
+    if ! have_php; then
         code=$(lsb_release -sc 2>/dev/null)
         [ -z "$code" ] && code=$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release 2>/dev/null)
         if [ -n "$code" ] && [ -d /etc/apt/sources.list.d ]; then
@@ -287,6 +291,16 @@ if command -v apt-get >/dev/null 2>&1; then
                 apt-get update -y || true
             else
                 echo "警告: 下载 sury 仓库密钥失败，若系统源无 php{{VER}}-fpm 将无法安装" >&2
+            fi
+        fi
+        # 启用 sury 后仍无候选：再刷新一次索引（首次 update 可能因网络抖动未拉到 sury），
+        # 仍无候选才明确报错，避免 apt 抛出一串 E: 错误后无意义重试
+        if ! have_php; then
+            apt-get update -y || true
+            if ! have_php; then
+                echo "错误: 系统官方源与 sury 仓库均未找到 php{{VER}}-fpm 的安装候选（发行版代号: ${code:-未知}）" >&2
+                echo "提示: PHP {{VER}} 已停止官方支持，较新的发行版可能不再提供，建议安装 PHP 8.0 及以上版本" >&2
+                exit 1
             fi
         fi
     fi

@@ -338,6 +338,7 @@ func saveBaseTab(s *model.Site, req SiteSettingsReq) error {
 		if err := os.MkdirAll(s.Root, 0o755); err != nil {
 			return errors.New("创建目录失败: " + err.Error())
 		}
+		_ = ChownToWebUser(s.Root, true)
 		rd := strings.TrimSpace(req.RuntimeDir)
 		rd = strings.Trim(rd, "/")
 		if rd != "" {

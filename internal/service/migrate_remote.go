@@ -9,6 +9,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -88,32 +89,15 @@ func (r *RemotePanel) Pack(sites, databases, ftps []string) (string, error) {
 	return data.ID, nil
 }
 
-// Download 下载源面板迁移包到本地，返回本地文件路径
-func (r *RemotePanel) Download(pkgID string) (string, error) {
+// Download 下载源面板迁移包到本地，返回本地文件路径。
+// ctx 用于「取消迁移」时立即中断下载；onProgress 每约 500ms 回调一次下载进度。
+func (r *RemotePanel) Download(ctx context.Context, pkgID string, onProgress func(done, total int64)) (string, error) {
 	_ = os.MkdirAll(migrateRoot(), 0o755)
 	dest := filepath.Join(migrateRoot(), "import-"+pkgID+".tar.gz")
 	dlURL := fmt.Sprintf("%s/api/migrate/remote/download?id=%s&token=%s",
 		r.BaseURL, url.QueryEscape(pkgID), url.QueryEscape(r.Token))
-	req, err := http.NewRequest("GET", dlURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := r.client.Do(req)
-	if err != nil {
+	if err := downloadWithProgress(ctx, dlURL, dest, onProgress); err != nil {
 		return "", fmt.Errorf("下载迁移包失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("下载迁移包失败（HTTP %d）: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
-	}
-	f, err := os.Create(dest)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return "", err
 	}
 	return dest, nil
 }
