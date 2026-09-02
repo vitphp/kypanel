@@ -81,6 +81,7 @@ import { useAuthStore } from '../stores/auth'
 import { useFloatingTerminalStore } from '../stores/floatingTerminal'
 import { usePanelStore } from '../stores/panel'
 import request from '../utils/request'
+import { OFFICIAL_SITE } from '../config'
 
 defineProps({
   collapsed: { type: Boolean, default: false }
@@ -101,7 +102,7 @@ function onTerminalClick() {
 const userText = computed(() => auth.username || 'admin')
 
 function openDocs() {
-  window.open('https://panel.apihot.cn', '_blank')
+  window.open(OFFICIAL_SITE, '_blank')
 }
 
 function onCommand(cmd) {

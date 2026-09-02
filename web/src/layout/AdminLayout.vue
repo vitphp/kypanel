@@ -30,7 +30,9 @@
         </div>
 
         <!-- 全局页脚：放在主内容区域底部（不固定在屏幕最底） -->
-        <footer class="lp-footer">{{ panel.name }} 版权所有 © 2026</footer>
+        <footer class="lp-footer">
+          <a :href="OFFICIAL_SITE" target="_blank" rel="noopener noreferrer" class="lp-footer-link">{{ panel.name }}</a> 版权所有 © 2026
+        </footer>
       </main>
     </div>
 
@@ -52,6 +54,7 @@ import InstallFloater from '../components/InstallFloater.vue'
 import TransferPanel from '../components/TransferPanel.vue'
 import request from '../utils/request'
 import { usePanelStore } from '../stores/panel'
+import { OFFICIAL_SITE } from '../config'
 
 const COLLAPSE_KEY = 'lp-sidebar-collapsed'
 
@@ -173,6 +176,16 @@ onUnmounted(() => {
   padding: 10px 16px;
   border-top: 1px solid #eef0f3;
   background: #f5f7fa;
+}
+
+.lp-footer-link {
+  color: #64748b;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.lp-footer-link:hover {
+  color: #475569;
+  text-decoration: underline;
 }
 
 /* 窄屏（< 600px）去掉主内容区左右留白，并去掉 el-card 圆角，贴边显示充分利用手机屏幕宽度 */
