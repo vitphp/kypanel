@@ -675,6 +675,8 @@ function onPathInputKeydown(e) {
 const renamingPath = ref('')
 const nameValue = ref('')
 const renameInputRef = ref(null)
+// 防重入：Enter 提交后输入框销毁会再触发一次 blur/confirmRename，避免重复请求
+let renameSaving = false
 
 // ============= 权限 =============
 const permVisible = ref(false)
@@ -1402,6 +1404,9 @@ function rowsOfClickTarget(t) {
 }
 function onListMouseDown(e) {
   if (e.button !== 0) return
+  // 正在重命名时直接放行：mousedown 的 preventDefault 会阻止焦点转移，
+  // 使重命名输入框不失焦、@blur 不触发，导致点其他区域时改名内容被丢弃。
+  if (renamingPath.value) return
   const t = e.target
   if (!t || !t.closest) return
   // 交互元素（复选框 / 操作列按钮 / 表头 / 输入框 / 右键菜单 / 空态）不拦截
@@ -1715,6 +1720,24 @@ function doCopyPath(row) {
   }
 }
 async function doDecompress(row) {
+  // 解压会直接写入目标目录，同名文件会被覆盖且无法恢复，操作前必须让用户确认
+  const esc = (s) =>
+    String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  try {
+    await ElMessageBox.confirm(
+      `压缩包：${esc(row.name)}<br>解压到：${esc(currentPath.value)}<br><br>` +
+        `<strong>若压缩包内的文件与该目录下已有同名文件冲突，将被直接覆盖且无法恢复。</strong>`,
+      '确认解压',
+      {
+        type: 'warning',
+        confirmButtonText: '确定解压',
+        cancelButtonText: '取消',
+        dangerouslyUseHTMLString: true
+      }
+    )
+  } catch {
+    return
+  }
   try {
     const res = await request.post('/file/unzip', {
       path: row.path,
@@ -1814,6 +1837,7 @@ function rename(row) {
   })
 }
 async function confirmRename(row) {
+  if (renameSaving) return
   const newName = (nameValue.value || '').trim()
   if (!newName || newName === row.name) {
     cancelRename()
@@ -1824,7 +1848,11 @@ async function confirmRename(row) {
     ElMessage.error('文件名包含非法字符')
     return
   }
-  const newPath = currentPath.value.replace(/\/+$/, '') + '/' + newName
+  // 用文件自身所在目录计算新路径：搜索结果等场景下 currentPath 可能不是文件所在目录，
+  // 直接用 currentPath 会把文件"改名"到别的目录（等同移动）。
+  const dir = row.path.slice(0, row.path.lastIndexOf('/'))
+  const newPath = dir + '/' + newName
+  renameSaving = true
   try {
     const res = await request.post('/file/rename', { old_path: row.path, new_path: newPath })
     if (res.code !== 0) {
@@ -1836,6 +1864,8 @@ async function confirmRename(row) {
     refresh()
   } catch (e) {
     ElMessage.error('重命名失败: ' + (e?.message || e))
+  } finally {
+    renameSaving = false
   }
 }
 function cancelRename() {
@@ -2345,49 +2375,19 @@ function walkEntry(entry, prefix, out) {
   })
 }
 
-// ============= 下载（带进度） =============
+// ============= 下载（登录态地址，浏览器直接下载到本机） =============
+// /api/file/download 需要登录态（Authorization 头或登录 cookie 均可），地址长期有效：
+// 同源请求会自动携带登录 cookie，服务端以 attachment 响应，由浏览器「另存为」
+// 保存到本机电脑——而不是把文件下载到服务器里。
 function download(row) {
-  const xhr = new XMLHttpRequest()
-  xhr.open('GET', '/api/file/raw?path=' + encodeURIComponent(row.path), true)
-  const token = localStorage.getItem('panel_token') || ''
-  xhr.setRequestHeader('Authorization', 'Bearer ' + token)
-  xhr.responseType = 'blob'
-  const taskId = transfer.addTask({
-    type: 'download',
-    name: row.name,
-    dir: row.path,
-    total: row.size || 0,
-    cancel: null
-  })
-  transfer._cancels[taskId] = () => xhr.abort()
-  xhr.onprogress = (ev) => {
-    if (ev.lengthComputable) transfer.updateTask(taskId, ev.loaded)
-  }
-  xhr.onload = () => {
-    delete transfer._cancels[taskId]
-    if (xhr.status >= 200 && xhr.status < 300) {
-      transfer.setTaskStatus(taskId, 'done')
-      const blob = xhr.response
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = row.name
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      setTimeout(() => URL.revokeObjectURL(a.href), 500)
-    } else {
-      transfer.setTaskStatus(taskId, 'error', 'HTTP ' + xhr.status)
-    }
-  }
-  xhr.onerror = () => {
-    delete transfer._cancels[taskId]
-    transfer.setTaskStatus(taskId, 'error', '网络错误')
-  }
-  xhr.onabort = () => {
-    delete transfer._cancels[taskId]
-    transfer.setTaskStatus(taskId, 'canceled')
-  }
-  xhr.send()
+  const url = '/api/file/download?path=' + encodeURIComponent(row.path)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = row.name
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
 }
 
 // ============= 权限 =============

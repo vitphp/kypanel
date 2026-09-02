@@ -14,6 +14,17 @@ import (
 // 放在 middleware 包供 ApiTokenOrAuth（临时登录写 cookie）与 router（NoRoute 校验）共用。
 const PanelTokenCookie = "lp_token"
 
+// tokenTypeToSource 把 API 令牌类型映射为操作来源标识：
+// type=mcp → "mcp"（落 MCP 日志）；其它 → "api"（落 API 日志）。
+// 注意 OperationLog 的 source 取值为 api/mcp/temp/login，
+// 与 auth_type 原始值（api_token/jwt）不同，需在此转换。
+func tokenTypeToSource(tokenType string) string {
+	if tokenType == "mcp" {
+		return "mcp"
+	}
+	return "api"
+}
+
 // ApiTokenOrAuth 鉴权中间件：先校验 API 令牌（带 type 区分），失败再回退到登录 JWT。
 // 用于「通用 API」路由组：JWT（前端登录态）和 API 令牌都能访问。
 //
@@ -54,7 +65,8 @@ func ApiTokenOrAuth(tokenType string) gin.HandlerFunc {
 			if _, scopes, ok := service.VerifyApiToken(tokenType, rawToken, c.ClientIP()); ok {
 				c.Set("admin_id", uint(0)) // 超管上下文
 				c.Set("username", "api-token")
-				c.Set("auth_type", "api_token")
+				// 按令牌类型标记操作来源：type=api → API 日志；type=mcp → MCP 日志
+				c.Set("auth_type", tokenTypeToSource(tokenType))
 				// 注入令牌权限范围：空 = 全部权限；非空时 PermissionGuard 按模块校验
 				c.Set("token_scopes", scopes)
 				c.Next()
@@ -101,7 +113,8 @@ func ApiTokenOnlyAuth(tokenType string) gin.HandlerFunc {
 		}
 		c.Set("admin_id", uint(0))
 		c.Set("username", "api-token")
-		c.Set("auth_type", "api_token")
+		// 按令牌类型标记操作来源：type=api → API 日志；type=mcp → MCP 日志
+		c.Set("auth_type", tokenTypeToSource(tokenType))
 		// 注入令牌权限范围：空 = 全部权限；非空时 PermissionGuard 按模块校验
 		c.Set("token_scopes", scopes)
 		c.Next()
@@ -114,7 +127,15 @@ func extractToken(c *gin.Context) string {
 	if token == "" {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			return ""
+			// 回退到登录态 cookie：浏览器直接访问下载/预览等 GET 地址时
+			// 无法携带 Authorization 头，只能靠同源自动带上的 HttpOnly cookie。
+			// 仅 GET 生效——写操作不允许凭 cookie 鉴权，避免 CSRF。
+			if c.Request.Method == http.MethodGet {
+				if ck, err := c.Cookie(PanelTokenCookie); err == nil && ck != "" {
+					token = ck
+				}
+			}
+			return token
 		}
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {

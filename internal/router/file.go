@@ -1,8 +1,11 @@
 package router
 
 import (
+	"fmt"
 	"io"
 	"mime/multipart"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -319,7 +322,7 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "file.upload", dst, "success")
+		recordOpForCtx(c, "file.upload", "上传至 "+dst, "success")
 		utils.Ok(c, gin.H{"offset": written, "complete": complete})
 	})
 
@@ -408,7 +411,8 @@ func setupFileRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, nil)
 	})
 
-	// 下载文件
+	// 下载文件（需登录态：Authorization 头或登录 cookie 均可，地址长期有效）
+	// 以 attachment 响应，浏览器「另存为」保存到用户本机，不会下载到服务器。
 	g.GET("/file/download", func(c *gin.Context) {
 		path := c.Query("path")
 		clean, err := service.SanitizePath(path)
@@ -416,7 +420,10 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		c.Header("Content-Disposition", "attachment")
+		// RFC 5987：保证中文文件名不乱码
+		name := filepath.Base(clean)
+		c.Header("Content-Disposition", fmt.Sprintf(
+			`attachment; filename="%s"; filename*=UTF-8''%s`, name, url.QueryEscape(name)))
 		c.File(clean)
 	})
 
@@ -477,7 +484,7 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "file.chmod", req.Path+" -> mode="+req.Mode+" owner="+req.Owner+":"+req.Group+" recursive="+strconv.FormatBool(req.Recursive), "success")
+		recordOpForCtx(c, "file.chmod", fmt.Sprintf("%s (mode=%s owner=%s:%s recursive=%v)", req.Path, req.Mode, req.Owner, req.Group, req.Recursive), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -535,7 +542,15 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "file.zip", req.ZipPath, "success")
+		zipDetail := "打包为 " + req.ZipPath
+		if len(paths) > 0 {
+			if len(paths) <= 3 {
+				zipDetail += "（源：" + strings.Join(paths, ", ") + "）"
+			} else {
+				zipDetail += fmt.Sprintf("（源：%s 等共 %d 项）", strings.Join(paths[:3], ", "), len(paths))
+			}
+		}
+		recordOpForCtx(c, "file.zip", zipDetail, "success")
 		utils.Ok(c, nil)
 	})
 
@@ -623,7 +638,7 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "file.trash.restore", strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		recordOpForCtx(c, "file.trash.restore", "还原回收站项目 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -640,7 +655,7 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "file.trash.purge", strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		recordOpForCtx(c, "file.trash.purge", "彻底删除回收站项目 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -650,7 +665,7 @@ func setupFileRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "file.trash.empty", "", "success")
+		recordOpForCtx(c, "file.trash.empty", "清空回收站", "success")
 		utils.Ok(c, nil)
 	})
 }

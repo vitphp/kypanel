@@ -53,7 +53,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		recordOpForCtx(c, "site.default_site", "设置默认站点 ID="+strconv.FormatUint(uint64(req.ID), 10), "success")
+		recordOpForCtx(c, "site.default_site", "设置默认站点："+siteName(req.ID), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -84,7 +84,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.action", req.Action+" 站点 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.action", req.Action+" 网站："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -100,7 +100,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.delete", "删除网站 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.delete", "删除网站："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, result)
 	})
 
@@ -130,7 +130,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.settings", "修改网站设置 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.settings", "修改网站设置："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -145,7 +145,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.ssl", "修改 HTTPS 设置 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.ssl", "修改 HTTPS 设置："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -222,7 +222,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.ssl.apply_cert", "部署证书到站点 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.ssl.apply_cert", "部署证书到网站："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, result)
 	})
 
@@ -238,7 +238,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.ssl.letsencrypt", "申请 Let's Encrypt 证书 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.ssl.letsencrypt", "申请 Let's Encrypt 证书 网站："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, result)
 	})
 
@@ -254,7 +254,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.ssl.apply", "申请 "+req.Brand+" 证书 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.ssl.apply", "申请 "+req.Brand+" 证书 网站："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, result)
 	})
 
@@ -347,7 +347,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.config", "修改站点配置 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.config", "修改 Nginx 配置："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -486,7 +486,7 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "site.remark", "修改站点备注 ID="+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		service.RecordOp(c.GetUint("admin_id"), "site.remark", "修改站点备注："+siteName(req.ID), c.ClientIP(), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -542,4 +542,19 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			"ip_region":   service.IpRegionEnabled(),
 		})
 	})
+}
+
+// siteName 返回站点名称（带 ID），用于操作日志描述。
+func siteName(id uint) string {
+	if id == 0 {
+		return "无"
+	}
+	s, err := service.GetSiteDetail(id)
+	if err != nil || s == nil {
+		return "ID=" + strconv.FormatUint(uint64(id), 10)
+	}
+	if s.Name != "" {
+		return s.Name + " (ID=" + strconv.FormatUint(uint64(id), 10) + ")"
+	}
+	return "ID=" + strconv.FormatUint(uint64(id), 10)
 }

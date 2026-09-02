@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -63,6 +64,7 @@ func setupBackupRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
+		recordOpForCtx(c, "backup.delete", "删除备份 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -79,7 +81,7 @@ func setupBackupRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		recordOpForCtx(c, "backup.restore", "恢复备份", "success")
+		recordOpForCtx(c, "backup.restore", "恢复备份 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -169,6 +171,7 @@ func setupBackupRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
+		recordOpForCtx(c, "backup.upload", "上传备份 #"+strconv.FormatUint(uint64(req.ID), 10)+" 到 "+req.Storage, "success")
 		utils.Ok(c, nil)
 	})
 }

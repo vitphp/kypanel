@@ -61,7 +61,7 @@ func setupSystemRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "system.exec", req.Cmd, "success")
+		recordOpForCtx(c, "system.exec", "", "success", req.Cmd)
 		utils.Ok(c, res)
 	})
 
@@ -73,7 +73,7 @@ func setupSystemRoutes(g *gin.RouterGroup) {
 			return
 		}
 		// 同步记录操作日志（异步重启可能写不进——response 提前回，gin 通道已关）
-		recordOpForCtx(c, "system.restart_panel", "systemctl restart kypanel", "success")
+		recordOpForCtx(c, "system.restart_panel", "重启面板服务", "success")
 		// 延迟 800ms 再执行，让当前 response 顺利返回
 		service.RestartPanel()
 		utils.Ok(c, gin.H{"message": "面板重启指令已发出"})
@@ -85,7 +85,7 @@ func setupSystemRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 403, "仅超级管理员可重启服务器")
 			return
 		}
-		recordOpForCtx(c, "system.restart_server", "reboot", "success")
+		recordOpForCtx(c, "system.restart_server", "重启服务器", "success")
 		service.RestartServer()
 		utils.Ok(c, gin.H{"message": "服务器重启指令已发出"})
 	})

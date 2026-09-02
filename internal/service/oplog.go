@@ -18,11 +18,16 @@ const (
 )
 
 // RecordOp 记录操作日志（默认 source=login，向后兼容所有现存调用点）
-func RecordOp(adminID uint, action, detail, ip, status string) {
+func RecordOp(adminID uint, action, detail, ip, status string, rawCmd ...string) {
+	rc := ""
+	if len(rawCmd) > 0 {
+		rc = rawCmd[0]
+	}
 	op := model.OperationLog{
 		AdminID:   adminID,
 		Action:    action,
 		Detail:    detail,
+		RawCmd:    rc,
 		IP:        ip,
 		Status:    status,
 		Source:    OpSourceLogin,
@@ -39,28 +44,60 @@ func RecordOp(adminID uint, action, detail, ip, status string) {
 //   - source=mcp   → action 加 "mcp." 前缀
 //   - source=temp  → action 加 "temp." 前缀，并写入 tempAccessID
 //   - source=login → action 不变
-func RecordOpWithSource(source string, adminID, tempAccessID uint, ip, action, detail, status string) {
+//   rawCmd 为可选的原始命令/输入，存储到 RawCmd 字段便于明文追溯。
+func RecordOpWithSource(source string, adminID, tempAccessID uint, ip, action, detail, status string, rawCmd ...string) {
+	rc := ""
+	if len(rawCmd) > 0 {
+		rc = rawCmd[0]
+	}
+	now := time.Now()
 	switch source {
-	case OpSourceAPI:
-		RecordOp(adminID, "api."+action, detail, ip, status)
-	case OpSourceMCP:
-		RecordOp(adminID, "mcp."+action, detail, ip, status)
+	case OpSourceAPI, "api_token":
+		op := model.OperationLog{
+			AdminID:   adminID,
+			Action:    "api." + action,
+			Detail:    detail,
+			RawCmd:    rc,
+			IP:        ip,
+			Status:    status,
+			Source:    OpSourceAPI,
+			CreatedAt: now,
+		}
+		if err := model.DB.Create(&op).Error; err != nil {
+			slog.Warn("写入操作日志失败", "action", action, "err", err)
+		}
+	case OpSourceMCP, "mcp_token":
+		op := model.OperationLog{
+			AdminID:   adminID,
+			Action:    "mcp." + action,
+			Detail:    detail,
+			RawCmd:    rc,
+			IP:        ip,
+			Status:    status,
+			Source:    OpSourceMCP,
+			CreatedAt: now,
+		}
+		if err := model.DB.Create(&op).Error; err != nil {
+			slog.Warn("写入操作日志失败", "action", action, "err", err)
+		}
 	case OpSourceTemp:
 		op := model.OperationLog{
 			AdminID:      adminID,
 			Action:       "temp." + action,
 			Detail:       detail,
+			RawCmd:       rc,
 			IP:           ip,
 			Status:       status,
 			Source:       OpSourceTemp,
 			TempAccessID: tempAccessID,
-			CreatedAt:    time.Now(),
+			CreatedAt:    now,
 		}
 		if err := model.DB.Create(&op).Error; err != nil {
 			slog.Warn("写入操作日志失败", "action", action, "err", err)
 		}
 	default:
-		RecordOp(adminID, action, detail, ip, status)
+		// jwt / 空 → 视为登录会话操作
+		RecordOp(adminID, action, detail, ip, status, rawCmd...)
 	}
 }
 
@@ -119,12 +156,13 @@ func ExportOpsCSV() ([]byte, error) {
 	var sb strings.Builder
 	// UTF-8 BOM
 	sb.WriteString("\xEF\xBB\xBF")
-	sb.WriteString("ID,账号ID,操作类型,操作详情,来源,来源IP,状态,时间\n")
+	sb.WriteString("ID,账号ID,操作类型,操作详情,原始命令,来源,来源IP,状态,时间\n")
 	for _, op := range list {
-		line := fmt.Sprintf("%d,%d,%s,%s,%s,%s,%s,%s\n",
+		line := fmt.Sprintf("%d,%d,%s,%s,%s,%s,%s,%s,%s\n",
 			op.ID, op.AdminID,
 			csvEscape(op.Action),
 			csvEscape(op.Detail),
+			csvEscape(op.RawCmd),
 			op.Source,
 			csvEscape(op.IP),
 			op.Status,

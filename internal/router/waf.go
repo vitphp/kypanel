@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -27,7 +28,18 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.setting", "修改 WAF 防护设置", "success")
+		detail := "修改 WAF 防护设置"
+		if req.Mode != "" {
+			detail += " 模式：" + req.Mode
+		}
+		if req.Enabled != nil {
+			if *req.Enabled {
+				detail += " 开启"
+			} else {
+				detail += " 关闭"
+			}
+		}
+		recordOpForCtx(c, "waf.setting", detail, "success")
 		utils.Ok(c, nil)
 	})
 
@@ -50,7 +62,7 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.rule.update", "修改 WAF 规则", "success")
+		recordOpForCtx(c, "waf.rule.update", fmt.Sprintf("规则 #%d（动作：%s）", req.ID, req.Update.Action), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -65,7 +77,11 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.rule.add", "新增 WAF 规则", "success")
+		ruleName := req.Name
+		if ruleName == "" {
+			ruleName = req.Pattern
+		}
+		recordOpForCtx(c, "waf.rule.add", "新增 WAF 规则："+ruleName, "success")
 		utils.Ok(c, nil)
 	})
 
@@ -82,7 +98,7 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.rule.delete", "删除 WAF 规则", "success")
+		recordOpForCtx(c, "waf.rule.delete", fmt.Sprintf("删除 WAF 规则 #%d", req.ID), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -111,7 +127,7 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.iprule.add", "新增 WAF 黑白名单", "success")
+		recordOpForCtx(c, "waf.iprule.add", fmt.Sprintf("%s %s %s", req.Type, req.Action, req.Content), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -127,7 +143,7 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.iprule.delete", "删除 WAF 黑白名单", "success")
+		recordOpForCtx(c, "waf.iprule.delete", fmt.Sprintf("删除 WAF 黑白名单 #%d", req.ID), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -150,7 +166,7 @@ func setupWAFRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, "配置应用失败: "+err.Error())
 			return
 		}
-		recordOpForCtx(c, "waf.cc.save", "保存 CC 防护配置", "success")
+		recordOpForCtx(c, "waf.cc.save", fmt.Sprintf("保存 CC 防护配置（限速 %d/%d秒）", req.MaxRequests, req.WindowSec), "success")
 		utils.Ok(c, nil)
 	})
 

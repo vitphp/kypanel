@@ -12,13 +12,13 @@ import (
 // recordOpForCtx 从 gin.Context 提取操作元信息（来源/账号/IP/临时访问 ID），
 // 委托 service.RecordOpWithSource 记录操作日志。
 // 这是 router 层对 gin 的适配器，让 service 层不依赖 gin。
-func recordOpForCtx(c *gin.Context, action, detail, status string) {
+func recordOpForCtx(c *gin.Context, action, detail, status string, rawCmd ...string) {
 	service.RecordOpWithSource(
 		c.GetString("auth_type"),
 		c.GetUint("admin_id"),
 		c.GetUint("temp_access_id"),
 		c.ClientIP(),
-		action, detail, status,
+		action, detail, status, rawCmd...,
 	)
 }
 

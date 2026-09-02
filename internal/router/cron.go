@@ -117,7 +117,7 @@ func setupCronRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "cron.delete", "删除计划任务 #"+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		recordOpForCtx(c, "cron.delete", "删除计划任务 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -151,7 +151,7 @@ func setupCronRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "cron.run", "立即执行计划任务 #"+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		recordOpForCtx(c, "cron.run", "立即执行计划任务 #"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -200,6 +200,7 @@ func setupCronRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
+		recordOpForCtx(c, "cron.backup_delete", "删除计划任务备份 任务#"+strconv.FormatUint(uint64(req.ID), 10)+" 文件："+req.Name, "success")
 		utils.Ok(c, nil)
 	})
 

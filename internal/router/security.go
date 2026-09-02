@@ -1,6 +1,8 @@
 package router
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -37,7 +39,16 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "security.rule.add", "添加"+rule.Type+"规则", "success")
+		detail := "添加 "
+		switch rule.Type {
+		case "port":
+			detail += fmt.Sprintf("%s 端口 %s/%s", rule.Action, rule.Port, rule.Proto)
+		case "ip":
+			detail += fmt.Sprintf("%s IP %s", rule.Action, strings.Join(rule.Content, ","))
+		default:
+			detail += fmt.Sprintf("%s %s %s", rule.Action, rule.Type, strings.Join(rule.Content, ","))
+		}
+		recordOpForCtx(c, "security.rule.add", detail, "success")
 		utils.Ok(c, rule)
 	})
 
@@ -59,7 +70,16 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "security.rule.update", "修改"+rule.Type+"规则", "success")
+		detail := "修改 "
+		switch rule.Type {
+		case "port":
+			detail += fmt.Sprintf("%s 端口 %s/%s", rule.Action, rule.Port, rule.Proto)
+		case "ip":
+			detail += fmt.Sprintf("%s IP %s", rule.Action, strings.Join(rule.Content, ","))
+		default:
+			detail += fmt.Sprintf("%s %s %s", rule.Action, rule.Type, strings.Join(rule.Content, ","))
+		}
+		recordOpForCtx(c, "security.rule.update", detail, "success")
 		utils.Ok(c, rule)
 	})
 
@@ -76,7 +96,7 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "security.rule.delete", "删除规则", "success")
+		recordOpForCtx(c, "security.rule.delete", "删除规则 #"+req.ID, "success")
 		utils.Ok(c, nil)
 	})
 
@@ -94,7 +114,7 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 400, err.Error())
 			return
 		}
-		recordOpForCtx(c, "security.rule.remark", "修改规则备注", "success")
+		recordOpForCtx(c, "security.rule.remark", "修改规则 #"+req.ID+" 备注为 "+req.Remark, "success")
 		utils.Ok(c, nil)
 	})
 

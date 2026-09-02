@@ -51,7 +51,7 @@ func setupFtpRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		service.RecordOp(c.GetUint("admin_id"), "ftp.delete", "删除 FTP 用户 #"+strconv.FormatUint(uint64(req.ID), 10), c.ClientIP(), "success")
+		recordOpForCtx(c, "ftp.delete", "#"+strconv.FormatUint(uint64(req.ID), 10), "success")
 		utils.Ok(c, nil)
 	})
 

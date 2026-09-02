@@ -36,7 +36,7 @@ func setupSiteSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		recordOpForCtx(c, "site.security.config", "更新单站安全配置 站点ID="+strconv.FormatUint(uint64(siteID), 10), "success")
+		recordOpForCtx(c, "site.security.config", "更新单站安全配置："+siteName(siteID), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -69,7 +69,7 @@ func setupSiteSecurityRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		recordOpForCtx(c, "site.security.ip_add", "新增单站 IP 规则 "+req.Content, "success")
+		recordOpForCtx(c, "site.security.ip_add", "新增单站 IP 规则 "+req.Content+"，网站："+siteName(siteID), "success")
 		utils.Ok(c, gin.H{"id": id})
 	})
 	g.POST("/site/security/ip/delete", func(c *gin.Context) {

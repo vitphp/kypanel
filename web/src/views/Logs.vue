@@ -18,7 +18,14 @@
               <el-tag size="small">{{ moduleName(row.action.split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="detail" label="操作" min-width="220" show-overflow-tooltip />
+          <el-table-column label="操作" min-width="260">
+            <template #default="{ row }">
+              <div class="op-line">
+                <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>
+                <span v-if="row.detail && stripSourcePrefix(row.action) !== 'system.exec'" class="op-detail">{{ row.detail }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="ip" label="IP" width="140" />
           <el-table-column label="结果" width="90" align="center">
             <template #default="{ row }">
@@ -55,7 +62,14 @@
               <el-tag size="small" type="primary">{{ moduleName(row.action.replace(/^api\./, '').split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="detail" label="操作" min-width="220" show-overflow-tooltip />
+          <el-table-column label="操作" min-width="260">
+            <template #default="{ row }">
+              <div class="op-line">
+                <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>
+                <span v-if="row.detail && stripSourcePrefix(row.action) !== 'system.exec'" class="op-detail">{{ row.detail }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="ip" label="IP" width="140" />
           <el-table-column label="结果" width="90" align="center">
             <template #default="{ row }">
@@ -92,7 +106,14 @@
               <el-tag size="small" type="success">{{ moduleName(row.action.replace(/^mcp\./, '').split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="detail" label="操作" min-width="240" show-overflow-tooltip />
+          <el-table-column label="操作" min-width="260">
+            <template #default="{ row }">
+              <div class="op-line">
+                <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>
+                <span v-if="row.detail && stripSourcePrefix(row.action) !== 'system.exec'" class="op-detail">{{ row.detail }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="ip" label="来源 IP" width="140" />
           <el-table-column label="结果" width="90" align="center">
             <template #default="{ row }">
@@ -263,6 +284,44 @@ const moduleNames = {
 
 function moduleName(m) { return moduleNames[m] || m }
 
+// 操作动作中文映射（去掉 api./mcp./temp. 前缀后的完整 action 作为 key），用于把"操作"列显示成明文
+const opVerbMap = {
+  'system.exec': '执行命令', 'system.restart_panel': '重启面板', 'system.restart_server': '重启服务器',
+  'system.clear_log': '清空系统日志',
+  'file.write': '写入文件', 'file.mkdir': '创建目录', 'file.create': '创建文件', 'file.rename': '重命名',
+  'file.delete': '删除', 'file.copy': '复制', 'file.mv': '移动', 'file.remote_download': '远程下载',
+  'file.upload': '上传文件', 'file.chmod': '修改权限', 'file.zip': '压缩', 'file.unzip': '解压',
+  'file.trash.empty': '清空回收站', 'file.trash.restore': '还原回收站项目', 'file.trash.purge': '彻底删除回收站项目',
+  'oplog.clear': '清空日志', 'oplog.export': '导出日志',
+  'waf.setting': '修改WAF设置', 'waf.rule.update': '修改WAF规则', 'waf.rule.add': '新增WAF规则',
+  'waf.rule.delete': '删除WAF规则', 'waf.rules.reset': '重置WAF规则', 'waf.iprule.add': '新增WAF黑白名单',
+  'waf.iprule.delete': '删除WAF黑白名单', 'waf.cc.save': '保存CC防护', 'waf.logs.clear': '清空攻击日志',
+  'user.role_save': '保存角色', 'user.create': '创建子账号',
+  'site.default_page': '保存默认页', 'site.default_site': '设置默认站点', 'site.create': '创建网站',
+  'site.action': '启停网站', 'site.delete': '删除网站', 'site.settings': '修改网站设置',
+  'site.ssl': '修改HTTPS设置', 'site.config': '修改站点配置', 'site.remark': '修改站点备注',
+  'site.ssl.cert_delete': '删除证书记录', 'site.ssl.apply_cert': '部署证书',
+  'site.ssl.letsencrypt': '申请证书', 'site.ssl.apply': '申请证书', 'site.ssl.apply_dns': '申请证书',
+  'site.security.config': '更新站点安全', 'site.security.ip_add': '新增站点IP规则',
+  'settings.username': '修改管理员账号', 'settings.port': '修改面板端口', 'settings.domain': '修改绑定域名',
+  'settings.entrance': '修改安全入口', 'settings.panel_name': '修改面板名称', 'settings.report': '修改体验计划',
+  'settings.mysql_pwd': '更新MySQL密码', 'settings.litessl': '更新LiteSSL', 'settings.login_allowlist': '更新登录白名单',
+  'settings.session_kick': '踢下线会话', 'settings.session_kick_all': '踢下线全部会话',
+  'security.rule.add': '新增防火墙规则', 'security.rule.update': '修改防火墙规则', 'security.rule.delete': '删除防火墙规则',
+  'security.rule.remark': '修改规则备注',
+  'process.kill': '结束进程', 'ftp.create': '创建FTP用户', 'ftp.delete': '删除FTP用户',
+  'docker.create': '创建容器', 'docker.action': '启停容器', 'docker.remove': '删除容器',
+  'docker.network.create': '创建网络', 'docker.network.rm': '删除网络',
+  'docker.app.install': '安装容器应用', 'docker.app.uninstall': '卸载容器应用',
+  'cron.save': '保存计划任务', 'cron.delete': '删除计划任务', 'cron.run': '执行计划任务', 'cron.backup_delete': '删除计划任务备份',
+  'backup.create': '创建备份', 'backup.restore': '恢复备份', 'backup.delete': '删除备份', 'backup.upload': '上传备份',
+  'auth.totp_enable': '启用双因素认证', 'auth.totp_disable': '关闭双因素认证',
+  'api_token.create': '创建API令牌', 'api_token.delete': '删除API令牌',
+  'app.install': '安装应用', 'app.uninstall': '卸载应用', 'app.service': '服务启停', 'app.cancel': '停止任务',
+  'temp.access.create': '创建临时访问', 'temp.access.revoke': '吊销临时访问',
+}
+function stripSourcePrefix(a) { return (a || '').replace(/^(api|mcp|temp)\./, '') }
+function opVerb(row) { return opVerbMap[stripSourcePrefix(row.action)] || '' }
 function fmtTime(t) {
   return fmtTimeStamp(t)
 }
@@ -368,11 +427,24 @@ watch(activeTab, () => {
   try { localStorage.setItem(LOGS_TAB_KEY, activeTab.value) } catch (e) { /* 忽略 */ }
 })
 
-onMounted(() => { loadOplog() })
+onMounted(() => {
+  if (activeTab.value === 'api') loadApiLog()
+  else if (activeTab.value === 'mcp') loadMcpLog()
+  else if (activeTab.value === 'system') loadSystemLog()
+  else if (activeTab.value === 'app') loadAppLogList()
+  else loadOplog()
+})
 </script>
 
 <style scoped>
 .logs-page { padding: 0 8px; }
+/* 操作列：只显示中文动作名（无映射时兜底显示 detail） */
+.op-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.op-verb { flex: none; }
+.op-detail {
+  color: #303133; word-break: break-all;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .hint { color: #909399; font-size: 12px; margin-left: 4px; }
 .pager { display: flex; justify-content: flex-end; margin-top: 12px; }

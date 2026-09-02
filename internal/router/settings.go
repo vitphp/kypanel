@@ -52,7 +52,7 @@ func setupSettingsRoutes(g *gin.RouterGroup) {
 		if oldPort != req.Port {
 			service.RestartPanel()
 		}
-		service.RecordOp(c.GetUint("admin_id"), "settings.port", fmt.Sprintf("修改面板端口为 %d", req.Port), c.ClientIP(), "success")
+		recordOpForCtx(c, "settings.port", fmt.Sprintf("修改面板端口为 %d", req.Port), "success")
 		utils.Ok(c, nil)
 	})
 
@@ -86,7 +86,7 @@ func setupSettingsRoutes(g *gin.RouterGroup) {
 		// 立即同步内存中的 currentEntrance（SavePanelSecurityEntrance 内部已同步写 config.json），
 		// 使后续登录/验证码请求、NoRoute 校验都走新入口，无需重启 panel。
 		currentEntrance = req.Entrance
-		recordOpForCtx(c, "settings.entrance", "修改安全入口（旧值已隐藏，新入口请立即记录）", "success")
+		recordOpForCtx(c, "settings.entrance", "修改安全入口为 "+req.Entrance, "success")
 		utils.Ok(c, gin.H{"entrance": req.Entrance, "old": old})
 	})
 
@@ -233,7 +233,7 @@ func setupSettingsRoutes(g *gin.RouterGroup) {
 			utils.Fail(c, 500, err.Error())
 			return
 		}
-		recordOpForCtx(c, "settings.session_kick", "踢下线会话", "success")
+		recordOpForCtx(c, "settings.session_kick", "踢下线会话 #"+strconv.FormatUint(uint64(req.SessionID), 10), "success")
 		utils.Ok(c, nil)
 	})
 	g.POST("/settings/session/kick-all", func(c *gin.Context) {
