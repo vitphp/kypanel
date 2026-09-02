@@ -106,7 +106,7 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		id := fmt.Sprintf("%v", s["id"])
 		btSiteMap[n] = btSiteEntry{id: id, webname: btParseWebname(s)}
 	}
-	// 不再打印「当前 N 个网站」，避免远程拉取后被前端误读为多余信息
+
 	t.logf("对端面板连接成功")
 
 	// 3. 创建网站 + 上传文件 + 应用站点级配置

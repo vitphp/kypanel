@@ -8,7 +8,7 @@ package service
 //   request_token = md5(request_time + md5(api_sk))
 //   所有请求为 POST form，参数中必须带 request_token 与 request_time。
 //
-// 注：对端面板 API 部分接口名/参数在不同版本略有差异，接口不通时按目标对端面板版本调整。
+
 
 import (
 	"bytes"
@@ -198,7 +198,7 @@ func (c *BTClient) btRequest(class, action string, params url.Values) (map[strin
 	return m, nil
 }
 
-// ---------------- 网站 ----------------
+
 
 // btParseDataList 兼容解析对端面板返回的列表数据（data 字段可能是 JSON 字符串或数组）
 func btParseDataList(res map[string]any) ([]map[string]any, error) {
@@ -352,7 +352,7 @@ func (c *BTClient) PHPVersionList() ([]string, error) {
 	return nil, fmt.Errorf("对端面板PHP版本接口响应无法解析: %s", truncateLog(string(body), 200))
 }
 
-// ---------------- 数据库 ----------------
+
 
 // AddDatabase 在对端面板创建数据库
 //
@@ -512,7 +512,7 @@ func (c *BTClient) ReadFile(path string) (map[string]any, error) {
 	return c.btRequest("files", "GetFileBody", params)
 }
 
-// ---------------- 站点配置（迁出到对端面板后补齐） ----------------
+
 // 这些接口只通过官方 API 修改对端面板的站点配置，不直接写 nginx/apache 配置文件。
 // 对端面板的站点配置由它自己生成，直接搬运 kypanel 的配置片段会因语法
 // 与结构差异导致 web 服务器校验失败（典型：a duplicate default server for 0.0.0.0:80）。
@@ -565,7 +565,7 @@ func (c *BTClient) ApplyCustomRewrite(siteName, ruleContent string) error {
 	return err
 }
 
-// ---------------- FTP ----------------
+
 
 // AddFtpUser 在对端面板创建 FTP 账号
 func (c *BTClient) AddFtpUser(username, password, path string) (map[string]any, error) {
@@ -576,7 +576,7 @@ func (c *BTClient) AddFtpUser(username, password, path string) (map[string]any, 
 	return c.btRequest("ftp", "AddUser", params)
 }
 
-// ---------------- 文件 ----------------
+
 
 // Upload 上传本地文件到对端面板服务器。
 // 使用对端面板文件管理器的真实分片接口 /files?action=upload：
