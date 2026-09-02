@@ -449,9 +449,9 @@ kypanel 后端基于 Go + Gin，所有业务 API 统一前缀 `/api`。
 | POST | `/api/migrate/detect-panel` | 检测目标面板类型 |
 | POST | `/api/migrate/export` | 导出（本面板） |
 | POST | `/api/migrate/export/precheck` | 导出预检 |
-| POST | `/api/migrate/export/bt` | 导出为宝塔格式 |
-| POST | `/api/migrate/export/bt/precheck` | 宝塔导出预检 |
-| POST | `/api/migrate/bt/precheck` | 宝塔迁移预检 |
+| POST | `/api/migrate/export/bt` | 导出为第三方面板格式 |
+| POST | `/api/migrate/export/bt/precheck` | 第三方面板导出预检 |
+| POST | `/api/migrate/bt/precheck` | 第三方面板迁移预检 |
 | GET | `/api/migrate/exports` | 导出任务列表 |
 | DELETE | `/api/migrate/exports/:id` | 删除导出任务 |
 | GET | `/api/migrate/download/:id` | 下载迁移包 |

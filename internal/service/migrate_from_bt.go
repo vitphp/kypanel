@@ -75,7 +75,7 @@ func FetchBTSites(panelURL, apiSK string) ([]map[string]any, error) {
 		}
 
 		out = append(out, map[string]any{
-			// 宝塔站点 id 是 JSON 数字（解码为 float64），必须用 strFromAny 转字符串，
+			// 源面板站点 id 是 JSON 数字（解码为 float64），必须用 strFromAny 转字符串，
 			// site?action=BackupSite 等接口按 id 定位站点，缺失会导致「指定参数无效」
 			"id":           strFromAny(s["id"]),
 			"name":         name,
@@ -299,7 +299,7 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 	if len(domains) > 0 {
 		primary = domains[0]
 	}
-	// 宝塔部分站点（反向代理/站点名即域名）domain 字段可能为空，回退用站点名作为主域名
+	// 源面板部分站点（反向代理/站点名即域名）domain 字段可能为空，回退用站点名作为主域名
 	if primary == "" {
 		primary = name
 	}
@@ -342,7 +342,7 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 		if v == "" {
 			v = "74"
 		}
-		// 宝塔版本号是两位简写（74），本机 RuntimeVersion 需带点格式（PHP 7.4），
+		// 源面板版本号是两位简写（74），本机 RuntimeVersion 需带点格式（PHP 7.4），
 		// 否则 ensureRuntime 会在 PATH 里找 php74 而实际二进制名是 php7.4
 		createReq.RuntimeVersion = "PHP " + btPhpVersionDotted(v)
 	}
@@ -364,17 +364,17 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 		if err := ungzTar(pkgFile, s.Root); err != nil {
 			return fmt.Errorf("解压网站文件失败: %w", err)
 		}
-		// 宝塔压缩包通常会把站点目录本身包一层（如解压后出现 /root/api.vitphp.cn/），
+		// 源面板压缩包通常会把站点目录本身包一层（如解压后出现 /root/api.vitphp.cn/），
 		// 需要把这一层子目录里的文件上移到网站根目录，避免访问路径多套一层。
 		if err := flattenBTSiteRoot(s.Root, name); err != nil {
 			return fmt.Errorf("整理网站目录层级失败: %w", err)
 		}
-		// 解压后的文件带的是宝塔源端属主/权限（常为 root），统一改为本机 Web 运行用户
+		// 解压后的文件带的是源面板源端属主/权限（常为 root），统一改为本机 Web 运行用户
 		// （www-data 等），避免属主为 root 导致权限过高、被入侵后波及整台服务器的风险。
 		if err := ChownToWebUser(s.Root, true); err != nil {
 			t.logf("网站 %s 文件归属调整失败（可忽略）: %v", name, err)
 		}
-		// 清理源面板残留的 .user.ini（宝塔等会带，且常带 immutable 位），
+		// 清理源面板残留的 .user.ini（源面板等会带，且常带 immutable 位），
 		// 避免其 open_basedir 干扰本面板生成的配置，也防止 immutable 位导致文件无法在管理器内删除
 		_, _ = ExecCommand("chattr -i "+shellQuote(filepath.Join(s.Root, ".user.ini")), 5*time.Second)
 		_ = os.Remove(filepath.Join(s.Root, ".user.ini"))
@@ -397,7 +397,7 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 		}
 	}
 
-	// SSL 证书：读取源站点证书与私钥并写入本机（兼容宝塔不同版本证书存放路径）
+	// SSL 证书：读取源站点证书与私钥并写入本机（兼容源面板不同版本证书存放路径）
 	if cert, key := client.GetSiteSSLCert(primary); cert != "" && key != "" {
 		certPath, keyPath := siteSSLPath(s.Name)
 		if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
@@ -428,8 +428,8 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 	return nil
 }
 
-// flattenBTSiteRoot 整理宝塔站点备份多包的一层目录。
-// 宝塔压缩站点目录时通常会把 /www/wwwroot/<name> 整体打包，解压到网站根目录后
+// flattenBTSiteRoot 整理源面板站点备份多包的一层目录。
+// 源面板压缩站点目录时通常会把 /www/wwwroot/<name> 整体打包，解压到网站根目录后
 // 会多出一层 <name>/ 子目录。本函数把该子目录里的所有文件/目录上移到网站根目录，
 // 并覆盖根目录下同名文件（如 kypanel 默认生成的 index.html/404.html），最后删除空子目录。
 func flattenBTSiteRoot(root, name string) error {
@@ -484,7 +484,7 @@ func zipBTSiteDir(client *BTClient, btSite map[string]any, name string) error {
 
 // btSiteRunDir 计算源站运行目录：nginx root 相对站点 path 的相对路径（如 public），
 // 若 root 与站点 path 相同则返回空（使用站点根目录）。
-// primary 为源站主域名，name 为源站站点名（宝塔 vhost 配置可能按二者之一命名），
+// primary 为源站主域名，name 为源站站点名（源面板 vhost 配置可能按二者之一命名），
 // rootDir 为本机解压后的站点根目录，用于源端配置解析失败时兜底探测常见框架运行目录。
 func btSiteRunDir(client *BTClient, btSite map[string]any, primary, name, rootDir string) string {
 	sitePath := strings.TrimRight(toStr(btSite["path"]), "/")
@@ -514,7 +514,7 @@ func btSiteRunDir(client *BTClient, btSite map[string]any, primary, name, rootDi
 }
 
 // downloadBTSitePackage 下载对端面板网站文件：
-// 直接用 files?action=Zip 压缩站点目录（不走宝塔网站备份接口，各版本参数差异大），
+// 直接用 files?action=Zip 压缩站点目录（不走源面板网站备份接口，各版本参数差异大），
 // 再通过对端面板端口 /download 直下（不依赖站点域名/SSL/伪静态）。
 func downloadBTSitePackage(t *ImportTask, client *BTClient, btSite map[string]any, dest string) error {
 	name := toStr(btSite["name"])
@@ -661,7 +661,7 @@ func normBTPhpVersion(v string) string {
 	return d.String()
 }
 
-// btPhpVersionDotted 把宝塔两位版本号（如 74）转成带点格式（7.4）
+// btPhpVersionDotted 把源面板两位版本号（如 74）转成带点格式（7.4）
 func btPhpVersionDotted(v string) string {
 	if len(v) >= 2 {
 		return v[:1] + "." + v[1:]
@@ -696,7 +696,7 @@ func parseBTDomains(v any) []string {
 		if json.Unmarshal([]byte(d), &arr) == nil {
 			out = arr
 		} else {
-			// 宝塔 domain 字段通常为空格分隔（"a.com www.a.com"），部分版本为逗号分隔
+			// 源面板 domain 字段通常为空格分隔（"a.com www.a.com"），部分版本为逗号分隔
 			for _, p := range strings.FieldsFunc(d, func(r rune) bool {
 				return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
 			}) {

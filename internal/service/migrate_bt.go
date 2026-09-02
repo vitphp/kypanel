@@ -163,7 +163,7 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 				}
 			}
 		}
-		// 宝塔 webname（用于伪静态文件名，不同版本字段名差异也较大）
+		// 对端面板 webname（用于伪静态文件名，不同版本字段名差异也较大）
 		btWebname := ""
 		for _, k := range []string{"siteName", "webname", "name"} {
 			if v, ok := addRes[k]; ok && v != nil {
@@ -221,7 +221,7 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 	dbsExist := map[string]string{}
 	if dbs, err := bt.DatabaseList(); err == nil {
 		for _, d := range dbs {
-			// 注意：宝塔 JSON 里 id 是数字（解码后为 float64），必须用 strFromAny 而不是 (string) 断言
+			// 注意：对端面板 JSON 里 id 是数字（解码后为 float64），必须用 strFromAny 而不是 (string) 断言
 			if id := strFromAny(d["id"]); id != "" {
 				if n, _ := d["name"].(string); n != "" {
 					dbsExist[n] = id
@@ -312,7 +312,7 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		// 重要：导入失败必须记为 failed，不能仅 log 后继续——这是用户最敏感的「数据库空了」问题
 		imported := false
 		lastErr := error(nil)
-		// 优先「服务端路径」方式（宝塔通用，老版/新版 InputSql 均支持，SQL 已上传到对端）。
+		// 优先「服务端路径」方式（对端面板通用，老版/新版 InputSql 均支持，SQL 已上传到对端）。
 		// 部分新版面板对 file 路径解析不同（相对名报「导入路径不存在!」、绝对路径报
 		// 「数据库导入包含异常」），此时回退「本地上传」multipart 方式。
 		if _, err := bt.ImportDatabase(dbID, db.Name, remoteSQL); err == nil {
@@ -410,33 +410,20 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 // applyBTSiteSettings 把站点级设置（运行目录 / 伪静态 / SSL）同步到对端面板。
 //
 // 只通过官方 API 修改，绝不搬运 kypanel 的 nginx 配置片段（ConfigOverride）：
-// 对端面板（宝塔）的站点配置由它自己生成，两套配置的语法与组织结构不同，
+// 对端面板的站点配置由它自己生成，两套配置的语法与组织结构不同，
 // 直接写入会让 web 服务器校验失败（典型错误：a duplicate default server for 0.0.0.0:80）。
 // 只有目标同为 kypanel 面板时才搬运配置（见 migrate.go 的 restoreSite）。
 //
 // 单项失败仅记录日志、不中断整体迁移，避免某个可选配置失败导致整站回滚。
 //
-// btWebname 是 AddSite 接口返回的宝塔站点标识（通常是主域名，如 php.n05v.cn）。
-// 宝塔伪静态文件按 webname 命名（/www/server/panel/vhost/rewrite/<webname>.conf），
-// 而 kypanel 的站点名（ms.Name）可能与宝塔 webname 不一致——直接用 ms.Name 写文件
-// 会落空，宝塔 UI 里看不到。所以同时尝试 webname / 主域名 / 站点名等多个候选。
-// applyBTSiteSettings 把站点级设置（运行目录 / 伪静态 / SSL）同步到对端面板。
-//
-// 返回值：true=全部成功，false=至少一项失败（外层会据此在 t.Items 里追加 site-config 失败记录）。
-//
-// 只通过官方 API 修改，绝不搬运 kypanel 的 nginx 配置片段（ConfigOverride）：
-// 对端面板（宝塔）的站点配置由它自己生成，两套配置的语法与组织结构不同，
-// 直接写入会让 web 服务器校验失败（典型错误：a duplicate default server for 0.0.0.0:80）。
-// 只有目标同为 kypanel 面板时才搬运配置（见 migrate.go 的 restoreSite）。
-//
-// btWebname 是 AddSite 接口返回的宝塔站点标识（通常是主域名，如 php.n05v.cn）。
-// 宝塔伪静态文件按 webname 命名（/www/server/panel/vhost/rewrite/<webname>.conf），
-// 而 kypanel 的站点名（ms.Name）可能与宝塔 webname 不一致——直接用 ms.Name 写文件
-// 会落空，宝塔 UI 里看不到。所以同时尝试 webname / 主域名 / 站点名等多个候选。
+// btWebname 是 AddSite 接口返回的对端面板站点标识（通常是主域名，如 php.n05v.cn）。
+// 对端面板伪静态文件按 webname 命名（/www/server/panel/vhost/rewrite/<webname>.conf），
+// 而 kypanel 的站点名（ms.Name）可能与对端面板 webname 不一致——直接用 ms.Name 写文件
+// 会落空，对端面板 UI 里看不到。所以同时尝试 webname / 主域名 / 站点名等多个候选。
 func applyBTSiteSettings(t *ImportTask, bt *BTClient, ms *MigrateSite, siteID, btWebname string) bool {
 	hasFail := false
 
-	// 运行目录：kypanel 存的是相对网站根目录的路径（如 public），宝塔要求 "/public" 形式
+	// 运行目录：kypanel 存的是相对网站根目录的路径（如 public），对端面板要求 "/public" 形式
 	if siteID != "" && strings.TrimSpace(ms.RuntimeDir) != "" {
 		runPath := "/" + strings.Trim(strings.TrimSpace(ms.RuntimeDir), "/")
 		if runPath != "/" {
@@ -450,7 +437,7 @@ func applyBTSiteSettings(t *ImportTask, bt *BTClient, ms *MigrateSite, siteID, b
 		}
 	}
 
-	// 伪静态：宝塔 rewrite 文件按 webname 命名，候选多个 webname 确保至少一个命中
+	// 伪静态：对端面板 rewrite 文件按 webname 命名，候选多个 webname 确保至少一个命中
 	if strings.TrimSpace(ms.Rewrite) != "" {
 		candidates := make([]string, 0, 4)
 		seen := map[string]bool{}
@@ -480,7 +467,7 @@ func applyBTSiteSettings(t *ImportTask, bt *BTClient, ms *MigrateSite, siteID, b
 			}
 			t.logf("网站 %s 伪静态规则已写入（%s.conf）", ms.Name, wn)
 			written = true
-			break // 写一个候选即可，其他的 conf 文件宝塔不会加载
+			break // 写一个候选即可，其他的 conf 文件对端面板不会加载
 		}
 		if !written {
 			t.logf("网站 %s 伪静态写入失败（可到对端面板「网站 → 设置 → 伪静态」手动粘贴）", ms.Name)
@@ -488,7 +475,7 @@ func applyBTSiteSettings(t *ImportTask, bt *BTClient, ms *MigrateSite, siteID, b
 		}
 	}
 
-	// SSL 证书：宝塔按主域名识别站点
+	// SSL 证书：对端面板按主域名识别站点
 	if !ms.SslEnabled || ms.SslCert == "" || ms.SslKey == "" || ms.Domain == "" {
 		return !hasFail
 	}

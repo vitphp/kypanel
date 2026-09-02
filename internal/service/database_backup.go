@@ -322,11 +322,11 @@ func raiseGlobalMaxAllowedPacket() {
 }
 
 // importMysqlFile 把 SQL 文件导入 MySQL。
-// 兼容 .sql / .sql.gz / .sql.zip（宝塔新版数据库手动备份为 .sql.zip，zip 内是单个 .sql）。
+// 兼容 .sql / .sql.gz / .sql.zip（第三方面板新版数据库手动备份为 .sql.zip，zip 内是单个 .sql）。
 func importMysqlFile(dbName, path string) error {
 	// zip 备份先用 Go archive/zip 解出 .sql 再导入（不依赖系统 unzip）。
 	// 按魔数识别而非文件后缀：迁移场景下载的对端备份统一落地为 .sql.gz 命名，
-	// 但宝塔新版数据库备份实际是 zip 格式，按后缀会错误走 gunzip 分支。
+	// 但第三方面板新版数据库备份实际是 zip 格式，按后缀会错误走 gunzip 分支。
 	if isZipFile(path) {
 		sqlPath, cleanup, err := extractSQLFromZip(path)
 		if err != nil {
@@ -371,7 +371,7 @@ func importMysqlFile(dbName, path string) error {
 }
 
 // extractSQLFromZip 从 .sql.zip 中解出 .sql 文件到临时目录，返回临时文件路径与清理函数。
-// 宝塔数据库 zip 备份内通常只有一个 .sql；若出现多个，优先取名字带 .sql 后缀的。
+// 第三方面板数据库 zip 备份内通常只有一个 .sql；若出现多个，优先取名字带 .sql 后缀的。
 func extractSQLFromZip(zipPath string) (string, func(), error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {

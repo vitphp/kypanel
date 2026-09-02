@@ -514,7 +514,7 @@ func (c *BTClient) ReadFile(path string) (map[string]any, error) {
 
 // ---------------- 站点配置（迁出到对端面板后补齐） ----------------
 // 这些接口只通过官方 API 修改对端面板的站点配置，不直接写 nginx/apache 配置文件。
-// 对端面板（宝塔）的站点配置由它自己生成，直接搬运 kypanel 的配置片段会因语法
+// 对端面板的站点配置由它自己生成，直接搬运 kypanel 的配置片段会因语法
 // 与结构差异导致 web 服务器校验失败（典型：a duplicate default server for 0.0.0.0:80）。
 
 // SetSiteRunPath 设置对端面板网站的运行目录（/site?action=SetSiteRunPath）。
@@ -547,18 +547,18 @@ func (c *BTClient) HttpToHttps(siteName string) error {
 }
 
 // ApplyCustomRewrite 把自定义伪静态规则直接写入对端面板的站点 rewrite 配置文件。
-// 路径：/www/server/panel/vhost/rewrite/<siteName>.conf（宝塔 nginx 站点配置默认 include 的路径）。
-// 写入后宝塔在面板 UI 里能看到内容；用户重启 nginx 或在宝塔里点保存都会重新加载。
+// 路径：/www/server/panel/vhost/rewrite/<siteName>.conf（对端面板 nginx 站点配置默认 include 的路径）。
+// 写入后对端面板在面板 UI 里能看到内容；用户重启 nginx 或在对端面板里点保存都会重新加载。
 //
 // 旧实现走的是 /site?action=SetRewriteTel + /site?action=SetRewriteLists 两条链路，
-// 但 SetRewriteLists 的 rewrite_data 是宝塔内置模板名（wordpress / thinkphp 等），
-// 传自定义模板名会被静默忽略——这是之前「伪静态在宝塔里没添加上」的真实原因。
+// 但 SetRewriteLists 的 rewrite_data 是对端面板内置模板名（wordpress / thinkphp 等），
+// 传自定义模板名会被静默忽略——这是之前「伪静态在对端面板里没添加上」的真实原因。
 func (c *BTClient) ApplyCustomRewrite(siteName, ruleContent string) error {
 	confPath := "/www/server/panel/vhost/rewrite/" + siteName + ".conf"
 	params := url.Values{}
 	params.Set("path", confPath)
 	params.Set("data", ruleContent)
-	// 宝塔 SaveFileBody 必须显式传 encoding，否则报 FILE_SAVE_ERR
+	// 对端面板 SaveFileBody 必须显式传 encoding，否则报 FILE_SAVE_ERR
 	// 且错误为 'dict_obj' object has no attribute 'encoding'
 	params.Set("encoding", "utf-8")
 	_, err := c.btRequest("files", "SaveFileBody", params)
@@ -691,7 +691,7 @@ func (c *BTClient) Unzip(zipPath, destDir string) error {
 // ZipDir 在对端面板服务器上压缩目录/文件到指定压缩包（files?action=Zip）。
 // sfile: 源目录绝对路径；destFile: 压缩包完整目标路径（含目录与文件名）；
 // zipType: "zip" 或 "tar.gz"。
-// 参数随宝塔版本有差异：新版为 path（源父目录）+ sfile（相对名）+ dfile（目标完整路径）+
+// 参数随对端面板版本有差异：新版为 path（源父目录）+ sfile（相对名）+ dfile（目标完整路径）+
 // z_type（类型），老版本为 sfile（绝对路径）+ dfile（目标目录）+ type + z_file（文件名），
 // 新版参数失败时回退老参数。
 func (c *BTClient) ZipDir(sfile, destFile, zipType string) error {
@@ -720,7 +720,7 @@ func (c *BTClient) ZipDir(sfile, destFile, zipType string) error {
 
 // DeleteFile 删除对端面板服务器上的文件（files?action=DeleteFile）
 func (c *BTClient) DeleteFile(path string) error {
-	// 注意：宝塔 files?action=DeleteFile 用的是 path 参数（name 会报「没有在模型中找到指定模块」或参数无效）
+	// 注意：对端面板 files?action=DeleteFile 用的是 path 参数（name 会报「没有在模型中找到指定模块」或参数无效）
 	params := url.Values{}
 	params.Set("path", path)
 	_, err := c.btRequest("files", "DeleteFile", params)
@@ -728,7 +728,7 @@ func (c *BTClient) DeleteFile(path string) error {
 }
 
 // CreateRemoteDir 在对端面板服务器上创建目录（files?action=CreateDir）。
-// 目录已存在时宝塔会返回错误，此处静默忽略，仅尽力而为。
+// 目录已存在时对端面板会返回错误，此处静默忽略，仅尽力而为。
 func (c *BTClient) CreateRemoteDir(dir string) {
 	params := url.Values{}
 	params.Set("dpath", dir)
@@ -812,7 +812,7 @@ type btRemoteFile struct {
 }
 
 // ListDir 列对端面板服务器目录（files?action=GetDirNew），返回文件与子目录名。
-// 宝塔 backup 表 id 与站点/数据库 id 无关（按主键查会拿到全表），
+// 对端面板 backup 表 id 与站点/数据库 id 无关（按主键查会拿到全表），
 // 且 getData 的 type/search 参数在新版面板不可靠，因此直接列文件系统目录最稳妥。
 func (c *BTClient) ListDir(path string) (files []btRemoteFile, dirs []string, err error) {
 	params := url.Values{}
@@ -871,13 +871,13 @@ func (c *BTClient) newestBackupInDir(dir string, suffixes ...string) string {
 }
 
 // NewestSiteBackup 返回对端面板网站目录下最新的 .tar.gz 网站备份完整路径
-// （宝塔网站备份固定位于 /www/backup/site/<站点名>/，文件名 <站点名>_<时间戳>.tar.gz）
+// （对端面板网站备份固定位于 /www/backup/site/<站点名>/，文件名 <站点名>_<时间戳>.tar.gz）
 func (c *BTClient) NewestSiteBackup(siteName string) string {
 	return c.newestBackupInDir(filepath.Join("/www/backup/site", siteName), ".tar.gz")
 }
 
 // NewestDBBackup 返回对端面板数据库目录下最新的数据库备份完整路径
-// （宝塔手动备份在 /www/backup/database/mysql/<库名>/，旧版本在 /www/backup/database/<库名>/）
+// （对端面板手动备份在 /www/backup/database/mysql/<库名>/，旧版本在 /www/backup/database/<库名>/）
 func (c *BTClient) NewestDBBackup(dbName string) string {
 	for _, dir := range []string{
 		filepath.Join("/www/backup/database/mysql", dbName),
@@ -906,7 +906,7 @@ func (c *BTClient) ReadRemoteFile(path string) (string, error) {
 }
 
 // GetSiteWebRoot 解析对端面板站点 nginx 配置中的 root 目录（用于临时放置可下载文件）。
-// 兼容不同版本宝塔的 vhost 路径，且配置文件可能以主域名或站点名命名，逐一尝试。
+// 兼容不同版本对端面板的 vhost 路径，且配置文件可能以主域名或站点名命名，逐一尝试。
 func (c *BTClient) GetSiteWebRoot(domain string) string {
 	candidates := []string{
 		"/www/server/panel/vhost/nginx/" + domain + ".conf",
@@ -931,7 +931,7 @@ func (c *BTClient) GetSiteWebRoot(domain string) string {
 }
 
 // GetSiteRewrite 读取对端面板站点的伪静态规则内容。
-// 宝塔伪静态配置路径为 /www/server/panel/vhost/rewrite/<网站名>.conf，
+// 对端面板伪静态配置路径为 /www/server/panel/vhost/rewrite/<网站名>.conf，
 // 部分场景按主域名命名，故 name 与 domain 都尝试一遍，命中非空即返回。
 func (c *BTClient) GetSiteRewrite(name, domain string) string {
 	for _, cand := range []string{name, domain} {
@@ -951,7 +951,7 @@ func (c *BTClient) GetSiteRewrite(name, domain string) string {
 
 // GetSiteSSLCert 从对端面板站点 nginx 配置中提取 SSL 证书与私钥内容。
 // 直接解析 nginx 配置文件中的 ssl_certificate / ssl_certificate_key 路径并读取，
-// 兼容不同版本宝塔的证书存放位置（vhost/cert 或 vhost/ssl），无需猜测具体目录。
+// 兼容不同版本对端面板的证书存放位置（vhost/cert 或 vhost/ssl），无需猜测具体目录。
 // 站点未启用 HTTPS 或无证书时返回空字符串。
 func (c *BTClient) GetSiteSSLCert(domain string) (cert, key string) {
 	if domain == "" {
@@ -1003,7 +1003,7 @@ func isZipFile(path string) bool {
 }
 
 // isTransferArchive 检查文件是否为迁移传输对象的有效压缩格式（gzip 或 zip）。
-// 网站包为 tar.gz（gzip 流）；数据库备份新版宝塔为 .sql.zip，老版本为 .sql.gz。
+// 网站包为 tar.gz（gzip 流）；数据库备份新版对端面板为 .sql.zip，老版本为 .sql.gz。
 func isTransferArchive(path string) bool {
 	return isGzipFile(path) || isZipFile(path)
 }
@@ -1124,7 +1124,7 @@ func (c *BTClient) FtpUserList() ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 归一化字段：宝塔 ftps 表用户名字段为 name（部分接口为 username），
+	// 归一化字段：对端面板 ftps 表用户名字段为 name（部分接口为 username），
 	// 统一填充为 username，并兜底 path，避免上层按 username 解析时全部为空。
 	for _, item := range list {
 		if toStr(item["username"]) == "" {
