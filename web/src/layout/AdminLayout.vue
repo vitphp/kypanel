@@ -6,18 +6,18 @@
       'is-mobile': viewport === 'mobile',
       'is-tablet': viewport === 'tablet',
       'is-desktop': viewport === 'desktop',
-      'drawer-open': viewport === 'mobile' && mobileDrawerOpen
+      'drawer-open': viewport !== 'desktop' && mobileDrawerOpen
     }"
   >
     <TheTopbar :collapsed="collapsed" @toggle-collapse="toggleCollapse" />
 
     <div class="lp-body">
-      <div v-if="viewport === 'mobile'" class="lp-sidebar-mask" :class="{ open: mobileDrawerOpen }" @click="mobileDrawerOpen = false"></div>
+      <div v-if="viewport !== 'desktop'" class="lp-sidebar-mask" :class="{ open: mobileDrawerOpen }" @click="mobileDrawerOpen = false"></div>
       <TheSidebar
-        :collapsed="viewport !== 'mobile' && collapsed"
+        :collapsed="viewport === 'desktop' && collapsed"
         class="lp-sidebar-wrap"
-        :class="{ 'is-drawer': viewport === 'mobile' }"
-        @toggle-collapse="viewport === 'mobile' ? (mobileDrawerOpen = !mobileDrawerOpen) : toggleCollapse()"
+        :class="{ 'is-drawer': viewport !== 'desktop' }"
+        @toggle-collapse="viewport !== 'desktop' ? (mobileDrawerOpen = !mobileDrawerOpen) : toggleCollapse()"
       />
 
       <main class="lp-main">
@@ -67,10 +67,22 @@ const panel = usePanelStore()
 
 function applyViewport() {
   const w = window.innerWidth
+  const prev = viewport.value
   if (w < 768) viewport.value = 'mobile'
-  else if (w < 1200) viewport.value = 'tablet'
+  else if (w < 1024) viewport.value = 'tablet'
   else viewport.value = 'desktop'
-  if (viewport.value !== 'mobile') mobileDrawerOpen.value = false
+
+  if (viewport.value !== 'desktop') mobileDrawerOpen.value = false
+
+  // 切换到桌面时恢复用户保存的折叠偏好；进入非桌面时自动收起
+  if (prev !== viewport.value) {
+    if (viewport.value === 'desktop') {
+      const saved = localStorage.getItem(COLLAPSE_KEY)
+      collapsed.value = saved === '1'
+    } else {
+      collapsed.value = true
+    }
+  }
 }
 
 function toggleCollapse() {
@@ -136,8 +148,8 @@ onUnmounted(() => {
 }
 .lp-sidebar-mask.open { opacity: 1; pointer-events: auto; }
 
-/* 移动端：侧栏变 drawer */
-.lp-admin.is-mobile .lp-sidebar-wrap.is-drawer {
+/* 非桌面端（手机/平板）：侧栏变 drawer */
+.lp-admin:not(.is-desktop) .lp-sidebar-wrap.is-drawer {
   position: fixed;
   top: 64px;
   bottom: 0;
@@ -148,7 +160,7 @@ onUnmounted(() => {
   transition: transform 0.25s ease;
   box-shadow: 4px 0 16px rgba(0, 0, 0, 0.08);
 }
-.lp-admin.is-mobile.drawer-open .lp-sidebar-wrap.is-drawer { transform: translateX(0); }
+.lp-admin:not(.is-desktop).drawer-open .lp-sidebar-wrap.is-drawer { transform: translateX(0); }
 
 .lp-main {
   flex: 1;
