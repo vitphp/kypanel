@@ -11,9 +11,11 @@ const request = axios.create({
 })
 
 // 请求拦截：附加 JWT
+// 注意：若调用方已显式指定 Authorization（如临时登录用临时 token 校验），
+// 不覆盖——否则本地残留的登录 JWT 会顶掉临时 token，导致临时链接使用计数失效。
 request.interceptors.request.use((config) => {
   const auth = useAuthStore()
-  if (auth.token) {
+  if (auth.token && !config.headers?.Authorization) {
     config.headers.Authorization = `Bearer ${auth.token}`
   }
   return config

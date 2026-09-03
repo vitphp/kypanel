@@ -20,10 +20,10 @@
 </template>
 
 <script setup>
+import axios from 'axios'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import request from '../utils/request'
 
 const route = useRoute()
 
@@ -46,7 +46,10 @@ onMounted(async () => {
     // 校验临时 token 是否有效：调一个轻量公共接口触发鉴权。
     // 临时 token 走 ApiTokenOrAuth("api") 中间件链，会被 SecurityGuard 检查 IP 白名单等。
     // 如果 token 已过期/失效，会返回 401 并附带具体原因。
-    const res = await request.get('/system/info', { headers: { Authorization: `Bearer ${token}` } })
+    // 用裸 axios（不走共享 request 实例）：避免本地残留登录 JWT 覆盖临时 token，
+    // 导致后端按 JWT 放行、临时链接使用次数不计数。
+    const resp = await axios.get('/api/system/info', { headers: { Authorization: `Bearer ${token}` } })
+    const res = resp.data
     if (res.code !== 0) {
       throw new Error(res.msg || '链接校验失败')
     }
