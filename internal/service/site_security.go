@@ -1220,11 +1220,13 @@ func runSiteSecScan() {
 	}
 	now := time.Now()
 	// 全局清理：所有站点的过期 IP 规则一次性扫掉，并记录哪些站点受影响以便重写片段。
-	// 不用 Delete 返回值判断，因为 GORM 的 Delete 不返回受影响行数；改为按 site_id 重新查询。
-	if model.DB.Where("expire_at IS NOT NULL AND expire_at <= ?", now).
-		Delete(&model.SiteSecIpRule{}).Error == nil {
-		// 任何站点若当前已没有任何规则（或规则集合发生变化），其 snippet 与 DB 可能不一致。
-		// 重新生成所有启用站点的 snippet 以保证 nginx 看到的规则与 DB 同步。
+	// 仅当【确实删除了 ≥1 条过期规则】时才重写 snippet + reload——
+	// 否则（无任何过期规则）Delete 成功删除 0 行也返回 nil，若按 nil 判断会每 10 秒无条件
+	// 重写所有站点片段并 nginx reload 一次，造成持续无意义的 nginx 热重载（CPU/IO 空耗）。
+	res := model.DB.Where("expire_at IS NOT NULL AND expire_at <= ?", now).
+		Delete(&model.SiteSecIpRule{})
+	if res.Error == nil && res.RowsAffected > 0 {
+		// 确有规则被清理：受影响站点 snippet 与 DB 可能不一致，重写保证 nginx 同步。
 		for _, cfg := range cfgs {
 			_ = writeSiteSecSnippetFile(cfg.SiteID)
 		}

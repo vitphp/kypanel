@@ -256,10 +256,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import { usePausableInterval } from '../composables/usePausableInterval'
 import { formatBytes as _fmtBytes } from '../utils/format'
 import { Cpu, Memo, Coin, Connection, DataLine, Warning, Files, Timer, ArrowDown } from '@element-plus/icons-vue'
 
@@ -366,7 +367,6 @@ async function svcAction(s, action) {
   }
 }
 
-let timer = null
 async function loadSummary() {
   try {
     const res = await request.get('/dashboard/summary')
@@ -419,13 +419,10 @@ onMounted(async () => {
   info.value = res.data
   await loadLayout()
   await loadSummary()
-  // 每 5 秒刷新网络速率 + 进程 TOP + 服务状态
-  timer = setInterval(loadSummary, 5000)
 })
 
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
+// 每 5 秒刷新网络速率 + 进程 TOP + 服务状态；标签页切后台时自动暂停，切回前台补刷并继续。
+usePausableInterval(loadSummary, 5000)
 </script>
 
 <style scoped>

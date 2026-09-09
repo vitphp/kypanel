@@ -201,6 +201,40 @@ func CleanOpsBefore(before time.Time) int64 {
 	return res.RowsAffected
 }
 
+// opsLogRetention 操作日志保留时长（默认 90 天；超期自动清理，避免表无限膨胀拖累 SQLite）。
+const opsLogRetention = 90 * 24 * time.Hour
+
+// StartOpLogJanitor 启动操作日志定期清理协程（每日一次）：
+// 删除超过保留期的操作日志，并顺带对 panel.db 执行 VACUUM 回收 SQLite 文件空间
+// （WAL 模式下日常 Delete 不会收缩 db 文件，长期不整理会持续膨胀）。
+// 低频（每日、选在整点后空闲段）执行，VACUUM 短暂锁库的影响可忽略。
+func StartOpLogJanitor() {
+	go func() {
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		// 启动 1 分钟后再首跑，避开服务刚启动的繁忙期
+		time.Sleep(time.Minute)
+		housekeeping()
+		for range t.C {
+			housekeeping()
+		}
+	}()
+}
+
+func housekeeping() {
+	if model.DB == nil {
+		return
+	}
+	// 1) 操作日志按保留期清理
+	if n := CleanOpsBefore(time.Now().Add(-opsLogRetention)); n > 0 {
+		slog.Info("自动清理过期操作日志", "removed", n)
+	}
+	// 2) VACUUM 回收磁盘空间（WAL 下自动 checkpoint 后收缩）
+	if err := model.DB.Exec("VACUUM").Error; err != nil {
+		slog.Warn("数据库 VACUUM 失败（可忽略，下次重试）", "err", err)
+	}
+}
+
 // csvEscape CSV 字段转义（含逗号/引号/换行时用引号包裹）
 func csvEscape(s string) string {
 	if strings.ContainsAny(s, ",\"\n\r") {

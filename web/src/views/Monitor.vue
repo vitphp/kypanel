@@ -155,9 +155,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { Delete, Refresh } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { usePausableInterval } from '../composables/usePausableInterval'
 import { formatBytes as _fmtBytes } from '../utils/format'
 import LineChart from '../components/LineChart.vue'
 import AlertPanel from '../components/AlertPanel.vue'
@@ -170,7 +171,6 @@ const points = ref([])
 const loadPoints = ref([])
 const rangeType = ref('today')
 const customRange = ref(null)
-let timer = null
 
 const current = computed(() => {
   const last = points.value[points.value.length - 1]
@@ -278,21 +278,19 @@ async function loadAll() {
   await Promise.all([loadConfig(), loadSize(), loadHistory(), loadCurrent()])
 }
 
+// 轮询 tick：监控关闭时完全不发请求（含 loadSize，避免无谓轮询后端）；后台 tab 自动暂停。
+function pollTick() {
+  if (!config.value.enabled) return
+  loadCurrent()
+  if (rangeType.value === 'today') {
+    loadHistory()
+  }
+}
+
 onMounted(() => {
   loadAll()
-  timer = setInterval(() => {
-    if (config.value.enabled) {
-      loadCurrent()
-      if (rangeType.value === 'today') {
-        loadHistory()
-      }
-    }
-    loadSize()
-  }, 5000)
-})
-
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
+  // 每 5 秒刷新实时数据；标签页切后台时暂停（见 usePausableInterval）
+  usePausableInterval(pollTick, 5000)
 })
 
 watch(rangeType, () => {

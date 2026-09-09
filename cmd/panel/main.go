@@ -283,6 +283,9 @@ func main() {
 	// 启动站点级 IP 拉黑过期清理协程（每小时跑一次）
 	service.StartSiteBlockIPJanitor()
 
+	// 启动操作日志 / DB 空间每日维护协程（清 90 天前日志 + VACUUM）
+	service.StartOpLogJanitor()
+
 	// 启动 HTTP 服务
 	r := router.Setup(cfg)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
