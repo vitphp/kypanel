@@ -68,9 +68,20 @@
     <el-dialog v-model="dnsVisible" title="把你的域名接到这台服务器" width="min(720px, 96vw)" align-center>
       <template v-if="dnsGuide">
         <div class="md-why">
-          <strong>为什么需要这一步：</strong>
-          要让全世界能把发给你的邮件送到这台服务器、需要你告诉全网"我的邮件服务器是这个 IP"。
-          操作方式：到你的<span class="md-link">域名服务商</span>（阿里云 / 腾讯云 / Cloudflare 等）后台，添加下面 3 条记录即可。其它记录是"以后再说"。
+          <strong>先回答一个问题：</strong>
+          你的<span class="md-link">域名邮箱</span>需要"收信"还是"发信"？告诉面板，它只给你看需要的设置，不用管的不会来烦你。
+        </div>
+
+        <!-- 用途选择：只收 / 只发 / 都要 -->
+        <el-radio-group v-model="dnsPurpose" class="md-purpose">
+          <el-radio-button value="receive">只要收信</el-radio-button>
+          <el-radio-button value="send">只要发信</el-radio-button>
+          <el-radio-button value="both">收和发都要</el-radio-button>
+        </el-radio-group>
+        <div class="md-purpose-hint">
+          <template v-if="dnsPurpose === 'receive'">你选了"只收信" → 下面只需配「收信」那一段（共 2 条）。发信的设置暂时不需要。</template>
+          <template v-else-if="dnsPurpose === 'send'">你选了"只发信" → 下面只需配「发信」那一段。收信的设置暂时不需要。</template>
+          <template v-else>你选了"收和发都要" → 下面两段都要按顺序配。</template>
         </div>
 
         <!-- 自动检测到的邮件服务器值（用户不用手填） -->
@@ -80,37 +91,43 @@
           <el-tag class="md-detected-tag" type="success" effect="light">{{ dnsGuide.mail_server }}</el-tag>
         </div>
 
-        <!-- 引导列表 -->
-        <div class="md-dns-list">
-          <div v-for="(r, i) in dnsRows" :key="i" class="md-dns-row" :class="{ 'md-dns-row-opt': r.kind !== '必做' }">
-            <div class="md-dns-row-head">
-              <span class="md-dns-step-tag" :class="r.kind === '必做' ? 'must' : 'opt'">{{ r.step }}</span>
-              <span class="md-dns-kind" :class="r.kind === '必做' ? 'must' : 'opt'">{{ r.kind }}</span>
-            </div>
-            <div class="md-dns-title">{{ r.title }}</div>
-            <div class="md-dns-why">为什么：{{ r.why }}</div>
+        <!-- 按用途分组引导 -->
+        <div v-for="(grp, gi) in dnsGroups" :key="gi" class="md-dns-group" :class="'md-group-' + grp.key">
+          <div class="md-group-head">
+            <span class="md-group-badge" :class="grp.key">{{ grp.badge }}</span>
+            <span class="md-group-title">{{ grp.title }}</span>
+          </div>
 
-            <template v-if="r.steps.length">
-              <div class="md-dns-fields">
-                <div class="md-dns-fields-title">打开服务商后台 → 添加解析 → 按下面填：</div>
-                <div v-for="(s, j) in r.steps" :key="j" class="md-dns-field-row">
-                  <span class="md-dns-field-label">{{ s.label }}</span>
-                  <span class="md-dns-field-value">{{ s.value }}</span>
+          <div class="md-dns-list">
+            <div v-for="(r, i) in grp.rows" :key="i" class="md-dns-row" :class="{ 'md-dns-row-opt': !r.steps.length }">
+              <div class="md-dns-row-head">
+                <span class="md-dns-step-tag must">{{ r.num }}</span>
+              </div>
+              <div class="md-dns-title">{{ r.title }}</div>
+              <div class="md-dns-why">为什么：{{ r.why }}</div>
+
+              <template v-if="r.steps.length">
+                <div class="md-dns-fields">
+                  <div class="md-dns-fields-title">打开服务商后台 → 添加解析 → 按下面填：</div>
+                  <div v-for="(s, j) in r.steps" :key="j" class="md-dns-field-row">
+                    <span class="md-dns-field-label">{{ s.label }}</span>
+                    <span class="md-dns-field-value">{{ s.value }}</span>
+                  </div>
                 </div>
-              </div>
-              <div class="md-dns-copybar">
-                <el-button size="small" type="primary" plain @click="copy(r.steps[r.steps.length - 1].value)">
-                  复制「记录值」
-                </el-button>
-                <span class="md-dns-copy-tip">点击后到服务商后台"记录值"框粘进去就行</span>
-              </div>
-            </template>
-            <template v-else>
-              <div class="md-dns-placeholder">
-                <el-icon><Clock /></el-icon>
-                <span>这一项当前不用管，面板功能上线后会引导你补配</span>
-              </div>
-            </template>
+                <div class="md-dns-copybar">
+                  <el-button size="small" type="primary" plain @click="copy(r.steps[r.steps.length - 1].value)">
+                    复制「记录值」
+                  </el-button>
+                  <span class="md-dns-copy-tip">点击后到服务商后台"记录值"框粘进去</span>
+                </div>
+              </template>
+              <template v-else>
+                <div class="md-dns-placeholder">
+                  <el-icon><Clock /></el-icon>
+                  <span>这一项当前不用管，面板功能上线后会引导你补配</span>
+                </div>
+              </template>
+            </div>
           </div>
         </div>
 
@@ -121,8 +138,8 @@
             <li>登录你买域名时的<span class="md-link">服务商</span>（阿里云 / 腾讯云 / Cloudflare 等）</li>
             <li>找到「<span class="md-link">DNS 解析</span> / <span class="md-link">域名解析</span>」菜单</li>
             <li>点「<span class="md-link">添加记录</span>」</li>
-            <li>按上面"打开服务商后台 → 添加解析 → 按下面填"里的每一项，一项一项填进去</li>
-            <li>三条必做都加好后，下面的检测会自动判断是否生效（DNS 全球传播通常几分钟）</li>
+            <li>照着上面"打开服务商后台 → 添加解析 → 按下面填"里每一项的字段，一项一项填进去</li>
+            <li>配好后点下面的"帮我查一下"，DNS 全球传播通常几分钟生效</li>
           </ol>
         </div>
 
@@ -130,16 +147,18 @@
         <div class="md-dns-checkbar">
           <el-button :loading="checking" @click="runDnsCheck">我配完了，帮我查一下是否生效</el-button>
           <span v-if="checkResult !== null" class="md-check-result" :class="checkResult ? 'ok' : 'bad'">
-            {{ checkResult ? '✓ 检测到了！邮件已经能投递到本服务器' : '⏳ 还没检测到（DNS 还在传播，再等几分钟重试）' }}
+            {{ checkResult ? '✓ 检测到了！已经能收到发往该域名的信' : '⏳ 还没检测到（DNS 还在传播，再等几分钟重试）' }}
           </span>
         </div>
         <div class="md-dns-markbar">
           <div class="md-dns-markbar-title">我已经去服务商后台添加了：</div>
           <div class="md-dns-markbar-list">
-            <el-checkbox v-model="dnsMark.mx" @change="saveDnsMark">第 1 步（A 记录：mail.我的域名 → 我的服务器）</el-checkbox>
-            <el-checkbox v-model="dnsMark.spf" @change="saveDnsMark">第 2 步（MX：@ → mail.我的域名）</el-checkbox>
-            <el-checkbox v-model="dnsMark.dkim" @change="saveDnsMark">第 3 步（SPF：@ → 一段以 v=spf1 开头的配置）</el-checkbox>
-            <el-checkbox v-model="dnsMark.dmarc" @change="saveDnsMark">第 4、5 步（高级项，暂时可不勾）</el-checkbox>
+            <template v-if="dnsGroups.find((x) => x.key === 'receive')">
+              <el-checkbox v-model="dnsMark.mx" @change="saveDnsMark">「收信」段的 2 条（A + 让信投过来那 2 条）</el-checkbox>
+            </template>
+            <template v-if="dnsGroups.find((x) => x.key === 'send')">
+              <el-checkbox v-model="dnsMark.spf" @change="saveDnsMark">「发信」段的第 1 条（让这台服务器能用我的域名发信）</el-checkbox>
+            </template>
           </div>
         </div>
       </template>
@@ -172,68 +191,74 @@ const checkResult = ref(null)
 const dnsMark = ref({ mx: false, spf: false, dkim: false, dmarc: false })
 const currentDomain = ref(null)
 
-// 把后端引导折叠成"小白视角"的条目：每条带大白话标题、干什么用、
-// 在服务商后台要填哪些字段（steps）、以及要粘的内容（value）。
-// 渲染时按 steps 拆开列展示 → 让用户清楚"我下一步该点哪里、填什么"。
-const dnsRows = computed(() => {
+// 用途：both(收+发) / receive(只收) / send(只发)。决定展示哪些 DNS 分组。
+const dnsPurpose = ref('both')
+
+// 按用途与后端引导分组成"收信组 / 发信组"两条，各自管一件"业务目标"。
+// 每组里是小白视角的 DNS 项（steps 直接对应服务商后台的字段）。
+const dnsGroups = computed(() => {
   const g = dnsGuide.value
   if (!g) return []
   const hostName = `mail.${g.domain}`
-  return [
-    {
-      step: '步骤 1',
-      title: '先把"邮件服务器"这个地址告诉全网',
-      why: '让别人在浏览器 / 邮件客户端里访问 mail.你的域名 时能找到你的服务器 IP',
-      kind: '必做',
-      steps: [
-        { label: '记录类型', value: 'A' },
-        { label: '主机记录', value: 'mail' },
-        { label: '记录值', value: g.mail_server }
-      ],
-      raw: `A mail → ${g.mail_server}`
-    },
-    {
-      step: '步骤 2',
-      title: '告诉全网：发给我的邮件请送到我的服务器',
-      why: '没有这步，别人发的邮件根本到不了你的邮箱（会直接退回）',
-      kind: '必做',
-      steps: [
-        { label: '记录类型', value: 'MX' },
-        { label: '主机记录', value: '@（保持空）' },
-        { label: '记录值', value: hostName },
-        { label: '优先级', value: '10' }
-      ],
-      raw: `MX @ → ${hostName}（优先级 10）`
-    },
-    {
-      step: '步骤 3',
-      title: '告诉全网：只有我的服务器能用我的域名发信',
-      why: '不配这步，从你服务器发出去的信很容易被对方判为"伪造邮件"进垃圾箱',
-      kind: '必做',
-      steps: [
-        { label: '记录类型', value: 'TXT' },
-        { label: '主机记录', value: '@（保持空）' },
-        { label: '记录值', value: g.spf_value }
-      ],
-      raw: `TXT @ → ${g.spf_value}`
-    },
-    {
-      step: '步骤 4（可选）',
-      title: '给每封发出去的信加数字签名（更可信）',
-      why: '目前面板还没做签名功能，等上线后这里会自动出现真实密钥让你复制。届时强烈建议配。',
-      kind: '以后再说',
-      steps: [],
-      raw: ''
-    },
-    {
-      step: '步骤 5（可选）',
-      title: '告诉收信方：遇到冒充我的信该怎么处理',
-      why: '属于更高级的策略；先把第 1~3 步做完即可，后续面板会引导你补这步',
-      kind: '以后再说',
-      steps: [],
-      raw: ''
-    }
-  ]
+  const groups = []
+  // 收信组：让人能往你的域名发信、你能收得到（A + MX）
+  if (dnsPurpose.value !== 'send') {
+    groups.push({
+      key: 'receive',
+      badge: '收信',
+      title: '让全世界能把信投到你的邮箱（要"能收到信"才需要配）',
+      rows: [
+        {
+          num: '收信 1/2',
+          title: '先让 "mail.你的域名" 这个地址找到你这台服务器',
+          why: '这是服务器的主机名地址，别人要凭它找到你的服务器',
+          steps: [
+            { label: '记录类型', value: 'A' },
+            { label: '主机记录', value: 'mail' },
+            { label: '记录值', value: g.mail_server }
+          ]
+        },
+        {
+          num: '收信 2/2',
+          title: '告诉全网：发给 @你的域名 的信，请投到上面的地址',
+          why: '没这条，别人发来的信根本到不了你这儿（会直接退回）',
+          steps: [
+            { label: '记录类型', value: 'MX' },
+            { label: '主机记录', value: '@（留空）' },
+            { label: '记录值', value: hostName },
+            { label: '优先级', value: '10' }
+          ]
+        }
+      ]
+    })
+  }
+  // 发信组：让本域名能往外发信、不被对方当垃圾/伪造（SPF + 后续 DKIM）
+  if (dnsPurpose.value !== 'receive') {
+    groups.push({
+      key: 'send',
+      badge: '发信',
+      title: '让这台服务器能用你的域名发信（要"能往外发信"才需要配）',
+      rows: [
+        {
+          num: '发信 1/2',
+          title: '告诉全网：只有这台服务器可以用你的域名发信',
+          why: '不配这条，从你服务器发出去的信很容易被收信方当"伪造邮件"丢进垃圾箱',
+          steps: [
+            { label: '记录类型', value: 'TXT' },
+            { label: '主机记录', value: '@（留空）' },
+            { label: '记录值', value: g.spf_value }
+          ]
+        },
+        {
+          num: '发信 2/2（以后再说）',
+          title: '给发出去的信加数字签名（更可信）',
+          why: '面板的签名功能上线后，这里会自动出现密钥让你复制，届时强烈建议配。现在先不用管。',
+          steps: []
+        }
+      ]
+    })
+  }
+  return groups
 })
 
 async function load() {
@@ -256,10 +281,20 @@ async function submitAdd() {
   if (!d) return ElMessage.warning('请输入域名')
   saving.value = true
   try {
-    await addMailDomain({ domain: d, quota: addForm.value.quota, remark: addForm.value.remark })
+    const res = await addMailDomain({ domain: d, quota: addForm.value.quota, remark: addForm.value.remark })
+    const rec = res.data || {}
     ElMessage.success('域名已添加')
     addVisible.value = false
-    load()
+    await load()
+    // 添加后立刻引导用户去解析（用后端返回的记录做向导）
+    openDns({
+      id: rec.id,
+      domain: d,
+      mx_configured: false,
+      spf_configured: false,
+      dkim_configured: false,
+      dmarc_configured: false
+    })
   } finally {
     saving.value = false
   }
@@ -432,4 +467,19 @@ onMounted(load)
   .md-dns-field-row { flex-direction: column; gap: 2px; }
   .md-dns-field-label { flex: 1 0 auto; }
 }
+/* ===== 用途选择 ===== */
+.md-purpose { margin: 6px 0 6px; }
+.md-purpose-hint { font-size: 13px; color: #0369a1; background: #f0f9ff; border: 1px dashed #7dd3fc; padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
+/* ===== 收信/发信分组 ===== */
+.md-dns-group { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+.md-group-receive { border-color: #bae6fd; background: #f8fbff; }
+.md-group-send { border-color: #bbf7d0; background: #f9fdf8; }
+.md-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.md-group-badge { flex: 0 0 auto; font-size: 13px; font-weight: 700; padding: 4px 12px; border-radius: 6px; color: #fff; }
+.md-group-badge.receive { background: #0284c7; }
+.md-group-badge.send { background: #16a34a; }
+.md-group-title { font-size: 14px; color: #334155; line-height: 1.5; }
+/* 组内小项卡片间距 */
+.md-dns-group .md-dns-row { background: #fff; }
+.md-dns-group .md-dns-row + .md-dns-row { margin-top: 10px; }
 </style>
