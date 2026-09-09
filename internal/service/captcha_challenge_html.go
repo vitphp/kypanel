@@ -16,10 +16,13 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     background: linear-gradient(160deg, #f2f5fa 0%, #e4eaf3 100%);
     color: #333; overflow: hidden;
   }
-  /* 卡片：fixed + inset 0 + margin:auto —— 无论宿主容器是否 flex / 有无 height 链都绝对居中 */
+  /* 全屏舞台：flex 水平垂直居中（兼容性最高；用 inset 撑满避免滚动条致 100vw 偏右） */
+  .stage {
+    position: fixed; inset: 0; width: auto; height: auto;
+    display: flex; align-items: center; justify-content: center;
+  }
   .wrap {
-    position: fixed; left: 0; right: 0; top: 0; bottom: 0; margin: auto;
-    width: 340px; max-width: calc(100vw - 24px); height: fit-content;
+    width: min(340px, calc(100vw - 32px)); flex: 0 0 auto;
     background: #fff; border-radius: 14px;
     box-shadow: 0 12px 40px rgba(30,50,90,.18);
     border: 1px solid rgba(30,50,90,.06);
@@ -115,6 +118,7 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
+  <div class="stage">
   <div class="wrap" id="wrap">
     <div class="cap-head">
       <span class="shield"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12 1l9 4v6c0 5.5-3.8 10.7-9 12-5.2-1.3-9-6.5-9-12V5l9-4zm-1 15.5l6.5-6.5-1.4-1.4L11 13.7 8.4 11.1 7 12.5l4 4z"/></svg></span>
@@ -144,6 +148,7 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
         </svg>
       </div>
     </div>
+  </div>
   </div>
 <script>
 (function () {
