@@ -190,6 +190,7 @@ const menu = [
   { path: '/files', title: '文件管理', icon: 'FolderOpened', perm: 'file' },
   { path: '/process', title: '进程管理', icon: 'Cpu', perm: 'process' },
   { path: '/backup', title: '备份中心', icon: 'Files', perm: 'backup' },
+  { path: '/mail/domains', title: '域名邮箱', icon: 'Message', perm: 'mail' },
   { path: '/users', title: '用户管理', icon: 'User', perm: 'settings' },
   { path: '/settings', title: '设置', icon: 'Setting', perm: 'settings' }
 ]

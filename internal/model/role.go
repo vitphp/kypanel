@@ -32,6 +32,7 @@ var PermissionModules = []struct {
 	{"monitor", "监控"},
 	{"process", "进程管理"},
 	{"firewall", "防火墙"},
+	{"mail", "邮件"},
 	{"settings", "设置"},
 	{"mcp", "AI 助手"},
 }

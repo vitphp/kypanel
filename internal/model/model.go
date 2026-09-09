@@ -55,6 +55,7 @@ func Init(path string) error {
 		&ApiToken{},
 		&TempAccess{},
 		&TempAccessUseLog{},
+		&MailDomain{},
 	); err != nil {
 		return err
 	}

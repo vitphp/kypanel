@@ -76,6 +76,7 @@ func Setup(cfg *config.Config) *gin.Engine {
 		setupApiTokenRoutes(authGroup)     // API 令牌 CRUD（/api/api-tokens）
 		setupTempAccessRoutes(authGroup)   // 临时访问（临时登录链接）
 		setupMigrateRoutes(authGroup)      // 网站搬家（迁移）
+		setupMailRoutes(authGroup)         // 邮箱系统（域名/DNS 引导等）
 	}
 
 	// MCP 路由：只接受 JWT 和 type=mcp 的 API 令牌（防止 type=api 令牌误打到 MCP 端点）
