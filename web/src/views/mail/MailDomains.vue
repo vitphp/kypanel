@@ -70,15 +70,29 @@
         <el-alert type="info" :closable="false" show-icon class="md-dns-alert"
           title="请到你的域名服务商（阿里云/腾讯云/Cloudflare 等）的『DNS 解析』里添加以下记录，把邮件收发指向这台服务器。"
           description="生效时间通常几分钟到数小时。MX 未生效时对方无法把信投到你的邮箱。" />
+        <!-- 自动检测到的邮件服务器值 -->
+        <div class="md-detected">
+          <el-icon :size="16" class="md-detected-icon"><Connection /></el-icon>
+          <span class="md-detected-text">面板已自动检测到你的邮件服务器：</span>
+          <el-tag class="md-detected-tag" type="success" effect="light">{{ dnsGuide.mail_server }}</el-tag>
+        </div>
+
         <div class="md-dns-list">
-          <div v-for="(r, i) in dnsRows" :key="i" class="md-dns-row">
+          <div v-for="(r, i) in dnsRows" :key="i" class="md-dns-row" :class="{ 'md-dns-row-opt': !r.required }">
             <div class="md-dns-row-head">
               <span class="md-dns-row-type" :class="r.type.toLowerCase()">{{ r.type }}</span>
               <div class="md-dns-row-copy">
-                <span class="md-dns-row-label">主机记录 {{ r.host }}</span>
-                <span class="md-dns-row-label">值 {{ r.value }}</span>
+                <div class="md-dns-row-line">
+                  <span class="md-dns-row-label">主机记录 {{ r.host }}</span>
+                  <el-tag v-if="r.required" size="small" type="danger" effect="plain">必须</el-tag>
+                  <el-tag v-else size="small" type="info" effect="plain">后续可补</el-tag>
+                </div>
+                <div class="md-dns-row-line">
+                  <span class="md-dns-row-value">{{ r.value }}</span>
+                  <el-button link type="primary" size="small" :disabled="!r.required" @click="copy(r.value)">{{ r.required ? '复制值' : '暂不可用' }}</el-button>
+                </div>
+                <div class="md-dns-row-note">{{ r.note }}</div>
               </div>
-              <el-button link type="primary" size="small" @click="copy(r.value)">复制值</el-button>
             </div>
           </div>
         </div>
@@ -113,7 +127,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Connection } from '@element-plus/icons-vue'
 import { listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain, getMailDnsGuide, checkMailDns } from '../../api/mail'
 
 const list = ref([])
@@ -132,16 +146,16 @@ const checkResult = ref(null)
 const dnsMark = ref({ mx: false, spf: false, dkim: false, dmarc: false })
 const currentDomain = ref(null)
 
-// 把 guide 折叠成可复制的行
+// 把 guide 折叠成可复制的行，required=true 表示现在就必须配；false 表示后续可补
 const dnsRows = computed(() => {
   const g = dnsGuide.value
   if (!g) return []
   return [
-    { type: 'A', host: `mail.${g.domain}`, value: g.mail_server },
-    { type: 'MX', host: '@', value: `${g.mx_value} (优先级 10)` },
-    { type: 'TXT', host: '@', value: g.spf_value, type2: 'SPF' },
-    { type: 'TXT', host: g.dkim_host, value: g.dkim_value },
-    { type: 'TXT', host: g.dmarc_host, value: g.dmarc_value }
+    { type: 'A', host: `mail.${g.domain}`, value: g.mail_server, required: true, note: '把 mail.你的域名 解析到本服务器' },
+    { type: 'MX', host: '@', value: `${g.mx_value} (优先级 10)`, required: true, note: '把邮件路由到 mail.你的域名' },
+    { type: 'TXT', host: '@', value: g.spf_value, required: true, note: '声明本服务器是唯一代发方（避免发出去进垃圾箱）' },
+    { type: 'TXT', host: g.dkim_host, value: g.dkim_value, required: false, note: '签名功能上线后面板会自动给真实公钥' },
+    { type: 'TXT', host: g.dmarc_host, value: g.dmarc_value, required: false, note: '建议配置；先按 SPF/DKIM 是否配齐来定' }
   ]
 })
 
@@ -284,6 +298,17 @@ onMounted(load)
 .md-check-result.ok { color: #059669; }
 .md-check-result.bad { color: #f59e0b; }
 .md-dns-markbar { margin-top: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+/* 自动检测结果提示 */
+.md-detected { display: flex; align-items: center; gap: 8px; padding: 10px 14px; margin: 8px 0 14px; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; }
+.md-detected-icon { color: #0284c7; }
+.md-detected-text { font-size: 13px; color: #0f172a; }
+.md-detected-tag { font-family: ui-monospace, SFMono-Regular, monospace; }
+/* 行内多行布局 + 必填/可选样式 */
+.md-dns-row-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.md-dns-row-value { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px; color: #0f172a; word-break: break-all; }
+.md-dns-row-note { font-size: 12px; color: #94a3b8; margin-top: 2px; }
+.md-dns-row-opt { background: #f8fafc; border-style: dashed; }
+.md-dns-row-opt .md-dns-row-value { color: #94a3b8; }
 @media (max-width: 599px) {
   .md-toolbar { flex-direction: column; align-items: stretch; }
 }

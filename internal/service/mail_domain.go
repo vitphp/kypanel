@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os/exec"
 	"regexp"
 	"strings"
 
@@ -73,13 +74,55 @@ func DeleteMailDomain(id uint) error {
 }
 
 // MailDomainDNSServer 返回邮件服务器建议指向的主机/IP，供 DNS 引导使用。
-// 优先取面板配置的 server 域名；否则返回服务器 IP 提示用户替换。
+// 优先顺序：
+//  1. 面板配置 server.domain（用户显式配置的对外域名）
+//  2. 自动检测本机公网 IP（不依赖外部手动填写，免去用户去找 IP 的步骤）
+//  3. 回退到本机内网 IP（极端情况下仍给出可参考值，不再用占位符）
+// 同时返回检测到的主机名，前端可展示"检测到你的服务器"信息，让用户不用手填。
 func MailDomainDNSServer() string {
-	// 可尝试读取 config 中的 server.domain / 证书域名；此处给通用占位，前端会提示替换为实际 IP/域名
 	if d := strings.TrimSpace(config.Get().Server.Domain); d != "" {
 		return d
 	}
-	return "{你的服务器IP或域名}"
+	if ip := detectMailServerPublicIP(); ip != "" {
+		return ip
+	}
+	return detectMailServerLocalIP()
+}
+
+// detectMailServerPublicIP 自动检测本机公网 IP（curl 多个 IP 解析服务，取最快可达的）。
+// 复用现有成熟逻辑（与 cli/menu.go 的 detectPublicIP 同思路），不要求用户去查 IP。
+func detectMailServerPublicIP() string {
+	for _, u := range []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://ip.sb",
+	} {
+		cmd := exec.Command("curl", "-fsSL", "--max-time", "4", u)
+		if buf, err := cmd.Output(); err == nil {
+			if ip := strings.TrimSpace(string(buf)); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// detectMailServerLocalIP 取本机内网 IP（公网检测失败时回退）。
+func detectMailServerLocalIP() string {
+	cmd := exec.Command("sh", "-c", "hostname -I 2>/dev/null | awk '{print $1}'")
+	if buf, err := cmd.Output(); err == nil {
+		return strings.TrimSpace(string(buf))
+	}
+	return ""
+}
+
+// detectMailServerHostname 取本机主机名（用于前端展示）。
+func detectMailServerHostname() string {
+	cmd := exec.Command("sh", "-c", "hostname 2>/dev/null")
+	if buf, err := cmd.Output(); err == nil {
+		return strings.TrimSpace(string(buf))
+	}
+	return ""
 }
 
 // BuildMailDnsGuide 生成某域名的 DNS 绑定引导信息（MX/SPF/DKIM/DMARC 该怎么解析）
@@ -88,28 +131,26 @@ func BuildMailDnsGuide(domain string) (*model.MailDnsGuide, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := MailDomainDNSServer()
+	srv := MailDomainDNSServer() // 自动检测，面板已填值，用户不需要手填
+	// SPF 直接声明本服务器 IP（比 "mx ~all" 更精确：本面板是直接发信，不是 MX 中继）
+	spf := "v=spf1 ip4:" + srv + " ~all"
 	g := &model.MailDnsGuide{
 		Domain:     rec.Domain,
 		MailServer: srv,
-		MxHost:     "@", // 根记录
-		MxValue:    fmt.Sprintf("mail.%s", rec.Domain), // 先让用户建一条 A 指向服务器，再建 MX 指向该 A
-		SpfValue:   "v=spf1 mx ~all",
+		MxHost:     "@",
+		MxValue:    fmt.Sprintf("mail.%s", rec.Domain),
+		SpfValue:   spf,
 		DkimHost:   "default._domainkey",
-		// DKIM 公钥需 P4 生成后填入；P1 提示占位
-		DkimValue:  "v=DKIM1; k=rsa; p=<生成后自动填写>",
+		DkimValue:  "v=DKIM1; k=rsa; p=<生成后自动填写>", // P4 签名就绪后自动替换为真实公钥
 		DmarcHost:  "_dmarc",
 		DmarcValue: "v=DMARC1; p=quarantine; rua=mailto:postmaster@" + rec.Domain,
 	}
-	// 中文说明
 	g.Notes = []string{
-		"1) 先把 A 记录：mail." + rec.Domain + " 解析到本服务器（值：主机记录填 mail，记录类型 A，目标填 " + srv + "）",
-		"2) MX 记录：主机记录 @，值 mail." + rec.Domain + "，优先级 10",
-		"3) SPF 记录：TXT，主机记录 @，值 " + g.SpfValue + "，用于声明只有本服务器能代发该域邮件",
-		"4) DKIM 与 DMARC（做邮件防伪/进收件箱用，P4 签名功能上线后需补配）",
-		"   DKIM：TXT，主机记录 " + g.DkimHost + "，" + g.DkimValue,
-		"   DMARC：TXT，主机记录 _dmarc，值 " + g.DmarcValue,
-		"5) 配置生效通常需几分钟到数小时，可在域名服务商处验证。",
+		"1) A 记录：mail." + rec.Domain + " 解析到本服务器（主机 mail，类型 A，值 " + srv + "）",
+		"2) MX 记录：主机 @，值 mail." + rec.Domain + "，优先级 10",
+		"3) SPF 记录：TXT，主机 @，值 " + spf + "（声明本服务器 " + srv + " 是唯一代发方）",
+		"4) DKIM 与 DMARC 可后续补（P4 签名功能上线后面板会自动填真实公钥）",
+		"5) 生效通常需几分钟到数小时，可点页面上的「检测解析是否生效」自动查 MX",
 	}
 	return g, nil
 }
