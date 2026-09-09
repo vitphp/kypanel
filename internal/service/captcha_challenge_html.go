@@ -42,7 +42,9 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 
   .cap-box {
     position: relative; margin: 0 18px; border-radius: 10px; overflow: hidden;
-    width: 100%; max-width: 320px; aspect-ratio: 320 / 160;
+    /* 宽度由内容区自适应（不写死 320px），高度按后端 2:1 图比例自撑 */
+    width: auto;
+    aspect-ratio: 2 / 1;
     background-size: cover; background-position: center; user-select: none;
     border: 1px solid #e8edf4;
     box-sizing: border-box;
@@ -194,28 +196,27 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     }).then(function (d) {
       if (!d || !d.token) { setTip('验证码加载失败，请点刷新重试', 'fail'); loading.style.display = 'none'; return; }
       cur = d;
-      // 容器尺寸由 .cap-box CSS 自适应（max-width:320 + aspect-ratio 2:1），不再写死像素，
-      // 避免窄屏/不同 wrap 宽度下图框溢出或错位。生成图后端固定 320×160 + background-size:cover
-      // 会自动按比例缩放显示。piece 尺寸也按容器/原宽比等比缩放，保持视觉一致。
-      var scale0 = box.clientWidth / cur.width;
-      if (!scale0 || !isFinite(scale0)) scale0 = 1;
+      // box 宽度由 CSS width:auto 自适应填满内容区；背景图/拼图块按 box 实际宽缩放，
+      // 保证 piece 与缺口对齐（后端图固定 320×160）。
+      var scale = box.clientWidth / d.width;
+      if (!scale || !isFinite(scale)) scale = 1;
       box.style.backgroundImage = 'url(' + d.bg + ')';
+      box.style.backgroundSize = '100% 100%';
       piece.src = d.piece;
-      piece.style.width = (d.piece_size * scale0) + 'px';
-      piece.style.height = (d.piece_size * scale0) + 'px';
-      piece.style.top = (d.target_y / d.height * 100) + '%';
+      piece.style.width = (d.piece_size * scale) + 'px';
+      piece.style.height = (d.piece_size * scale) + 'px';
+      piece.style.top = (d.target_y * scale) + 'px';
       piece.style.left = '0px';
+      cur.pieceSizePx = d.piece_size * scale; // 当前显示尺寸
       setHandle(0);
-      handle.setAttribute('aria-valuemax', String(cur.width - cur.piece_size));
+      handle.setAttribute('aria-valuemax', String(Math.round(box.clientWidth - cur.pieceSizePx)));
       handle.setAttribute('aria-valuenow', '0');
       loading.style.display = 'none';
       requestAnimationFrame(function () { piece.classList.add('on'); });
     });
   }
 
-  // 拼图块横向可移动的最大像素 = 容器实际宽 - 块尺寸。
-// 用容器 clientWidth 而非 cur.width=320，使容器自适应后块位置仍正确。
-function maxX() { return cur ? Math.max(0, box.clientWidth - cur.piece_size * (box.clientWidth / cur.width)) : 0; }
+  function maxX() { return cur ? Math.max(0, box.clientWidth - cur.pieceSizePx) : 0; }
   function trackW() { return track.clientWidth - handle.clientWidth; }
 
   function setHandle(px) {
@@ -225,9 +226,7 @@ function maxX() { return cur ? Math.max(0, box.clientWidth - cur.piece_size * (b
     fill.style.width = px + 'px';
     handle.setAttribute('aria-valuenow', String(Math.round(px)));
     var ratio = trackW() > 0 ? px / trackW() : 0;
-    // 用容器实际宽度计算 piece 位置，并按 clientWidth/cur.width 缩放（容器变小则 piece 等比靠拢）
-    var scale = cur.width > 0 ? box.clientWidth / cur.width : 1;
-    piece.style.left = (ratio * (cur.width - cur.piece_size) * scale) + 'px';
+    piece.style.left = (ratio * maxX()) + 'px';
   }
 
   function onDown(e) {
@@ -247,7 +246,11 @@ function maxX() { return cur ? Math.max(0, box.clientWidth - cur.piece_size * (b
   function onUp() {
     if (!dragging) return;
     dragging = false;
-    var x = Math.round(parseFloat(piece.style.left) || 0);
+    var leftPx = parseFloat(piece.style.left) || 0;
+    // piece 的像素位置是按 box 实际宽度（自适应，可能 ≠320）显示的；
+    // 上报给后端前须换算回后端 320 坐标系，否则会因缩放导致拼图对不上。
+    var backScale = (cur && cur.width) ? cur.width / box.clientWidth : 1;
+    var x = Math.round(leftPx * backScale);
     verify(x);
   }
 
