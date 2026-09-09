@@ -5,7 +5,18 @@ export const useAuthStore = defineStore('auth', {
     token: localStorage.getItem('panel_token') || '',
     username: localStorage.getItem('panel_username') || '',
     // 权限模块列表：null 表示全部权限（超管），[] 表示无权限
-    permissions: JSON.parse(localStorage.getItem('panel_permissions') || 'null')
+    // 用 try 兜底：localStorage 若被脚本/异常写成非法 JSON，直接回落为 null（视为全权限并清脏数据），
+    // 避免 JSON.parse 抛错导致 store 初始化失败、整页白屏。
+    permissions: (() => {
+      const raw = localStorage.getItem('panel_permissions')
+      if (!raw) return null
+      try {
+        return JSON.parse(raw)
+      } catch (e) {
+        localStorage.removeItem('panel_permissions')
+        return null
+      }
+    })()
   }),
 
   actions: {

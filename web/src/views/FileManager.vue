@@ -643,6 +643,11 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', scrollPathBarToEnd)
+  window.removeEventListener('lp-transfer-drop-files', onGlobalDropFiles)
+  // 清理三个可能在离开页面时仍 pending 的定时器，避免其在已卸载组件上继续触发
+  if (remoteDlPollingTimer) { clearTimeout(remoteDlPollingTimer); remoteDlPollingTimer = null }
+  if (clickSelectTimer) { clearTimeout(clickSelectTimer); clickSelectTimer = null }
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
 })
 function enterPathEdit() {
   pathDraft.value = currentPath.value
@@ -2334,17 +2339,20 @@ async function onDrop(e) {
 
 // 把拖拽处理暴露给全局：TransferPanel 上的拖拽区放下文件时，会派发
 // lp-transfer-drop-files 事件，这里统一处理（保证 currentPath 上下文一致）。
+// handler 提为具名函数并在 onBeforeUnmount 移除，避免每次进出本页重复 addEventListener
+// 导致监听累积、drop 时触发多次重复上传。
+async function onGlobalDropFiles(e) {
+  const files = e.detail?.files
+  if (!files || files.length === 0) return
+  const list = []
+  for (const f of files) {
+    list.push({ file: f, relativePath: f.webkitRelativePath || f.name })
+  }
+  const isDir = list.some((it) => it.relativePath.includes('/'))
+  uploadFiles(list, isDir)
+}
 if (typeof window !== 'undefined') {
-  window.addEventListener('lp-transfer-drop-files', async (e) => {
-    const files = e.detail?.files
-    if (!files || files.length === 0) return
-    const list = []
-    for (const f of files) {
-      list.push({ file: f, relativePath: f.webkitRelativePath || f.name })
-    }
-    const isDir = list.some((it) => it.relativePath.includes('/'))
-    uploadFiles(list, isDir)
-  })
+  window.addEventListener('lp-transfer-drop-files', onGlobalDropFiles)
 }
 function walkEntry(entry, prefix, out) {
   return new Promise((resolve) => {

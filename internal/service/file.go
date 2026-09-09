@@ -186,7 +186,7 @@ func GetDiskUsage(path string) (*ExecResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ExecCommand("du -sb "+clean, defaultExecTimeout)
+	return ExecCommand("du -sb "+shellQuote(clean), defaultExecTimeout)
 }
 
 // uploadTmpPath 返回某上传任务对应的临时文件路径（面板风格）：
@@ -466,7 +466,20 @@ func UnzipFile(zipPath, destDir string) error {
 	}
 	defer r.Close()
 
+	// 防 zip-bomb（解压炸弹）：限制总解压大小 / 单文件大小 / 条目数，
+	// 避免恶意高压缩比 zip 解压出远超磁盘空间/预期的内容造成磁盘耗尽 DoS。
+	const (
+		unzipMaxEntries    = 20000
+		unzipMaxFileSize   = uint64(1 << 30) // 单文件解压上限 1GB
+		unzipMaxTotalSize  = uint64(2) << 30 // 总解压上限 2GB
+		unzipMaxCompress   = 2000            // 允许的最大压缩比（防护高压缩比炸弹）
+		unzipCompressFloor = uint64(1 << 10) // 压缩后 <1KB 的文件不受压缩比限制
+	)
+	var totalWritten uint64
 	for _, f := range r.File {
+		if len(r.File) > unzipMaxEntries {
+			return errors.New("压缩包条目过多，已拒绝解压")
+		}
 		name := strings.ReplaceAll(f.Name, "\\", "/")
 		target := filepath.Join(destClean, name)
 		// 防 zip slip：解压目标必须位于 destClean 内
@@ -503,16 +516,37 @@ func UnzipFile(zipPath, destDir string) error {
 		if err != nil {
 			return err
 		}
+		// 压缩比防护：单文件解压后过大且压缩比异常时拒绝（f.UncompressedSize64 为声明的解压大小）
+		if f.UncompressedSize64 > unzipMaxFileSize {
+			rc.Close()
+			return errors.New("压缩包内文件过大，已拒绝解压: " + f.Name)
+		}
+		if f.UncompressedSize64 > unzipMaxTotalSize-totalWritten {
+			rc.Close()
+			return errors.New("解压总大小超出上限，已拒绝解压: " + f.Name)
+		}
+		if f.UncompressedSize64 > unzipCompressFloor {
+			cs := f.CompressedSize64
+			if cs > 0 && f.UncompressedSize64/cs > unzipMaxCompress {
+				rc.Close()
+				return errors.New("压缩包内疑似高压缩比炸弹，已拒绝解压: " + f.Name)
+			}
+		}
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 		if err != nil {
 			rc.Close()
 			return err
 		}
-		_, err = io.Copy(out, rc)
+		n, err := io.Copy(out, io.LimitReader(rc, int64(unzipMaxFileSize)+1))
+		written := uint64(n)
+		totalWritten += written
 		rc.Close()
 		out.Close()
 		if err != nil {
 			return err
+		}
+		if written > unzipMaxFileSize {
+			return errors.New("解压后文件超出大小上限: " + f.Name)
 		}
 	}
 	_ = ChownToWebUser(destClean, true)

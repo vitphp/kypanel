@@ -24,6 +24,8 @@ request.interceptors.request.use((config) => {
 // 响应拦截：统一处理业务错误与 401
 request.interceptors.response.use(
   (response) => {
+    // 任一请求成功即说明会话恢复正常，解除 401 重定向锁，允许后续再发生 401 时重新跳转。
+    request._authRedirecting = false
     const res = response.data
     if (res.code !== 0) {
       if (!response.config?.silent) {
@@ -38,11 +40,16 @@ request.interceptors.response.use(
       return Promise.reject(error)
     }
     if (error.response?.status === 401) {
-      const auth = useAuthStore()
-      auth.logout()
-      // 401 后跳安全入口（登录页），/login 已不可访问
-      const entrance = (window.__SECURITY_ENTRANCE__ || '').trim()
-      router.push(entrance ? '/' + entrance : '/')
+      // 多请求并行同时 401 时只处理一次：已跳转则不重复 logout / push，
+      // 避免一次登出触发 N 次导航、产生 unhandled rejection 或路由竞态。
+      if (!request._authRedirecting) {
+        request._authRedirecting = true
+        const auth = useAuthStore()
+        auth.logout()
+        // 401 后跳安全入口（登录页），/login 已不可访问
+        const entrance = (window.__SECURITY_ENTRANCE__ || '').trim()
+        router.push(entrance ? '/' + entrance : '/').catch(() => {})
+      }
     } else {
       ElMessage.error(error.response?.data?.msg || error.message || '网络错误')
     }

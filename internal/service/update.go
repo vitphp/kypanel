@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -336,6 +338,41 @@ echo "===== kypanel upgrade finished $(date '+%F %T') ====="
 // UpgradeRunning 返回是否已有升级任务进行中
 func UpgradeRunning() bool {
 	return UpgradeProgress().Running
+}
+
+// AuthoritativeUpgrade 以「服务端权威数据」触发升级。
+// 安全关键：绝不信任客户端在 /update/upgrade 里自报的下载地址 / SHA-256——
+// 那些字段本应来自官网 check 响应，但攻击者可控，若照单全收即可让面板下载并执行任意 ELF（RCE）。
+// 因此这里忽略客户端入参，改为内部读取 check 已缓存（或现场重拉）的官网权威信息来执行。
+// info 参数仅用于向后兼容调用形态（其 URL/哈希字段会被覆盖，不参与下载/校验）。
+func AuthoritativeUpgrade(info UpdateInfo, arch string) error {
+	if UpgradeRunning() {
+		return fmt.Errorf("已有升级任务正在进行，请稍后再试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	// 优先读缓存（前端升级前通常刚 check 过）；缓存失效则现场向官网 force 重拉一次。
+	auth, err := CheckUpdate(ctx, arch, false)
+	if err != nil {
+		auth, err = CheckUpdate(ctx, arch, true)
+	}
+	if err != nil {
+		return fmt.Errorf("无法获取权威更新信息（请先联网检查更新）: %w", err)
+	}
+	if auth == nil || auth.DownloadURL == "" {
+		return fmt.Errorf("官网未下发可用的更新包")
+	}
+	// 强制覆盖入参：仅使用官网权威的 URL 与 SHA-256，杜绝客户端伪造。
+	info.DownloadURL = auth.DownloadURL
+	info.WebURL = auth.WebURL
+	info.XdbURL = auth.XdbURL
+	info.Sha256 = auth.Sha256
+	info.WebSha256 = auth.WebSha256
+	info.XdbSha256 = auth.XdbSha256
+	info.Version = auth.Version
+	// SHA-256 校验：官网下发哈希为空时（老官网兼容）仍放行，但下载地址已是官网权威域名，
+	// 且内部已做公网 IP 锁定 + TLS + ELF 魔数三重校验，攻击面已被压到最小。
+	return UpgradePanel(info)
 }
 
 // UpgradePanel 异步升级面板：下载 -> 校验 -> 替换 -> 触发重启，全程上报进度供前端轮询。
@@ -809,16 +846,46 @@ func verifyFileSha256(path, expect string) error {
 
 // downloadUpgradeFile 下载升级文件到指定路径，限制最大体积避免异常包撑爆磁盘。
 // onProgress 回调当前文件已下载/总字节数（total 未知时为 0），用于前端展示下载进度。
-func downloadUpgradeFile(client *http.Client, url, dest, name string, onProgress func(file string, downloaded, total int64)) error {
+func downloadUpgradeFile(client *http.Client, rawURL, dest, name string, onProgress func(file string, downloaded, total int64)) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return errors.New("下载地址格式错误")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return errors.New("下载地址必须为 http/https")
+	}
+	// SSRF 防护：解析目标主机为公网 IP，拒绝内网/回环/链路本地（含云元数据 169.254.169.254）。
+	// 复用 file.go 的 checkPublicHost + 返回 IP 用于强制建连，杜绝 DNS 重绑定把域名解析回内网。
+	ip, err := checkPublicHost(u.Host)
 	if err != nil {
 		return err
 	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	dialAddr := net.JoinHostPort(ip.String(), port)
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 30 * time.Second}
+			return d.DialContext(ctx, network, dialAddr)
+		},
+	}
+	secClient := &http.Client{Transport: transport, Timeout: 10 * time.Minute}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Host = u.Host // 保留原始 Host 头，兼容按域名路由的虚拟主机/CDN
 	req.Header.Set("User-Agent", "kypanel/"+version.Version)
-	resp, err := client.Do(req)
+	resp, err := secClient.Do(req)
 	if err != nil {
 		return err
 	}

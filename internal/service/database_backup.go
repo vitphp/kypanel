@@ -411,6 +411,11 @@ func extractSQLFromZip(zipPath string) (string, func(), error) {
 }
 
 func importSqliteFile(dbName, path string) error {
+	// 防路径穿越：dbName 会拼进目标路径，必须只允许安全字符（与 sqliteEngine.Create 一致），
+	// 否则带 ../ 的库名可把上传文件 cp -f 覆盖到任意路径。
+	if !identRe.MatchString(dbName) {
+		return errors.New("数据库名无效（仅允许字母数字下划线）")
+	}
 	e := sqliteEngine{}
 	dest := filepath.Join(e.dataDir(), dbName)
 	cmd := fmt.Sprintf("cp -f %s %s", shellQuote(path), shellQuote(dest))

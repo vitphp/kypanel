@@ -73,8 +73,10 @@ func handleUpdateCheck(c *gin.Context) {
 	})
 }
 
-// handleUpdateUpgrade 执行面板升级
-// 入参来自 /update/check 的返回：download_url 必填，web_url/xdb_url 可选（空=本次不更新对应文件）
+// handleUpdateUpgrade 执行面板升级。
+// 安全关键：客户端自报的 download_url / web_url / sha256 一律【不被信任】——
+// 它们会被服务端权威信息覆盖（见 service.AuthoritativeUpgrade），
+// 杜绝攻击者利用该接口让面板下载并执行任意文件。入参仅校验 JSON 合法性，不再承载下载源。
 func handleUpdateUpgrade(c *gin.Context) {
 	var req service.UpdateInfo
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -82,7 +84,7 @@ func handleUpdateUpgrade(c *gin.Context) {
 		return
 	}
 
-	if err := service.UpgradePanel(req); err != nil {
+	if err := service.AuthoritativeUpgrade(req, runtime.GOARCH); err != nil {
 		utils.Fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}

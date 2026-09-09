@@ -558,6 +558,9 @@ const nginxInstallTimer = ref(null)
 // 弹窗内各类型环境状态与一键安装
 const envStatusMap = ref({})
 const installing = ref('')
+// 运行时批量安装/续装的轮询定时器（组件级持有，切页时由 onBeforeUnmount 统一清理，
+// 避免离开页面后定时器继续每 3s 拉取 /apps/list 造成泄漏与多余请求）
+const runtimeInstallTimer = ref(null)
 const selectedVersionMap = ref({})
 // 下拉框当前显示的版本：跟随 activeTab 切换各运行时独立记忆。
 // - getter：当前 Tab 用户曾选过的版本集合 > 当前 Tab 缺失版本列表中的全部 > 空数组
@@ -1070,25 +1073,25 @@ async function quickInstall(keyOrKeys, label) {
             tracker.unmarkRemoved(activeKey)
             tracker.upsert({ key: activeKey, name: meta?.name || activeKey, action: 'install', status: 'queued', message: '排队等待中...' })
           } catch (e) {
-            clearInterval(watchTimer)
+            clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
             installing.value = ''
             ElMessage.error('安装失败：' + (e?.msg || e?.message || '未知错误'))
           }
         } else {
           // 全部装完
-          clearInterval(watchTimer)
+          clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
           installing.value = ''
           ElMessage.success(`${label} 全部安装完成（${keyList.length} 个版本）`)
           await loadEnvStatus()
           await loadRuntimes()
         }
       } else if (app.status === 'failed') {
-        clearInterval(watchTimer)
+        clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
         installing.value = ''
         ElMessage.error(`${activeKey} 安装失败：${app.error || '请查看安装日志'}`)
       } else if (app.status === 'not_installed') {
         // 后端 ghost 检测判定安装已异常中止（任务丢失/进程消失）或服务重启中断
-        clearInterval(watchTimer)
+        clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
         installing.value = ''
         ElMessage.error(`${activeKey} 安装已中止：${app.error || '后台任务异常，请重新尝试'}`)
       }
@@ -1121,7 +1124,7 @@ async function resumePendingInstalls(apps) {
     }
     const activeKey = pending[0].key
     installing.value = activeKey
-    const watchTimer = setInterval(async () => {
+    runtimeInstallTimer.value = setInterval(async () => {
       try {
         const r = await request.get('/apps/list')
         const arr = r.data || []
@@ -1129,17 +1132,17 @@ async function resumePendingInstalls(apps) {
         if (!app) return
         // installing / queued → 继续等待（后端 GhostWatcher 每 30s 核查是否真异常，慢安装不误判）
         if (app.status === 'installed') {
-          clearInterval(watchTimer)
+          clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
           installing.value = ''
           await loadEnvStatus()
           await loadRuntimes()
         } else if (app.status === 'failed') {
-          clearInterval(watchTimer)
+          clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
           installing.value = ''
           ElMessage.error(`${activeKey} 安装失败：${app.error || '请查看安装日志'}`)
         } else if (app.status === 'not_installed') {
           // 后端 ghost 检测判定安装已异常中止（任务丢失/进程消失）或服务重启中断
-          clearInterval(watchTimer)
+          clearInterval(runtimeInstallTimer.value); runtimeInstallTimer.value = null
           installing.value = ''
           ElMessage.error(`${activeKey} 安装已中止：${app.error || '后台任务异常，请重新尝试'}`)
         }
@@ -1700,6 +1703,10 @@ onBeforeUnmount(() => {
   if (nginxInstallTimer.value) {
     clearInterval(nginxInstallTimer.value)
     nginxInstallTimer.value = null
+  }
+  if (runtimeInstallTimer.value) {
+    clearInterval(runtimeInstallTimer.value)
+    runtimeInstallTimer.value = null
   }
 })
 </script>
