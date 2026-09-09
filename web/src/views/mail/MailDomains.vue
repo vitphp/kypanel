@@ -67,31 +67,14 @@
     <!-- DNS 绑定引导（小白版：不出现任何 DNS 黑话，每条都拆成服务商后台要填的字段） -->
     <el-dialog v-model="dnsVisible" title="把你的域名接到这台服务器" width="min(720px, 96vw)" align-center>
       <template v-if="dnsGuide">
-        <div class="md-why">
-          <strong>先回答一个问题：</strong>
-          你的<span class="md-link">域名邮箱</span>需要"收信"还是"发信"？告诉面板，它只给你看需要的设置，不用管的不会来烦你。
-        </div>
-
-        <!-- 用途选择：只收 / 只发 / 都要 -->
+        <!-- 用途选择：只收 / 只发 / 都要（只问一次用途，引导对应项） -->
         <el-radio-group v-model="dnsPurpose" class="md-purpose">
           <el-radio-button value="receive">只要收信</el-radio-button>
           <el-radio-button value="send">只要发信</el-radio-button>
           <el-radio-button value="both">收和发都要</el-radio-button>
         </el-radio-group>
-        <div class="md-purpose-hint">
-          <template v-if="dnsPurpose === 'receive'">你选了"只收信" → 下面只需配「收信」那一段（共 2 条）。发信的设置暂时不需要。</template>
-          <template v-else-if="dnsPurpose === 'send'">你选了"只发信" → 下面只需配「发信」那一段。收信的设置暂时不需要。</template>
-          <template v-else>你选了"收和发都要" → 下面两段都要按顺序配。</template>
-        </div>
 
-        <!-- 自动检测到的邮件服务器值（用户不用手填） -->
-        <div class="md-detected">
-          <el-icon :size="16" class="md-detected-icon"><Connection /></el-icon>
-          <span class="md-detected-text">本面板已检测到你的服务器地址：</span>
-          <el-tag class="md-detected-tag" type="success" effect="light">{{ dnsGuide.mail_server }}</el-tag>
-        </div>
-
-        <!-- 按用途分组引导 -->
+        <!-- 按用途分组引导：每条都拆成服务商后台的字段 + 一键复制 -->
         <div v-for="(grp, gi) in dnsGroups" :key="gi" class="md-dns-group" :class="'md-group-' + grp.key">
           <div class="md-group-head">
             <span class="md-group-badge" :class="grp.key">{{ grp.badge }}</span>
@@ -99,39 +82,27 @@
           </div>
 
           <div class="md-dns-list">
-            <div v-for="(r, i) in grp.rows" :key="i" class="md-dns-row" :class="{ 'md-dns-row-opt': !r.steps.length }">
+            <div v-for="(r, i) in grp.rows" :key="i" class="md-dns-row">
               <div class="md-dns-row-head">
                 <span class="md-dns-step-tag must">{{ r.num }}</span>
               </div>
               <div class="md-dns-title">{{ r.title }}</div>
-              <div class="md-dns-why">为什么：{{ r.why }}</div>
-
-              <template v-if="r.steps.length">
-                <div class="md-dns-fields">
-                  <div class="md-dns-fields-title">打开服务商后台 → 添加解析 → 按下面填：</div>
-                  <div v-for="(s, j) in r.steps" :key="j" class="md-dns-field-row">
-                    <span class="md-dns-field-label">{{ s.label }}</span>
-                    <span class="md-dns-field-value">{{ s.value }}</span>
-                  </div>
-                </div>
-                <div class="md-dns-copybar">
-                  <el-button size="small" type="primary" plain @click="copy(r.steps[r.steps.length - 1].value)">
-                    复制「记录值」
-                  </el-button>
-                  <span class="md-dns-copy-tip">点击后到服务商后台"记录值"框粘进去</span>
-                </div>
-              </template>
-              <template v-else>
-                <div class="md-dns-placeholder">
-                  <el-icon><Clock /></el-icon>
-                  <span>这一项当前不用管，面板功能上线后会引导你补配</span>
-                </div>
-              </template>
+              <div class="md-dns-fields-title">打开服务商后台 → 添加解析 → 按下面填：</div>
+              <div v-for="(s, j) in r.steps" :key="j" class="md-dns-field-row">
+                <span class="md-dns-field-label">{{ s.label }}</span>
+                <span class="md-dns-field-value">{{ s.value }}</span>
+              </div>
+              <div class="md-dns-copybar">
+                <el-button size="small" type="primary" plain @click="copy(r.steps[r.steps.length - 1].value)">
+                  复制「记录值」
+                </el-button>
+                <span class="md-dns-copy-tip">点击后到服务商后台"记录值"框粘进去</span>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 操作引导 -->
+        <!-- 操作指引 + 自动检测状态（打开即检，不用按钮） -->
         <div class="md-how">
           <div class="md-how-title">怎么去服务商后台？</div>
           <ol class="md-how-list">
@@ -139,26 +110,12 @@
             <li>找到「<span class="md-link">DNS 解析</span> / <span class="md-link">域名解析</span>」菜单</li>
             <li>点「<span class="md-link">添加记录</span>」</li>
             <li>照着上面"打开服务商后台 → 添加解析 → 按下面填"里每一项的字段，一项一项填进去</li>
-            <li>配好后点下面的"帮我查一下"，DNS 全球传播通常几分钟生效</li>
           </ol>
-        </div>
-
-        <!-- 自检 + 大白话勾选 -->
-        <div class="md-dns-checkbar">
-          <el-button :loading="checking" @click="runDnsCheck">我配完了，帮我查一下是否生效</el-button>
-          <span v-if="checkResult !== null" class="md-check-result" :class="checkResult ? 'ok' : 'bad'">
-            {{ checkResult ? '✓ 检测到了！已经能收到发往该域名的信' : '⏳ 还没检测到（DNS 还在传播，再等几分钟重试）' }}
-          </span>
-        </div>
-        <div class="md-dns-markbar">
-          <div class="md-dns-markbar-title">我已经去服务商后台添加了：</div>
-          <div class="md-dns-markbar-list">
-            <template v-if="dnsGroups.find((x) => x.key === 'receive')">
-              <el-checkbox v-model="dnsMark.mx" @change="saveDnsMark">「收信」段的 2 条（A + 让信投过来那 2 条）</el-checkbox>
-            </template>
-            <template v-if="dnsGroups.find((x) => x.key === 'send')">
-              <el-checkbox v-model="dnsMark.spf" @change="saveDnsMark">「发信」段的第 1 条（让这台服务器能用我的域名发信）</el-checkbox>
-            </template>
+          <div class="md-checkbar-inline">
+            <span v-if="checking" class="md-check-result">⏳ 正在检测你的解析是否生效…</span>
+            <span v-else-if="checkResult === true" class="md-check-result ok">✓ 检测到了！你的域名已经能往本服务器收信（DNS 全球传播通常几分钟）</span>
+            <span v-else-if="checkResult === false" class="md-check-result bad">⏳ 暂时还没检测到（可能你刚配完 DNS 还在传播，关闭弹窗稍等再打开会自动重查）</span>
+            <span v-else class="md-check-result">检测中…</span>
           </div>
         </div>
       </template>
@@ -172,7 +129,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Connection, Clock } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain, getMailDnsGuide, checkMailDns } from '../../api/mail'
 
 const list = ref([])
@@ -232,7 +189,7 @@ const dnsGroups = computed(() => {
       ]
     })
   }
-  // 发信组：让本域名能往外发信、不被对方当垃圾/伪造（SPF + 后续 DKIM）
+  // 发信组：让本域名能往外发信、不被对方当垃圾/伪造（当前仅 SPF 可配）
   if (dnsPurpose.value !== 'receive') {
     groups.push({
       key: 'send',
@@ -240,7 +197,7 @@ const dnsGroups = computed(() => {
       title: '让这台服务器能用你的域名发信（要"能往外发信"才需要配）',
       rows: [
         {
-          num: '发信 1/2',
+          num: '发信 1/1',
           title: '告诉全网：只有这台服务器可以用你的域名发信',
           why: '不配这条，从你服务器发出去的信很容易被收信方当"伪造邮件"丢进垃圾箱',
           steps: [
@@ -248,12 +205,6 @@ const dnsGroups = computed(() => {
             { label: '主机记录', value: '@（留空）' },
             { label: '记录值', value: g.spf_value }
           ]
-        },
-        {
-          num: '发信 2/2（以后再说）',
-          title: '给发出去的信加数字签名（更可信）',
-          why: '面板的签名功能上线后，这里会自动出现密钥让你复制，届时强烈建议配。现在先不用管。',
-          steps: []
         }
       ]
     })
@@ -327,6 +278,7 @@ async function openDns(row) {
   currentDomain.value = row
   dnsMark.value = { mx: row.mx_configured, spf: row.spf_configured, dkim: row.dkim_configured, dmarc: row.dmarc_configured }
   checkResult.value = null
+  checking.value = false
   dnsVisible.value = true
   try {
     const { data } = await getMailDnsGuide(row.id)
@@ -334,7 +286,10 @@ async function openDns(row) {
   } catch (e) {
     ElMessage.error(e?.response?.data?.msg || '加载引导失败')
     dnsVisible.value = false
+    return
   }
+  // 弹窗打开后立即自动检测解析是否生效（用户不用点按钮）
+  await runDnsCheck()
 }
 
 async function runDnsCheck() {
@@ -343,7 +298,8 @@ async function runDnsCheck() {
     const { data } = await checkMailDns(currentDomain.value.id)
     checkResult.value = !!data?.ready
   } catch (e) {
-    ElMessage.error(e?.response?.data?.msg || '检测失败')
+    // 后台自动检测：失败不打扰用户，仅标记"未生效"
+    checkResult.value = false
   } finally {
     checking.value = false
   }
