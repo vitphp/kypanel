@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -226,6 +227,15 @@ func ensureApacheModules(s *model.Site) error {
 	}
 	if s.SslEnabled {
 		mods = append(mods, "ssl")
+	}
+	// 拖拽验证码闸门（Apache 版用 mod_lua 本地验签 + mod_proxy 反代挑战页 + mod_headers 传 X-Lp-Site）
+	if GetSiteSecurityConfig(s.ID).CaptchaEnabled {
+		mods = append(mods, "proxy", "proxy_http", "lua")
+		// 写出该站点的 mod_lua 校验脚本（内含 site id 与 HMAC 主密钥），须先于 Apache 配置生效/reload。
+		// 写失败不阻断保存：lua 缺失时闸门经 <IfModule mod_lua.c> 自动降级，站点仍可访问（仅不强制验证码）。
+		if err := writeApacheCaptchaFiles(s); err != nil {
+			slog.Warn("web: 写入 Apache 验证码 lua 失败，闸门将降级", "site", s.Name, "err", err)
+		}
 	}
 	for _, m := range mods {
 		if err := apacheEnableModule(m); err != nil {

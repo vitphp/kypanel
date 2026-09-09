@@ -375,6 +375,20 @@ func PhpExtList(version string) (map[string]interface{}, error) {
 	}, nil
 }
 
+// phpExtNameRe 校验 PHP 扩展名与版本号：仅允许字母数字点下划线连字符，
+// 拦截注入 /bin/sh -c 的 shell 元字符（空格、;、$()、引号、反引号等）。
+var phpExtNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// validatePhpExtArg 校验扩展名 / 版本号，非法时返回错误。
+// 空值放行（version 为空时 phpEnvFor 走自动探测）；非空值必须匹配白名单，
+// 拦截会拼进 /bin/sh -c 的 shell 元字符（空格、;、$()、引号、反引号等）。
+func validatePhpExtArg(v string) error {
+	if v != "" && !phpExtNameRe.MatchString(v) {
+		return fmt.Errorf("扩展名或版本号含非法字符")
+	}
+	return nil
+}
+
 // phpExtAptPkg 计算扩展的 apt 包名（remi 特殊处理）
 func phpExtAptPkg(e *phpEnv, ext string) string {
 	if e.Remi {
@@ -385,6 +399,12 @@ func phpExtAptPkg(e *phpEnv, ext string) string {
 
 // PhpExtInstall 安装 PHP 扩展（apt/dnf 优先）
 func PhpExtInstall(version, ext string) error {
+	if err := validatePhpExtArg(version); err != nil {
+		return err
+	}
+	if err := validatePhpExtArg(ext); err != nil {
+		return err
+	}
 	e := phpEnvFor(version)
 	if e == nil {
 		return fmt.Errorf("未检测到 PHP 环境")
@@ -417,6 +437,12 @@ func PhpExtInstall(version, ext string) error {
 
 // PhpExtUninstall 卸载 PHP 扩展
 func PhpExtUninstall(version, ext string) error {
+	if err := validatePhpExtArg(version); err != nil {
+		return err
+	}
+	if err := validatePhpExtArg(ext); err != nil {
+		return err
+	}
 	e := phpEnvFor(version)
 	if e == nil {
 		return fmt.Errorf("未检测到 PHP 环境")

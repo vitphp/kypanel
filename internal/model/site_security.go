@@ -19,7 +19,7 @@ type SiteSecurityConfig struct {
 	// ===== 访问控制 =====
 	IPWhitelistEnabled bool   `gorm:"default:false" json:"ip_whitelist_enabled"` // 白名单模式（仅放行列表内 IP）
 	UAWhitelistEnabled bool   `gorm:"default:false" json:"ua_whitelist_enabled"` // UA 白名单模式
-	BlockChina         bool   `gorm:"default:false" json:"block_china"`          // 屏蔽境外（仅放行中国大陆）
+	BlockOverseas      bool   `gorm:"column:block_china;default:false" json:"block_overseas"` // 禁海外（仅放行中国大陆，依赖 nginx map $lp_ss_cc）
 	RefererCheck       string `gorm:"size:16;default:off" json:"referer_check"`  // off / blacklist / whitelist
 
 	// ===== CC 防护 =====
@@ -35,6 +35,11 @@ type SiteSecurityConfig struct {
 	NoSniff       bool `gorm:"default:true" json:"no_sniff"`
 	NoDirList     bool `gorm:"default:true" json:"no_dir_list"`
 
+	// ===== 拖拽拼图验证码（边缘层闸门，浏览量大/被刷时开启）=====
+	CaptchaEnabled  bool `gorm:"default:false" json:"captcha_enabled"`   // 启用拖拽验证码
+	CaptchaAutoOnCC bool `gorm:"default:false" json:"captcha_auto_on_cc"` // CC 攻击时自动开启
+	CaptchaTTL      int  `gorm:"default:1800" json:"captcha_ttl"`        // 验证通过后放行 cookie 有效期（秒）
+
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -46,7 +51,7 @@ type SiteSecIpRule struct {
 	ID        uint       `gorm:"primaryKey" json:"id"`
 	SiteID    uint       `gorm:"index" json:"site_id"`
 	Action    string     `gorm:"size:8" json:"action"`      // allow / block
-	MatchType string     `gorm:"size:16" json:"match_type"` // ip / cidr / range / country / isp
+	MatchType string     `gorm:"size:16" json:"match_type"` // ip / cidr / range
 	Content   string     `gorm:"size:256" json:"content"`   // 具体值（IP/CIDR/国家名/ISP）
 	ExpireAt  *time.Time `json:"expire_at"`
 	Remark    string     `gorm:"size:256" json:"remark"`

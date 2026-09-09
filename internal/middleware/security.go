@@ -46,6 +46,13 @@ func DomainGuard() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// 拖拽验证码相关接口由站点 nginx 同域反代到面板（Host 为用户站点域名），
+		// 必须豁免域名白名单，否则访客在自己域名下会被 403 拦截。
+		cp := c.Request.URL.Path
+		if cp == "/captcha-challenge" || strings.HasPrefix(cp, "/api/site/captcha/") {
+			c.Next()
+			return
+		}
 		path := c.Request.URL.Path
 		// 放行登录和健康检查，避免锁死后无法恢复
 		if path == "/api/ping" || path == "/api/auth/login" {

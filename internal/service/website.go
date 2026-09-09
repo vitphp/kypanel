@@ -158,13 +158,27 @@ func nginxTest() error {
 }
 
 // nginxReload 重载 nginx
+// 优先用 nginx -s reload 平滑重载；当 nginx 未运行（/run/nginx.pid 为空或丢失）时，
+// reload 会报 "invalid PID number"，此时退化为启动 nginx（start 对已运行实例幂等），
+// 确保配置变更后站点/地图能生效而不依赖一个可能为空/失效的 pid 文件。
 func nginxReload() error {
-	res, err := ExecCommand("nginx -s reload", 30*time.Second)
+	if res, err := ExecCommand("nginx -s reload", 30*time.Second); err == nil && res.ExitCode == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if res, err := ExecCommand("systemctl reload nginx", 30*time.Second); err == nil && res.ExitCode == 0 {
+			return nil
+		}
+		if res, err := ExecCommand("systemctl start nginx", 30*time.Second); err == nil && res.ExitCode == 0 {
+			return nil
+		}
+	}
+	res, err := ExecCommand("nginx", 30*time.Second)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("nginx reload 失败: %s", strings.TrimSpace(res.Stderr+res.Stdout))
+		return fmt.Errorf("nginx reload/启动失败: %s", strings.TrimSpace(res.Stderr+res.Stdout))
 	}
 	return nil
 }
@@ -441,17 +455,31 @@ func isDefaultSite(s *model.Site) bool {
 	return s.ID != 0 && DefaultSiteID() == s.ID
 }
 
+// kypanel 安全兜底规则（针对本面板托管的站点栈——Go/PHP/Node/Java/Python 静态与动态站点——自研裁剪，
+// 不照搬其它面板）。聚焦「凭证泄露 / 版本库 / 依赖清单 / 备份与临时文件」四类高风险面，
+// 刻意不拦截 README/LICENSE/CHANGELOG 等文档文件，避免误伤文档型站点；仅匹配以「/」开头的文件名片段，避免误伤 /license 这类正常路由。
+const (
+	// 凭证与版本库：.env 系列、.git/.svn 等、私钥/证书、IDE 与构建配置
+	nginxSensitiveSecretsRe = `/(\.env.*|\.git|\.gitignore|\.gitattributes|\.gitmodules|\.svn|\.hg|\.bzr|\.htaccess|\.htpasswd|\.user\.ini|\.DS_Store|Thumbs\.db|\.idea|\.vscode|\.claude|\.zed|\.project|\.classpath|\.settings|id_rsa|id_dsa|id_ecdsa|\.pem|\.key|\.crt|\.csr|\.pfx|\.p12|\.keystore|\.jks|\.kdbx|\.secret)$`
+	// 依赖清单 / 备份 / 数据库与临时文件：composer.json、go.mod、*.sql、*.bak、*.log 等
+	nginxSensitiveArtifactsRe = `/(composer\.json|composer\.lock|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle|pyproject\.toml|requirements\.txt|phpunit\.xml|Gemfile(\.lock)?|application(-\w+)?\.(ya?ml|properties)|\.log|\.sql(\.gz)?|\.dump|\.db|\.sqlite|\.sqlite3|\.bak(up)?|\.old|\.tmp|\.temp|\.swp|\.swo|\.orig|\.save|\.\w+~)$`
+	// 敏感目录：版本库、缓存、依赖、构建与运行时目录
+	nginxSensitiveDirsRe = `/(\.git|\.svn|\.hg|\.bzr|\.vscode|\.idea|\.claude|\.zed|\.ssh|\.github|\.gitlab|\.npm|\.yarn|\.pnpm|\.cache|\.husky|\.turbo|\.next|\.nuxt|\.output|node_modules|vendor|runtime|__pycache__|\.pytest_cache|target|\.terraform|\.serverless|\.aws)/`
+)
+
 // genSiteServerBlock 生成单个 server 块；defaultSrv 为 true 时在 listen 加 default_server
 // （默认站点：未绑定域名请求落到该站点）
 func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) string {
 	var sb strings.Builder
 	sb.WriteString("server {\n")
 	if ssl {
-		line := "    listen 443 ssl http2"
+		line := "    listen 443 ssl"
 		if defaultSrv {
 			line += " default_server"
 		}
 		sb.WriteString(line + ";\n")
+		// 新写法：http2 作为独立 server 级指令（旧写法 listen ... http2 在 nginx 新版已废弃）
+		sb.WriteString("    http2 on;\n")
 		if s.SslCertPath != "" {
 			fmt.Fprintf(&sb, "    ssl_certificate %s;\n", s.SslCertPath)
 		}
@@ -514,11 +542,6 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 		}
 		fmt.Fprintf(&sb, "    index %s;\n", index)
 		fmt.Fprintf(&sb, "    error_page 404 /404.html;\n\n")
-
-		// 敏感文件/目录保护（.env、.git、.htaccess 等禁止访问）
-		sb.WriteString("    location ~ ^/(\\.user\\.ini|\\.htaccess|\\.git|\\.env|\\.svn|\\.project|LICENSE|README\\.md) {\n")
-		sb.WriteString("        return 404;\n")
-		sb.WriteString("    }\n\n")
 	}
 
 	// Let's Encrypt 证书验证目录（HTTP-01 challenge 需要可达）
@@ -527,6 +550,27 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 	sb.WriteString("    location ^~ /.well-known/ {\n")
 	fmt.Fprintf(&sb, "        root %s;\n", root)
 	sb.WriteString("        allow all;\n")
+	// 证书续期请求不能被验证码闸门拦截（auth_request 在 server 级，这里显式豁免）
+	sb.WriteString("        auth_request off;\n")
+	sb.WriteString("    }\n\n")
+
+	// ===== kypanel 安全兜底：禁止访问敏感文件/目录（对所有站点类型生效，含反向代理站点） =====
+	// 按本面板托管的站点栈裁剪，避免误伤正常资源；/.well-known/ 由上方 location ^~ 始终放行（证书验证需要）。
+	sb.WriteString("    # 安全兜底-凭证与版本库(.env/.git/私钥/证书/IDE配置等)\n")
+	fmt.Fprintf(&sb, "    location ~* %s {\n", nginxSensitiveSecretsRe)
+	sb.WriteString("        return 404;\n")
+	sb.WriteString("    }\n\n")
+	sb.WriteString("    # 安全兜底-依赖清单/备份/数据库/临时文件\n")
+	fmt.Fprintf(&sb, "    location ~* %s {\n", nginxSensitiveArtifactsRe)
+	sb.WriteString("        return 404;\n")
+	sb.WriteString("    }\n\n")
+	sb.WriteString("    # 安全兜底-敏感目录(.git/node_modules/缓存/构建目录等)\n")
+	fmt.Fprintf(&sb, "    location ~* %s {\n", nginxSensitiveDirsRe)
+	sb.WriteString("        return 404;\n")
+	sb.WriteString("    }\n\n")
+	// 禁止在证书验证目录内放置可执行/敏感文件：用 location 替代 if，规避 nginx "if is evil" 的隐患。
+	sb.WriteString("    location ~* /\\.well-known/.*\\.(php|jsp|py|pl|rb|cgi|sh|js|css|lua|ts|go|zip|tar\\.gz|rar|7z|sql|bak|env|ini|key|pem|crt)$ {\n")
+	sb.WriteString("        return 403;\n")
 	sb.WriteString("    }\n\n")
 
 	switch s.Type {
@@ -626,6 +670,10 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 	}
 	// 单站安全片段（存在则 include，不存在为空）
 	if inc := SiteSecIncludeLine(s.ID); inc != "" {
+		sb.WriteString(inc)
+	}
+	// 拖拽验证码闸门片段（存在则 include，不存在为空）
+	if inc := CaptchaIncludeLine(s.ID); inc != "" {
 		sb.WriteString(inc)
 	}
 	sb.WriteString("}\n")
@@ -1021,6 +1069,7 @@ func genStoppedSiteConf(s *model.Site) string {
 	if s.SslEnabled {
 		sb.WriteString("server {\n")
 		sb.WriteString("    listen 443 ssl;\n")
+		sb.WriteString("    http2 on;\n")
 		fmt.Fprintf(&sb, "    server_name %s;\n", names)
 		if s.SslCertPath != "" {
 			fmt.Fprintf(&sb, "    ssl_certificate %s;\n", s.SslCertPath)
@@ -1071,6 +1120,8 @@ func writeSiteConf(s *model.Site) error {
 		_ = ensureSiteSSLCert(s)
 	}
 	conf := genSiteConf(s)
+	// 注入拖拽验证码 include 行（覆盖站点存在 config_override 时 genSiteConf 直接返回 override 的情况）
+	conf = ensureCaptchaInclude(conf, s)
 	ws := WebServerType()
 
 	var dir, path string
@@ -1578,6 +1629,8 @@ func cleanupSiteFiles(name string) {
 	_ = os.Remove(filepath.Join(apacheWafSiteConfDir, "lp_"+name+".conf"))
 	// 4) 单站安全片段
 	_ = os.Remove(siteSecSnippetPath(name))
+	// 5) 拖拽验证码片段
+	_ = os.Remove(captchaSnippetPath(name))
 }
 
 // DeleteSite 删除网站

@@ -14,6 +14,17 @@ import (
 // 与 nginx 的 genSiteConf 对等，生成 Apache VirtualHost 配置。
 // PHP 通过 php-fpm + mod_proxy_fcgi 方式（SetHandler proxy:fcgi://）。
 
+// kypanel 安全兜底规则（针对本面板托管的站点栈自研裁剪，不照搬其它面板）：聚焦凭证/版本库/依赖清单/备份临时文件，
+// 不拦截 README/LICENSE 等文档文件。FilesMatch 按文件名匹配（不以「/」开头），DirectoryMatch 按目录路径匹配。
+const (
+	// 凭证与版本库：.env 系列、.git/.svn 等、私钥/证书、IDE 与构建配置
+	apacheSensitiveSecretsRe = `(?i)\.(env.*|git|gitignore|gitattributes|gitmodules|svn|hg|bzr|htaccess|htpasswd|user\.ini|DS_Store|idea|vscode|claude|zed|project|classpath|settings|pem|key|crt|csr|pfx|p12|keystore|jks|kdbx|secret)|id_rsa|id_dsa|id_ecdsa`
+	// 依赖清单 / 备份 / 数据库与临时文件
+	apacheSensitiveArtifactsRe = `(?i)(composer\.json|composer\.lock|package(-lock)?\.json|yarn\.lock|pnpm-lock\.yaml|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle|pyproject\.toml|requirements\.txt|phpunit\.xml|Gemfile(\.lock)?|application(-\w+)?\.(ya?ml|properties))|\.(log|sql(\.gz)?|dump|db|sqlite|sqlite3|bak(up)?|old|tmp|temp|swp|swo|orig|save|\w+~)$`
+	// 敏感目录
+	apacheSensitiveDirsRe = `(?i)/(\.git|\.svn|\.hg|\.bzr|\.vscode|\.idea|\.claude|\.zed|\.ssh|\.github|\.gitlab|\.npm|\.yarn|\.pnpm|\.cache|\.husky|\.turbo|\.next|\.nuxt|\.output|node_modules|vendor|runtime|__pycache__|\.pytest_cache|target|\.terraform|\.serverless|\.aws)/`
+)
+
 // genApacheConf 生成 apache 站点配置（含全部设置项；自定义配置非空时完全覆盖）
 func genApacheConf(s *model.Site) string {
 	if strings.TrimSpace(s.ConfigOverride) != "" {
@@ -109,12 +120,20 @@ func genApacheVHost(s *model.Site, port int, names string, ssl bool) string {
 		sb.WriteString("    </Directory>\n\n")
 	}
 
-	// 敏感文件/目录保护
-	if model.IsRootType(s.Type) {
-		sb.WriteString("    <FilesMatch \"^\\.(git|svn|env|user\\.ini|htaccess)$|^(LICENSE|README\\.md)$\">\n")
-		sb.WriteString("        Require all denied\n")
-		sb.WriteString("    </FilesMatch>\n\n")
-	}
+	// 安全兜底：禁止访问敏感文件与目录（按本面板站点栈裁剪，对所有站点类型生效，含反向代理站点）。
+	// 避免 .env、.git、私钥、备份、依赖清单等被直接读取。
+	sb.WriteString("    # 安全兜底-凭证与版本库(.env/.git/私钥/证书/IDE配置等)\n")
+	sb.WriteString("    <FilesMatch \"" + apacheSensitiveSecretsRe + "\">\n")
+	sb.WriteString("        Require all denied\n")
+	sb.WriteString("    </FilesMatch>\n\n")
+	sb.WriteString("    # 安全兜底-依赖清单/备份/数据库/临时文件\n")
+	sb.WriteString("    <FilesMatch \"" + apacheSensitiveArtifactsRe + "\">\n")
+	sb.WriteString("        Require all denied\n")
+	sb.WriteString("    </FilesMatch>\n\n")
+	sb.WriteString("    # 安全兜底-敏感目录(.git/node_modules/缓存/构建目录等)\n")
+	sb.WriteString("    <DirectoryMatch \"" + apacheSensitiveDirsRe + "\">\n")
+	sb.WriteString("        Require all denied\n")
+	sb.WriteString("    </DirectoryMatch>\n\n")
 
 	// 重定向规则（Apache RewriteRule）
 	if len(s.Redirects) > 0 {
@@ -213,6 +232,11 @@ func genApacheVHost(s *model.Site, port int, names string, ssl bool) string {
 
 	// 单站安全片段（apache 版：安全规则直接内联，或 include 片段文件）
 	if inc := siteSecApacheBlock(s.ID); inc != "" {
+		sb.WriteString(inc)
+	}
+
+	// 拖拽验证码闸门（apache 版：mod_rewrite 内联）
+	if inc := genApacheCaptchaBlock(s.ID); inc != "" {
 		sb.WriteString(inc)
 	}
 

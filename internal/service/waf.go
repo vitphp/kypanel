@@ -23,6 +23,10 @@ import (
 
 const (
 	wafGlobalConfPath    = "/etc/nginx/lp_waf_global.conf" // nginx http 级 include
+	// nginxHashConfPath http 级哈希表尺寸配置（map_hash_max_size/bucket_size），须在任意 map 块之前 include。
+	// map 模块解析首个 map 时会以默认 2048 注册该 http 级指令；若我们再到 http 级设置就会报 duplicate，
+	// 放到 map 块内又会被忽略。故统一放独立文件、紧跟 "http {" 之后注入，确保早于所有 map。
+	nginxHashConfPath = "/etc/nginx/lp_hash.conf"
 	wafSiteConfDir       = "/etc/nginx/waf"                // 站点级 WAF 片段（nginx）
 	apacheWafConfPath    = "/etc/apache2/conf-enabled/lp_waf.conf"
 	apacheWafSiteConfDir = "/etc/apache2/waf" // 站点级 WAF 片段（apache）
@@ -706,6 +710,10 @@ func applyWAFConfig(force bool) error {
 	if err := os.WriteFile(wafGlobalConfPath, []byte(globalConf), 0o644); err != nil {
 		return err
 	}
+	// 确保 nginx.conf http 块 include 了 http 级哈希表尺寸（须在 WAF map 之前，幂等）
+	if err := ensureNginxHashInclude(); err != nil {
+		slog.Warn("注入 http 级哈希表尺寸配置失败", "err", err)
+	}
 	// 确保 nginx.conf http 块 include 了全局 WAF 配置（幂等）
 	if err := ensureNginxWAFInclude(); err != nil {
 		return err
@@ -760,6 +768,27 @@ func ApplyWAFConfig() error {
 }
 
 // ensureNginxWAFInclude 确保 nginx.conf 的 http 块 include 了全局 WAF 配置（幂等）
+// ensureNginxHashInclude 写入 http 级哈希表尺寸配置（map_hash_max_size/bucket_size），
+// 并幂等注入 nginx.conf 的 http 块最前（紧跟 "http {" 之后），确保早于所有 map 块（waf/sitesec）。
+// 否则 map 模块解析首个 map 时会以默认 2048 注册，导致大地图报 map_hash 警告或 duplicate。
+func ensureNginxHashInclude() error {
+	hashConf := "# kypanel http 级哈希表尺寸（自动生成，请勿手动修改）\nmap_hash_max_size 262144;\nmap_hash_bucket_size 256;\n"
+	if err := os.WriteFile(nginxHashConfPath, []byte(hashConf), 0o644); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(nginxConfFile)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	marker := "include " + nginxHashConfPath + ";"
+	if strings.Contains(content, marker) {
+		return nil
+	}
+	content = strings.Replace(content, "http {", "http {\n\t"+marker, 1)
+	return os.WriteFile(nginxConfFile, []byte(content), 0o644)
+}
+
 func ensureNginxWAFInclude() error {
 	data, err := os.ReadFile(nginxConfFile)
 	if err != nil {
@@ -804,6 +833,8 @@ func genNginxWAFGlobal() string {
 	sb.WriteString("# kypanel WAF 全局配置（自动生成，请勿手动修改）\n")
 
 	// IP 封禁 map（map 指令需要在 http 级定义）
+	// 注意：map_hash_max_size/bucket_size 仅在 http 级生效，已由 lp_sitesec_global.conf 统一设置，
+	// 此处不再重复（否则 nginx 报 duplicate directive）。该 http 级设置对所有 map 均生效。
 	blocks := wafIpBlockList()
 	allows := wafIpAllowList()
 	if len(blocks) > 0 || len(allows) > 0 {

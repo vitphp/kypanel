@@ -27,7 +27,7 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, gin.H{"rules": service.ListSecurityRulesByType(typ)})
 	})
 
-	// 新增规则（端口/IP/国家/运营商统一入口）
+	// 新增规则（端口/IP 统一入口）
 	g.POST("/security/rule/add", func(c *gin.Context) {
 		var req service.AddSecurityRuleReq
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -52,7 +52,7 @@ func setupSecurityRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, rule)
 	})
 
-	// 修改规则（端口/IP/国家/运营商统一入口；系统默认规则不可编辑）
+	// 修改规则（端口/IP 统一入口；系统默认规则不可编辑）
 	g.POST("/security/rule/update", func(c *gin.Context) {
 		var req service.AddSecurityRuleReq
 		// 用 query 拿 id，避免在请求体里嵌入同名字段导致 binding 校验问题

@@ -55,7 +55,7 @@ func setupSiteSecurityRoutes(g *gin.RouterGroup) {
 		}
 		var req struct {
 			Action        string `json:"action" binding:"required,oneof=allow block"`
-			MatchType     string `json:"match_type" binding:"required,oneof=ip cidr range country isp"`
+			MatchType     string `json:"match_type" binding:"required,oneof=ip cidr range"`
 			Content       string `json:"content" binding:"required"`
 			ExpireSeconds int    `json:"expire_seconds"`
 			Remark        string `json:"remark"`

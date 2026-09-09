@@ -404,8 +404,11 @@ func GenerateCronFromTemplate(req CronTemplateReq) (string, string, error) {
 
 	case "clear_log":
 		dir := filepath.Clean(req.Dir)
-		if !strings.HasPrefix(dir, "/") {
+		if dir == "" || dir == "/" || !strings.HasPrefix(dir, "/") {
 			return "", "", errors.New("日志目录无效")
+		}
+		if !dirOKRe.MatchString(dir) {
+			return "", "", errors.New("日志目录包含非法字符")
 		}
 		days := req.Days
 		if days <= 0 {

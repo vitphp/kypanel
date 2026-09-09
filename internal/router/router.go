@@ -42,6 +42,7 @@ func Setup(cfg *config.Config) *gin.Engine {
 
 	// 无需认证的路由
 	setupAuthRoutes(r)
+	setupSiteCaptchaRoutes(r) // 拖拽验证码公开接口（站点 nginx 同域反代暴露，须在 serveFrontend 前注册）
 
 	// 需要认证的路由：通用 API 路由组同时支持登录 JWT 和 type=api 的 API 令牌。
 	authGroup := r.Group("/api")

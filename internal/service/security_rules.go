@@ -23,10 +23,8 @@ const securityCmdTimeout = 15 * time.Second
 
 // 规则类型
 const (
-	RuleTypePort    = "port"
-	RuleTypeIP      = "ip"
-	RuleTypeCountry = "country"
-	RuleTypeISP     = "isp"
+	RuleTypePort = "port"
+	RuleTypeIP   = "ip"
 )
 
 // 动作
@@ -45,7 +43,7 @@ const (
 // SecurityRule 单条安全规则
 type SecurityRule struct {
 	ID         string   `json:"id"`
-	Type       string   `json:"type"`      // port / ip / country / isp
+	Type       string   `json:"type"`      // port / ip
 	Action     string   `json:"action"`    // allow / block
 	Direction  string   `json:"direction"` // in / out / both
 	Proto      string   `json:"proto"`     // port 类型: tcp / udp / tcpudp
@@ -65,11 +63,11 @@ type SecurityRulesResponse struct {
 
 // AddSecurityRuleReq 新增规则请求
 type AddSecurityRuleReq struct {
-	Type       string `json:"type" binding:"required,oneof=port ip country isp"`
+	Type       string `json:"type" binding:"required,oneof=port ip"`
 	Port       string `json:"port"`      // port 类型
 	Proto      string `json:"proto"`     // port 类型: tcp/udp/tcpudp
 	SourceIP   string `json:"source_ip"` // port 类型来源
-	Content    string `json:"content"`   // ip/country/isp 类型多行内容
+	Content    string `json:"content"`   // ip 类型多行内容
 	Action     string `json:"action" binding:"required,oneof=allow block"`
 	Direction  string `json:"direction" binding:"omitempty,oneof=in out both"`
 	Remark     string `json:"remark"`
@@ -281,7 +279,7 @@ func GetSecurityRules() []SecurityRule {
 	return ListSecurityRules()
 }
 
-// ListSecurityRulesByType 按类型返回规则，geo 表示 country+isp
+// ListSecurityRulesByType 按类型返回规则（port / ip / all）
 func ListSecurityRulesByType(typ string) []SecurityRule {
 	rules := ListSecurityRules()
 	if typ == "" || typ == "all" {
@@ -289,10 +287,6 @@ func ListSecurityRulesByType(typ string) []SecurityRule {
 	}
 	var out []SecurityRule
 	for _, r := range rules {
-		if typ == "geo" && (r.Type == RuleTypeCountry || r.Type == RuleTypeISP) {
-			out = append(out, r)
-			continue
-		}
 		if r.Type == typ {
 			out = append(out, r)
 		}
@@ -1179,7 +1173,7 @@ func addIptables(rs []firewallRule, out bool, verdict, fam string) {
 
 // ---------- 中间件匹配 ----------
 
-// HasAllowSecurityRule 是否存在 IP/国家/运营商 allow 规则（白名单模式）
+// HasAllowSecurityRule 是否存在 IP allow 规则（白名单模式）
 // 端口 allow 规则不触发白名单，避免误锁
 func HasAllowSecurityRule() bool {
 	for _, r := range ListSecurityRules() {
@@ -1190,12 +1184,9 @@ func HasAllowSecurityRule() bool {
 	return false
 }
 
-// MatchSecurityAny 判断 IP 是否命中规则（IP 规则 + 国家/运营商规则）
+// MatchSecurityAny 判断 IP 是否命中规则（仅 IP 规则）
 func MatchSecurityAny(ipStr, action string) bool {
-	if MatchSecurityRule(ipStr, action) {
-		return true
-	}
-	return MatchSecurityGeoRule(ipStr, action)
+	return MatchSecurityRule(ipStr, action)
 }
 
 // MatchSecurityRule 判断某个 IP 是否命中 IP 规则
@@ -1211,38 +1202,6 @@ func MatchSecurityRule(ipStr, action string) bool {
 		for _, item := range r.Content {
 			if ipMatchesCIDR(ip, item) {
 				return true
-			}
-		}
-	}
-	return false
-}
-
-// MatchSecurityGeoRule 根据国家/运营商匹配
-func MatchSecurityGeoRule(ipStr, action string) bool {
-	if !IpRegionEnabled() {
-		return false
-	}
-	region, ok := SearchIp(ipStr)
-	if !ok || region == nil {
-		return false
-	}
-	for _, r := range ListSecurityRules() {
-		if r.Action != action || (r.Type != RuleTypeCountry && r.Type != RuleTypeISP) {
-			continue
-		}
-		for _, item := range r.Content {
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-			if r.Type == RuleTypeCountry {
-				if strings.Contains(region.Country, item) || strings.Contains(item, region.Country) {
-					return true
-				}
-			} else {
-				if strings.Contains(region.ISP, item) || strings.Contains(item, region.ISP) {
-					return true
-				}
 			}
 		}
 	}
