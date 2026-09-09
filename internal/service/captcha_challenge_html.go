@@ -10,120 +10,104 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 <title>安全验证</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; -moz-user-select: none; user-select: none; }
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; }
   body {
-    display: flex; align-items: center; justify-content: center;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: radial-gradient(1200px 800px at 20% 0%, #2c3a5e 0%, #171c2b 55%, #0f1420 100%);
-    color: #e8ecf3; overflow: hidden;
+    background: linear-gradient(160deg, #f2f5fa 0%, #e4eaf3 100%);
+    color: #333; overflow: hidden;
   }
-  /* 漂浮光斑背景 */
-  body::before, body::after {
-    content: ''; position: fixed; border-radius: 50%; filter: blur(80px); opacity: .35; z-index: 0;
-  }
-  body::before { width: 320px; height: 320px; background: #4f8cff; top: -90px; left: -60px; }
-  body::after { width: 260px; height: 260px; background: #7c5cff; bottom: -80px; right: -50px; }
-
+  /* 卡片：fixed + inset 0 + margin:auto —— 无论宿主容器是否 flex / 有无 height 链都绝对居中 */
   .wrap {
-    position: relative; z-index: 1;
-    width: 340px; max-width: calc(100vw - 28px);
-    background: rgba(255,255,255,.08);
-    border: 1px solid rgba(255,255,255,.14);
-    border-radius: 18px; overflow: hidden;
-    box-shadow: 0 24px 70px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.12);
-    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    position: fixed; left: 0; right: 0; top: 0; bottom: 0; margin: auto;
+    width: 340px; max-width: calc(100vw - 24px); height: fit-content;
+    background: #fff; border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(30,50,90,.18);
+    border: 1px solid rgba(30,50,90,.06);
+    padding-bottom: 6px;
   }
   .cap-head {
     display: flex; align-items: center; gap: 8px;
-    padding: 16px 18px 12px; font-size: 16px; font-weight: 600; color: #fff;
+    padding: 16px 18px 12px; font-size: 15px; font-weight: 600; color: #1f2b3d;
   }
   .cap-head .shield {
-    width: 26px; height: 26px; flex: 0 0 26px; border-radius: 8px;
-    background: linear-gradient(135deg,#4f8cff,#7c5cff);
-    display: flex; align-items: center; justify-content: center; font-size: 14px;
-    box-shadow: 0 4px 12px rgba(79,140,255,.35);
+    width: 24px; height: 24px; flex: 0 0 24px; border-radius: 7px;
+    background: linear-gradient(135deg,#409eff,#5b7cfa);
+    display: flex; align-items: center; justify-content: center;
   }
-  .cap-head small { font-weight: 400; color: rgba(255,255,255,.5); font-size: 12px; margin-left: auto; }
+  .cap-head .shield svg { width: 14px; height: 14px; }
+  .cap-head small { font-weight: 400; color: #9aa6b6; font-size: 12px; margin-left: auto; white-space: nowrap; }
 
   .cap-box {
-    position: relative; margin: 0 18px; border-radius: 12px; overflow: hidden;
+    position: relative; margin: 0 18px; border-radius: 10px; overflow: hidden;
     background-size: cover; background-position: center; user-select: none;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,.1);
+    border: 1px solid #e8edf4;
   }
   .cap-piece {
     position: absolute; top: 0; left: 0;
-    filter: drop-shadow(0 3px 6px rgba(0,0,0,.35));
-    cursor: grab; user-select: none; touch-action: none;
-    opacity: .94; transition: opacity .2s;
+    filter: drop-shadow(0 4px 8px rgba(0,0,0,.3));
+    cursor: grab; user-select: none; touch-action: none; opacity: .92;
+    transition: opacity .2s;
   }
   .cap-piece.on { opacity: 1; }
   .cap-loading {
     position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px;
     align-items: center; justify-content: center;
-    background: rgba(20,24,38,.72); color: #aeb6c8; font-size: 13px; z-index: 2;
+    background: rgba(255,255,255,.82); color: #7a8798; font-size: 13px; z-index: 2;
   }
   .cap-loading .spin {
-    width: 28px; height: 28px; border-radius: 50%;
-    border: 3px solid rgba(255,255,255,.15); border-top-color: #7c9cff;
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 3px solid #e8eef6; border-top-color: #409eff;
     animation: capspin .8s linear infinite;
   }
   @keyframes capspin { to { transform: rotate(360deg); } }
 
-  .cap-bar { position: relative; margin: 14px 18px 0; height: 46px; }
+  .cap-bar { position: relative; margin: 14px 18px 0; height: 42px; }
   .cap-track {
     position: absolute; inset: 0;
-    background: rgba(255,255,255,.06);
-    border: 1px solid rgba(255,255,255,.14);
-    border-radius: 23px; overflow: hidden;
+    background: #eef2f7; border: 1px solid #dfe6ef; border-radius: 21px; overflow: hidden;
   }
   .cap-fill {
     position: absolute; left: 0; top: 0; bottom: 0; width: 0;
-    background: linear-gradient(90deg, #4f8cff, #6fb1ff);
-    border-radius: 23px; opacity: .85; transition: width .06s linear;
+    background: linear-gradient(90deg, #79b7ff, #409eff);
+    border-radius: 21px; transition: width .06s linear;
   }
   .cap-handle {
-    position: absolute; top: 2px; left: 2px; width: 42px; height: 42px;
-    background: linear-gradient(135deg,#fff,#eef1f7);
-    border-radius: 50%; z-index: 2;
-    display: flex; align-items: center; justify-content: center;
-    color: #4f8cff; cursor: grab; touch-action: none;
-    box-shadow: 0 3px 10px rgba(0,0,0,.25);
-    transition: transform .15s, box-shadow .15s;
+    position: absolute; top: 2px; left: 2px; width: 38px; height: 38px;
+    background: #fff; border: 1px solid #c9d6e4; border-radius: 50%;
+    z-index: 2; display: flex; align-items: center; justify-content: center;
+    color: #409eff; cursor: grab; touch-action: none;
+    box-shadow: 0 3px 8px rgba(50,80,120,.2);
+    transition: transform .12s, box-shadow .12s;
   }
-  .cap-handle:active { cursor: grabbing; transform: scale(1.06); box-shadow: 0 5px 16px rgba(0,0,0,.35); }
+  .cap-handle:active { cursor: grabbing; transform: scale(1.05); box-shadow: 0 5px 14px rgba(50,80,120,.28); }
   .cap-handle svg { width: 20px; height: 20px; }
   .cap-tip {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    gap: 6px; font-size: 13px; pointer-events: none; z-index: 1;
-    color: rgba(255,255,255,.55); transition: color .2s;
+    gap: 6px; font-size: 13px; pointer-events: none; z-index: 1; color: #7a8798;
+    transition: color .2s; letter-spacing: 1px;
   }
-  .cap-tip.ok { color: #4cd98a; }
-  .cap-tip.fail { color: #ff6b6b; }
+  .cap-tip.ok { color: #34c77b; }
+  .cap-tip.fail { color: #f56c6c; }
 
   .cap-foot {
     display: flex; align-items: center; justify-content: space-between;
-    margin: 8px 18px 14px;
+    margin: 8px 18px 12px;
   }
-  .cap-hint { font-size: 11px; color: rgba(255,255,255,.35); }
+  .cap-hint { font-size: 11px; color: #a6b0bf; }
   .cap-refresh {
-    width: 34px; height: 34px; border-radius: 50%;
-    background: rgba(255,255,255,.08); color: rgba(255,255,255,.7);
+    width: 32px; height: 32px; border-radius: 50%;
+    background: #f2f5fa; color: #7a8798;
     display: flex; align-items: center; justify-content: center; cursor: pointer;
-    border: 1px solid rgba(255,255,255,.12);
-    transition: background .15s, transform .15s;
+    transition: background .15s, color .15s, transform .15s;
   }
-  .cap-refresh svg { width: 16px; height: 16px; }
-  .cap-refresh:hover { background: rgba(255,255,255,.15); }
+  .cap-refresh svg { width: 15px; height: 15px; }
+  .cap-refresh:hover { background: #e8eef6; color: #409eff; }
   .cap-refresh:active { transform: rotate(180deg); }
 
-  /* 成功状态：整个卡片浮起淡出 */
-  .wrap.done {
-    animation: capdone .45s ease forwards;
-    pointer-events: none;
-  }
+  .wrap.done { animation: capdone .4s ease forwards; pointer-events: none; }
   @keyframes capdone {
     0% { transform: scale(1); opacity: 1; }
-    100% { transform: scale(1.04); opacity: 0; }
+    100% { transform: scale(1.03); opacity: 0; }
   }
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
@@ -133,7 +117,7 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 <body>
   <div class="wrap" id="wrap">
     <div class="cap-head">
-      <span class="shield">🛡</span>
+      <span class="shield"><svg viewBox="0 0 24 24" fill="#fff"><path d="M12 1l9 4v6c0 5.5-3.8 10.7-9 12-5.2-1.3-9-6.5-9-12V5l9-4zm-1 15.5l6.5-6.5-1.4-1.4L11 13.7 8.4 11.1 7 12.5l4 4z"/></svg></span>
       安全验证
       <small>拖动滑块完成拼图</small>
     </div>
@@ -143,11 +127,11 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     </div>
     <div class="cap-bar">
       <div class="cap-track" id="track">
-        <div class="cap-tip" id="tip">按住滑块向右拖动</div>
+        <div class="cap-tip" id="tip">向右拖动滑块完成拼图</div>
         <div class="cap-fill" id="fill"></div>
       </div>
       <div class="cap-handle" id="handle" role="slider" aria-label="拖动滑块完成拼图" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 12h14M13 5l7 7-7 7"/>
         </svg>
       </div>
@@ -195,7 +179,7 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 
   function loadPuzzle() {
     loading.style.display = 'flex';
-    setTip('按住滑块向右拖动');
+    setTip('向右拖动滑块完成拼图');
     piece.classList.remove('on');
     apiTry(puzzleURL()).then(function (d) {
       if (!d || !d.token) return apiTry(puzzleURLFallback());
@@ -264,9 +248,9 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
       return ok;
     }).then(function (ok) {
       if (ok) {
-        setTip('✓ 验证通过', 'ok');
+        setTip('验证通过', 'ok');
         wrap.classList.add('done');
-        setTimeout(function () { location.reload(); }, 480);
+        setTimeout(function () { location.reload(); }, 420);
       } else {
         setTip('验证失败，请重试', 'fail');
         loadPuzzle();

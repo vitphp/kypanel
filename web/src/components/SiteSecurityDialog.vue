@@ -334,12 +334,12 @@
         </el-tab-pane>
 
         <!-- ===== Tab 6: 拖拽验证码 ===== -->
-        <el-tab-pane label="拖拽验证码" name="captcha">
+        <el-tab-pane label="验证码" name="captcha">
           <div class="ss-form">
             <el-form label-width="150px" size="small">
-              <el-form-item label="启用拖拽验证码">
+              <el-form-item label="启用验证码">
                 <el-switch v-model="cfg.captcha_enabled" />
-                <span class="ss-hint">开启后访客须完成拖拽拼图验证才能访问站点（nginx 边缘层拦截，与访问量无关）</span>
+                <span class="ss-hint">开启后访客须完成拼图验证才能访问站点（nginx 边缘层拦截，与访问量无关）</span>
               </el-form-item>
               <el-form-item label="被 CC 攻击自动开启">
                 <el-switch v-model="cfg.captcha_auto_on_cc" :disabled="!cfg.cc_enabled" />
@@ -350,8 +350,6 @@
                 <span class="ss-hint">秒，过期后需重新验证</span>
               </el-form-item>
             </el-form>
-            <el-alert type="info" :closable="false" show-icon title="工作原理"
-              description="访客首次访问被 nginx 拦截并展示拼图挑战页；拖拽对齐成功后，面板下发 HttpOnly Cookie，之后该站点请求全部放行，不会随流量变大而变慢。" />
             <div style="margin-top: 12px">
               <el-button size="small" @click="previewCaptcha">预览验证码</el-button>
             </div>
