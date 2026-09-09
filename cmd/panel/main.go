@@ -312,6 +312,14 @@ func main() {
 			useTLS = false
 		}
 	}
+	// ③ TLS 硬化：仅启用 TLS 1.2/1.3，丢弃过时弱协议（TLS1.0/1.1）与旧密码套件，
+	// 降低面板通信被降级攻击/旧加密漏洞破解的风险。Go 默认在 TLS1.3 下会忽略 CipherSuites，
+	// 故此处只显式限定 MinVersion（1.2 为下限，1.3 自动启用）。
+	if useTLS {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
 	var listenErr error
 	if useTLS {
 		listenErr = srv.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile)

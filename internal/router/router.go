@@ -30,7 +30,8 @@ func Setup(cfg *config.Config) *gin.Engine {
 	// 在注册路由前记录安全入口，供登录/验证码接口路径内嵌入口值使用
 	currentEntrance = cfg.SecurityEntrance
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery(), middleware.CORS())
+	r.Use(gin.Logger(), gin.Recovery(), middleware.CORS(), middleware.SecurityHeaders(),
+		middleware.StaticAssetsCache(), middleware.CompressAssets())
 
 	// 健康检查
 	r.GET("/api/ping", func(c *gin.Context) {
