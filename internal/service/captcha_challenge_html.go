@@ -42,8 +42,10 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
 
   .cap-box {
     position: relative; margin: 0 18px; border-radius: 10px; overflow: hidden;
+    width: 100%; max-width: 320px; aspect-ratio: 320 / 160;
     background-size: cover; background-position: center; user-select: none;
     border: 1px solid #e8edf4;
+    box-sizing: border-box;
   }
   .cap-piece {
     position: absolute; top: 0; left: 0;
@@ -192,13 +194,16 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     }).then(function (d) {
       if (!d || !d.token) { setTip('验证码加载失败，请点刷新重试', 'fail'); loading.style.display = 'none'; return; }
       cur = d;
-      box.style.width = d.width + 'px';
-      box.style.height = d.height + 'px';
+      // 容器尺寸由 .cap-box CSS 自适应（max-width:320 + aspect-ratio 2:1），不再写死像素，
+      // 避免窄屏/不同 wrap 宽度下图框溢出或错位。生成图后端固定 320×160 + background-size:cover
+      // 会自动按比例缩放显示。piece 尺寸也按容器/原宽比等比缩放，保持视觉一致。
+      var scale0 = box.clientWidth / cur.width;
+      if (!scale0 || !isFinite(scale0)) scale0 = 1;
       box.style.backgroundImage = 'url(' + d.bg + ')';
       piece.src = d.piece;
-      piece.style.width = d.piece_size + 'px';
-      piece.style.height = d.piece_size + 'px';
-      piece.style.top = d.target_y + 'px';
+      piece.style.width = (d.piece_size * scale0) + 'px';
+      piece.style.height = (d.piece_size * scale0) + 'px';
+      piece.style.top = (d.target_y / d.height * 100) + '%';
       piece.style.left = '0px';
       setHandle(0);
       handle.setAttribute('aria-valuemax', String(cur.width - cur.piece_size));
@@ -208,7 +213,9 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     });
   }
 
-  function maxX() { return cur ? (cur.width - cur.piece_size) : 0; }
+  // 拼图块横向可移动的最大像素 = 容器实际宽 - 块尺寸。
+// 用容器 clientWidth 而非 cur.width=320，使容器自适应后块位置仍正确。
+function maxX() { return cur ? Math.max(0, box.clientWidth - cur.piece_size * (box.clientWidth / cur.width)) : 0; }
   function trackW() { return track.clientWidth - handle.clientWidth; }
 
   function setHandle(px) {
@@ -218,7 +225,9 @@ const SiteCaptchaChallengeHTML = `<!DOCTYPE html>
     fill.style.width = px + 'px';
     handle.setAttribute('aria-valuenow', String(Math.round(px)));
     var ratio = trackW() > 0 ? px / trackW() : 0;
-    piece.style.left = Math.round(ratio * maxX()) + 'px';
+    // 用容器实际宽度计算 piece 位置，并按 clientWidth/cur.width 缩放（容器变小则 piece 等比靠拢）
+    var scale = cur.width > 0 ? box.clientWidth / cur.width : 1;
+    piece.style.left = (ratio * (cur.width - cur.piece_size) * scale) + 'px';
   }
 
   function onDown(e) {
