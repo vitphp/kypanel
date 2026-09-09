@@ -63,3 +63,36 @@ type MailDnsGuide struct {
 	// 说明文字
 	Notes []string `json:"notes"`
 }
+
+// Mailbox 一个邮箱账号。地址 = Name + "@" + 所属 Domain。
+// 例如 Domain=example.com 下，Name=admin → 邮箱 admin@example.com。
+type Mailbox struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	DomainID     uint      `gorm:"not null;index" json:"domain_id"`
+	Name         string    `gorm:"size:64;not null" json:"name"` // @ 前的部分（不含 @）
+	Domain       string    `gorm:"size:255" json:"domain"`       // 冗余存域名字符串，方便展示
+	PasswordHash string    `gorm:"size:255" json:"-"`
+	Enabled      bool      `gorm:"default:true" json:"enabled"`
+	QuotaMb      int64     `gorm:"default:1024" json:"quota_mb"` // 该账号容量上限 MB
+	Remark       string    `gorm:"size:255" json:"remark"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Address 返回完整邮箱地址
+func (m *Mailbox) Address() string { return m.Name + "@" + m.Domain }
+
+// TableName 指定表名
+func (Mailbox) TableName() string { return "mail_mailboxes" }
+
+// MailboxView 返回给前端的展示视图（不含密码）
+type MailboxView struct {
+	ID        uint      `json:"id"`
+	Domain    string    `json:"domain"`
+	Name      string    `json:"name"`
+	Address   string    `json:"address"`
+	Enabled   bool      `json:"enabled"`
+	QuotaMb   int64     `json:"quota_mb"`
+	Remark    string    `json:"remark"`
+	CreatedAt time.Time `json:"created_at"`
+}

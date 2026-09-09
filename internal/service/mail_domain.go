@@ -206,3 +206,58 @@ func MailDomainDnsGuideByID(id uint) (*model.MailDnsGuide, error) {
 	}
 	return BuildMailDnsGuide(rec.Domain)
 }
+
+// NewDomainGuide 供"添加域名向导"使用：域名还未入库，直接按填写的域名生成配置值。
+// 返回前端第2步要展示/复制的三条记录（含本机 IP 与各记录具体值）。
+type NewDomainGuide struct {
+	Domain     string `json:"domain"`
+	MailServer string `json:"mail_server"` // 本机公网IP
+	SpfValue   string `json:"spf_value"`
+	MxHostName string `json:"mx_host_name"` // mail.<domain>
+}
+
+// BuildNewDomainGuide 计算给定域名在向导中要配置的三条记录值（不依赖数据库）。
+func BuildNewDomainGuide(domain string) NewDomainGuide {
+	srv := MailDomainDNSServer()
+	hostName := "mail." + domain
+	return NewDomainGuide{
+		Domain:     domain,
+		MailServer: srv,
+		SpfValue:   "v=spf1 ip4:" + srv + " ~all",
+		MxHostName: hostName,
+	}
+}
+
+// CheckDomainMxReady 检测"给定域名"（可尚未入库）的 MX 是否正确指向本机。
+// 用于添加向导第3步的通过判定；不依赖 mail_domains 表。
+// 返回 ready 是否通过，以及说明文字。
+func CheckDomainMxReady(domain string) (ready bool, detail string) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if !mailDomainRe.MatchString(domain) {
+		return false, "域名格式不正确，请返回第 1 步重新填写"
+	}
+	local := detectMailServerPublicIP()
+	if local == "" {
+		local = detectMailServerLocalIP()
+	}
+	mxs, err := net.LookupMX(domain)
+	if err != nil || len(mxs) == 0 {
+		return false, "还没检测到该域名的 MX 记录。请先到域名服务商添加第 2 步的 A + MX，然后点「再检测一次」（DNS 全球传播通常几分钟）"
+	}
+	if local == "" {
+		return false, "无法确认本机公网 IP，暂时无法判定；请稍后再试"
+	}
+	for _, m := range mxs {
+		host := strings.TrimSuffix(m.Host, ".")
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			continue
+		}
+		for _, ip := range ips {
+			if ip.String() == local {
+				return true, "检测通过：邮件已能投递到本服务器"
+			}
+		}
+	}
+	return false, "已检测到 MX，但它没有指向本服务器（" + local + "）。请检查 A 记录 mail.域名 是否解析到本机，并让 MX 指向 mail.域名。"
+}

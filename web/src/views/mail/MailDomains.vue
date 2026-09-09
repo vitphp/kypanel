@@ -4,7 +4,7 @@
     <div class="md-toolbar">
       <div class="md-toolbar-left">
         <span class="md-title">域名邮箱</span>
-        <span class="md-subtitle">添加你要开通邮箱的域名，再按其 DNS 解析引导完成绑定</span>
+        <span class="md-subtitle">添加一个域名 → 分步配好解析（面板会自动检测）→ 配好的才能添加用户</span>
       </div>
       <el-button type="primary" :icon="Plus" @click="openAdd">添加域名</el-button>
     </div>
@@ -12,330 +12,465 @@
     <!-- 域名列表 -->
     <el-card shadow="never" class="md-card">
       <el-table v-loading="loading" :data="list" style="width: 100%">
-        <el-table-column prop="domain" label="域名" min-width="180">
+        <el-table-column prop="domain" label="域名" min-width="200">
           <template #default="{ row }">
             <div class="md-domain-cell">
               <span class="md-domain-name">{{ row.domain }}</span>
-              <el-tag v-if="row.enabled" type="success" size="small" effect="light">启用</el-tag>
-              <el-tag v-else type="info" size="small" effect="light">停用</el-tag>
+              <el-tag v-if="statusMap[row.id]?.ready" type="success" size="small" effect="light">已对接</el-tag>
+              <el-tag v-else type="warning" size="small" effect="light" @click="checkOne(row)">未对接</el-tag>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="对接状态" min-width="220">
+          <template #default="{ row }">
+            <template v-if="statusMap[row.id]?.ready">
+              <div class="md-status-ok">✓ 已正确指向本机，能收信，可添加用户</div>
+            </template>
+            <template v-else>
+              <div class="md-status-bad" :title="statusMap[row.id]?.not_ready_msg || statusMap[row.id]?.detail || '还未检测'">
+                <span>{{ statusMap[row.id]?.detail || statusMap[row.id]?.not_ready_msg || '检测中…' }}</span>
+              </div>
+              <el-button link type="primary" size="small" @click="openDnsGuide(row)">去配置解析</el-button>
+            </template>
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-        <el-table-column label="DNS 绑定" min-width="160">
+        <el-table-column label="操作" width="260" align="right">
           <template #default="{ row }">
-            <div class="md-dns-status">
-              <span class="md-dns-chip" :class="{ ok: row.mx_configured }">MX{{ row.mx_configured ? '✓' : '' }}</span>
-              <span class="md-dns-chip" :class="{ ok: row.spf_configured }">SPF{{ row.spf_configured ? '✓' : '' }}</span>
-              <span class="md-dns-chip" :class="{ ok: row.dkim_configured }">DKIM{{ row.dkim_configured ? '✓' : '' }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="200" align="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openDns(row)">绑定/解析</el-button>
-            <el-button link type="warning" size="small" @click="toggleEnabled(row)">
-              {{ row.enabled ? '停用' : '启用' }}
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="!statusMap[row.id]?.ready"
+              @click="openAccounts(row)"
+            >
+              添加用户
             </el-button>
+            <el-button link type="warning" size="small" @click="toggleEnabled(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
             <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
-    <!-- 添加域名 -->
-    <el-dialog v-model="addVisible" title="添加邮箱域名" width="min(520px, 92vw)" align-center>
-      <el-form label-width="90px">
-        <el-form-item label="域名" required>
-          <el-input v-model="addForm.domain" placeholder="例：example.com" @keyup.enter="submitAdd" />
-          <div class="md-hint">填写你想开通邮箱的根域名（不带 www / @ 前缀）。</div>
-        </el-form-item>
-        <el-form-item label="单账号容量">
-          <el-input-number v-model="addForm.quota" :min="1" :max="102400" style="width: 180px" />
-          <span class="md-hint" style="margin-left: 8px">MB</span>
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="addForm.remark" placeholder="可选" />
-        </el-form-item>
-      </el-form>
+    <!-- ===== 添加域名：3 步向导 ===== -->
+    <el-dialog v-model="addVisible" :title="addStep === 1 ? '第 1 步 · 填写你的域名' : addStep === 2 ? '第 2 步 · 去域名服务商添加解析' : '第 3 步 · 检测对接结果'" width="min(640px, 94vw)" align-center :close-on-click-modal="false">
+      <!-- 步骤指示器 -->
+      <el-steps :active="addStep - 1" align-center finish-status="success" class="md-steps">
+        <el-step title="填域名" />
+        <el-step title="配解析" />
+        <el-step title="自动检测" />
+      </el-steps>
+
+      <!-- STEP 1：填域名 -->
+      <div v-if="addStep === 1" class="md-step-body">
+        <div class="md-field-hint">填一个你想开通邮箱的域名（例如 yoursite.com）。</div>
+        <el-input v-model="addForm.domain" placeholder="example.com" size="large" @keyup.enter="goAddStep2" />
+        <div v-if="addErr" class="md-err">{{ addErr }}</div>
+      </div>
+
+      <!-- STEP 2：配置 -->
+      <div v-else-if="addStep === 2" class="md-step-body">
+        <div class="md-step2-tip">请到你的<span class="md-link">域名服务商</span>（阿里云/腾讯云/Cloudflare）后台「DNS 解析」里，添加下面 {{ guide.needTxt ? 3 : 2 }} 条记录，复制「值」粘进服务商对应框即可。</div>
+        <div class="md-guide-rec">
+          <div class="md-rec-head"><b>记录 1</b><span class="md-rec-why">让 mail.域名 能找到这台服务器（收信用）</span></div>
+          <div v-for="(f, j) in recFields1" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
+        </div>
+        <div class="md-guide-rec">
+          <div class="md-rec-head"><b>记录 2</b><span class="md-rec-why">让全网把信投到这台服务器（收信用）</span></div>
+          <div v-for="(f, j) in recFields2" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
+        </div>
+        <div class="md-guide-rec">
+          <div class="md-rec-head"><b>记录 3</b><span class="md-rec-why">让这台服务器能发信、不被当垃圾（发信用）</span></div>
+          <div v-for="(f, j) in recFields3" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
+        </div>
+        <div class="md-step2-foot">这 3 条都加到服务商后，点「我已添加完，下一步」。</div>
+      </div>
+
+      <!-- STEP 3：自动检测 -->
+      <div v-else class="md-step-body">
+        <div class="md-checking" :class="{ ok: addReady, checking: addChecking }">
+          <template v-if="addChecking"><el-icon class="is-loading"><Loading /></el-icon> 正在检测你的解析是否生效…</template>
+          <template v-else-if="addReady"><el-icon><CircleCheckFilled /></el-icon> 检测通过！</template>
+          <template v-else><el-icon><WarningFilled /></el-icon> 还没检测通过</template>
+        </div>
+        <div class="md-check-detail">{{ addCheckDetail }}</div>
+        <div v-if="addChecking" class="md-check-sub">每几秒自动重测。DNS 全球生效通常几分钟，若一直不通过请确认你确实在服务商后台添加了上面的记录。</div>
+        <div v-if="!addReady && !addChecking" class="md-check-sub">可再等一会儿，DNS 仍在传播；面板会继续自动检测。</div>
+      </div>
+
       <template #footer>
-        <el-button @click="addVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submitAdd">确认添加</el-button>
+        <template v-if="addStep === 1">
+          <el-button @click="addVisible = false">取消</el-button>
+          <el-button type="primary" :loading="genGuideLoading" @click="goAddStep2">下一步</el-button>
+        </template>
+        <template v-else-if="addStep === 2">
+          <el-button @click="addStep = 1">上一步</el-button>
+          <el-button type="primary" @click="goAddStep3">我已添加完，下一步</el-button>
+        </template>
+        <template v-else>
+          <el-button @click="addStep = 2">上一步（回去改配置）</el-button>
+          <el-button type="primary" :disabled="!addReady" :loading="saving" @click="confirmAdd">检测通过，确认添加</el-button>
+        </template>
       </template>
     </el-dialog>
 
-    <!-- DNS 绑定引导（小白版：不出现任何 DNS 黑话，每条都拆成服务商后台要填的字段） -->
-    <el-dialog v-model="dnsVisible" title="把你的域名接到这台服务器" width="min(720px, 96vw)" align-center>
-      <template v-if="dnsGuide">
-        <!-- 用途选择：只收 / 只发 / 都要（只问一次用途，引导对应项） -->
-        <el-radio-group v-model="dnsPurpose" class="md-purpose">
-          <el-radio-button value="receive">只要收信</el-radio-button>
-          <el-radio-button value="send">只要发信</el-radio-button>
-          <el-radio-button value="both">收和发都要</el-radio-button>
-        </el-radio-group>
+    <!-- DNS 引导（用于列表里"未对接"时点开看配置，复用配置展示） -->
+    <el-dialog v-model="dnsGuideVisible" title="去配置解析" width="min(620px, 92vw)" align-center>
+      <div v-if="dnsGuideData" class="md-dnsguide-body">
+        <div v-for="(f, j) in dnsGuideData" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
+      </div>
+      <div class="md-dnsguide-foot">
+        <el-button :loading="checking" @click="checkOne(currentRow)">再检测一次</el-button>
+        <span v-if="currentRow && statusMap[currentRow.id]?.ready" class="md-status-ok" style="font-size:13px">✓ 已对接</span>
+      </div>
+    </el-dialog>
 
-        <!-- 按用途分组引导：每条都拆成服务商后台的字段 + 一键复制 -->
-        <div v-for="(grp, gi) in dnsGroups" :key="gi" class="md-dns-group" :class="'md-group-' + grp.key">
-          <div class="md-group-head">
-            <span class="md-group-badge" :class="grp.key">{{ grp.badge }}</span>
-            <span class="md-group-title">{{ grp.title }}</span>
+    <!-- ===== 添加用户 / 管理账号 ===== -->
+    <el-dialog v-model="accountsVisible" :title="`账号管理 · ${currentDomainName}`" width="min(720px, 96vw)" align-center>
+      <el-tabs v-model="accountTab">
+        <!-- 单个添加 -->
+        <el-tab-pane label="单个添加" name="single">
+          <div class="acc-form">
+            <div class="acc-row"><span class="acc-label">邮箱名</span><el-input v-model="accSingle.name" placeholder="如 admin（将创建 admin@域名）" style="max-width:360px" /></div>
+            <div class="acc-row"><span class="acc-label">密码</span><el-input v-model="accSingle.password" type="password" show-password placeholder="登录密码" style="max-width:360px" /></div>
+            <div class="acc-row"><span class="acc-label">容量(MB)</span><el-input-number v-model="accSingle.quota" :min="1" :max="102400" style="max-width:200px" /></div>
+            <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddOne">添加这个账号</el-button></div>
           </div>
-
-          <div class="md-dns-list">
-            <div v-for="(r, i) in grp.rows" :key="i" class="md-dns-row">
-              <div class="md-dns-row-head">
-                <span class="md-dns-step-tag must">{{ r.num }}</span>
-              </div>
-              <div class="md-dns-title">{{ r.title }}</div>
-              <div class="md-dns-fields-title">打开服务商后台 → 添加解析 → 按下面填：</div>
-              <div v-for="(s, j) in r.steps" :key="j" class="md-dns-field-row">
-                <span class="md-dns-field-label">{{ s.label }}</span>
-                <span class="md-dns-field-value">{{ s.value }}</span>
-              </div>
-              <div class="md-dns-copybar">
-                <el-button size="small" type="primary" plain @click="copy(r.steps[r.steps.length - 1].value)">
-                  复制「记录值」
-                </el-button>
-                <span class="md-dns-copy-tip">点击后到服务商后台"记录值"框粘进去</span>
-              </div>
+        </el-tab-pane>
+        <!-- 批量 -->
+        <el-tab-pane label="批量添加" name="batch">
+          <div class="acc-batch-tip">每行一个，格式：<code>邮箱名 密码</code>（或 <code>邮箱名:密码</code>）</div>
+          <el-input v-model="accBatch.lines" type="textarea" :rows="6" placeholder="admin1 密码123&#10;admin2 密码456&#10;sales1:pass888" />
+          <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddBatch">批量添加</el-button></div>
+        </el-tab-pane>
+        <!-- 随机 -->
+        <el-tab-pane label="随机生成" name="random">
+          <div class="acc-rand-grid">
+            <div class="acc-row"><span class="acc-label">前缀</span><el-input v-model="accRandom.prefix" placeholder="可选，如 vip" style="max-width:160px" /></div>
+            <div class="acc-row"><span class="acc-label">随机部分位数</span><el-input-number v-model="accRandom.length" :min="1" :max="16" /></div>
+            <div class="acc-row"><span class="acc-label">字符</span>
+              <el-select v-model="accRandom.digit" style="width:140px">
+                <el-option label="字母+数字" :value="0" />
+                <el-option label="纯数字" :value="1" />
+                <el-option label="纯字母" :value="2" />
+              </el-select>
             </div>
+            <div class="acc-row"><span class="acc-label">生成数量</span><el-input-number v-model="accRandom.count" :min="1" :max="200" /></div>
+            <div class="acc-row"><span class="acc-label">统一密码</span><el-input v-model="accRandom.password" placeholder="留空则自动生成" style="max-width:200px" /></div>
+            <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddRandom">生成账号</el-button></div>
           </div>
-        </div>
+        </el-tab-pane>
+      </el-tabs>
 
-        <!-- 操作指引 + 自动检测状态（打开即检，不用按钮） -->
-        <div class="md-how">
-          <div class="md-how-title">怎么去服务商后台？</div>
-          <ol class="md-how-list">
-            <li>登录你买域名时的<span class="md-link">服务商</span>（阿里云 / 腾讯云 / Cloudflare 等）</li>
-            <li>找到「<span class="md-link">DNS 解析</span> / <span class="md-link">域名解析</span>」菜单</li>
-            <li>点「<span class="md-link">添加记录</span>」</li>
-            <li>照着上面"打开服务商后台 → 添加解析 → 按下面填"里每一项的字段，一项一项填进去</li>
-          </ol>
-          <div class="md-checkbar-inline">
-            <span v-if="checking" class="md-check-result">⏳ 正在检测你的解析是否生效…</span>
-            <span v-else-if="checkResult === true" class="md-check-result ok">✓ 检测到了！你的域名已经能往本服务器收信（DNS 全球传播通常几分钟）</span>
-            <span v-else-if="checkResult === false" class="md-check-result bad">⏳ 暂时还没检测到（可能你刚配完 DNS 还在传播，关闭弹窗稍等再打开会自动重查）</span>
-            <span v-else class="md-check-result">检测中…</span>
-          </div>
+      <!-- 生成结果 / 账号列表 -->
+      <template v-if="accResult.length">
+        <div class="acc-result-title">本次已生成（请复制保存）：</div>
+        <div class="acc-result-box">
+          <div v-for="(a, i) in accResult" :key="i" class="acc-result-line">{{ a.address }}<span v-if="a.password">　密码：{{ a.password }}</span></div>
         </div>
       </template>
-      <template #footer>
-        <el-button @click="dnsVisible = false">关闭</el-button>
-      </template>
+      <div class="acc-result-title" style="margin-top:14px">该域名下已有账号（{{ accList.length }}）：</div>
+      <el-table v-loading="accLoading" :data="accList" size="small" max-height="300">
+        <el-table-column prop="address" label="邮箱地址" min-width="180" />
+        <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
+        <el-table-column prop="quota_mb" label="容量MB" width="90" />
+        <el-table-column label="操作" width="140" align="right">
+          <template #default="{ row }">
+            <el-button link type="warning" size="small" @click="toggleAcc(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
+            <el-button link type="danger" size="small" @click="delAcc(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
-import { listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain, getMailDnsGuide, checkMailDns } from '../../api/mail'
+import { Plus, Loading, CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
+import {
+  listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain,
+  getDomainGuide, checkDomainReady, checkMailDomainsReady,
+  listMailAccounts, addMailAccount, addMailAccountsBatch, randomMailAccounts,
+  deleteMailAccount, setMailAccountEnabled
+} from '../../api/mail'
 
 const list = ref([])
 const loading = ref(false)
-
-// 添加
-const addVisible = ref(false)
-const saving = ref(false)
-const addForm = ref({ domain: '', quota: 1024, remark: '' })
-
-// DNS
-const dnsVisible = ref(false)
-const dnsGuide = ref(null)
+const statusMap = ref({}) // domainId -> {ready, detail}
 const checking = ref(false)
-const checkResult = ref(null)
-const dnsMark = ref({ mx: false, spf: false, dkim: false, dmarc: false })
-const currentDomain = ref(null)
 
-// 用途：both(收+发) / receive(只收) / send(只发)。决定展示哪些 DNS 分组。
-const dnsPurpose = ref('both')
+// 添加向导
+const addVisible = ref(false)
+const addStep = ref(1)
+const addErr = ref('')
+const addForm = ref({ domain: '' })
+const genGuideLoading = ref(false)
+const guide = ref({ domain: '', mail_server: '', spf_value: '', mx_host_name: '' })
+const addReady = ref(false)
+const addChecking = ref(false)
+const addCheckDetail = ref('')
+const saving = ref(false)
+let addCheckTimer = null
 
-// 按用途与后端引导分组成"收信组 / 发信组"两条，各自管一件"业务目标"。
-// 每组里是小白视角的 DNS 项（steps 直接对应服务商后台的字段）。
-const dnsGroups = computed(() => {
-  const g = dnsGuide.value
-  if (!g) return []
-  const hostName = `mail.${g.domain}`
-  const groups = []
-  // 收信组：让人能往你的域名发信、你能收得到（A + MX）
-  if (dnsPurpose.value !== 'send') {
-    groups.push({
-      key: 'receive',
-      badge: '收信',
-      title: '让全世界能把信投到你的邮箱（要"能收到信"才需要配）',
-      rows: [
-        {
-          num: '收信 1/2',
-          title: '先让 "mail.你的域名" 这个地址找到你这台服务器',
-          why: '这是服务器的主机名地址，别人要凭它找到你的服务器',
-          steps: [
-            { label: '记录类型', value: 'A' },
-            { label: '主机记录', value: 'mail' },
-            { label: '记录值', value: g.mail_server }
-          ]
-        },
-        {
-          num: '收信 2/2',
-          title: '告诉全网：发给 @你的域名 的信，请投到上面的地址',
-          why: '没这条，别人发来的信根本到不了你这儿（会直接退回）',
-          steps: [
-            { label: '记录类型', value: 'MX' },
-            { label: '主机记录', value: '@（留空）' },
-            { label: '记录值', value: hostName },
-            { label: '优先级', value: '10' }
-          ]
-        }
-      ]
-    })
-  }
-  // 发信组：让本域名能往外发信、不被对方当垃圾/伪造（当前仅 SPF 可配）
-  if (dnsPurpose.value !== 'receive') {
-    groups.push({
-      key: 'send',
-      badge: '发信',
-      title: '让这台服务器能用你的域名发信（要"能往外发信"才需要配）',
-      rows: [
-        {
-          num: '发信 1/1',
-          title: '告诉全网：只有这台服务器可以用你的域名发信',
-          why: '不配这条，从你服务器发出去的信很容易被收信方当"伪造邮件"丢进垃圾箱',
-          steps: [
-            { label: '记录类型', value: 'TXT' },
-            { label: '主机记录', value: '@（留空）' },
-            { label: '记录值', value: g.spf_value }
-          ]
-        }
-      ]
-    })
-  }
-  return groups
-})
+const recFields1 = computed(() => [
+  { label: '记录类型', value: 'A' },
+  { label: '主机记录', value: 'mail' },
+  { label: '记录值', value: guide.value.mail_server, copiable: true }
+])
+const recFields2 = computed(() => [
+  { label: '记录类型', value: 'MX' },
+  { label: '主机记录', value: '@（留空）' },
+  { label: '记录值', value: guide.value.mx_host_name, copiable: true },
+  { label: '优先级', value: '10' }
+])
+const recFields3 = computed(() => [
+  { label: '记录类型', value: 'TXT' },
+  { label: '主机记录', value: '@（留空）' },
+  { label: '记录值', value: guide.value.spf_value, copiable: true }
+])
+
+// DNS 引导（列表"未对接"查看）
+const dnsGuideVisible = ref(false)
+const dnsGuideData = ref([])
+const currentRow = ref(null)
+
+// 账号
+const accountsVisible = ref(false)
+const currentDomainName = ref('')
+const accountTab = ref('single')
+const accList = ref([])
+const accLoading = ref(false)
+const accBusy = ref(false)
+const accResult = ref([])
+const accSingle = ref({ name: '', password: '', quota: 1024 })
+const accBatch = ref({ lines: '' })
+const accRandom = ref({ prefix: '', length: 6, digit: 0, count: 10, password: '' })
 
 async function load() {
   loading.value = true
   try {
     const { data } = await listMailDomains()
     list.value = data || []
+    // 加载后自动检测所有域名对接状态
+    await checkAll()
   } finally {
     loading.value = false
   }
 }
 
-function openAdd() {
-  addForm.value = { domain: '', quota: 1024, remark: '' }
-  addVisible.value = true
+async function checkAll() {
+  const ids = list.value.map((x) => x.id)
+  if (!ids.length) return
+  try {
+    const { data } = await checkMailDomainsReady(ids)
+    if (data) {
+      statusMap.value = {}
+      for (const id of ids) {
+        const s = data[id]
+        if (s) statusMap.value[id] = { ready: !!s.ready, detail: s.not_ready_msg || '' }
+      }
+    }
+  } catch { /* 忽略网络失败，保持原状 */ }
 }
 
-async function submitAdd() {
-  const d = addForm.value.domain.trim()
-  if (!d) return ElMessage.warning('请输入域名')
-  saving.value = true
+async function checkOneById(id) {
   try {
-    const res = await addMailDomain({ domain: d, quota: addForm.value.quota, remark: addForm.value.remark })
-    const rec = res.data || {}
-    ElMessage.success('域名已添加')
-    addVisible.value = false
-    await load()
-    // 添加后立刻引导用户去解析（用后端返回的记录做向导）
-    openDns({
-      id: rec.id,
-      domain: d,
-      mx_configured: false,
-      spf_configured: false,
-      dkim_configured: false,
-      dmarc_configured: false
-    })
-  } finally {
-    saving.value = false
-  }
+    const { data } = await checkMailDomainsReady([id])
+    const s = data?.[id]
+    if (s) statusMap.value[id] = { ready: !!s.ready, detail: s.not_ready_msg || '' }
+  } catch { /* ignore */ }
 }
 
-async function toggleEnabled(row) {
-  try {
-    await updateMailDomain(row.id, { enabled: !row.enabled })
-    ElMessage.success(row.enabled ? '已停用' : '已启用')
-    load()
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.msg || '操作失败')
-  }
-}
-
-async function remove(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除域名「${row.domain}」吗？`, '删除', { type: 'warning' })
-  } catch { return }
-  try {
-    await deleteMailDomain(row.id)
-    ElMessage.success('已删除')
-    load()
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.msg || '删除失败')
-  }
-}
-
-async function openDns(row) {
-  currentDomain.value = row
-  dnsMark.value = { mx: row.mx_configured, spf: row.spf_configured, dkim: row.dkim_configured, dmarc: row.dmarc_configured }
-  checkResult.value = null
-  checking.value = false
-  dnsVisible.value = true
-  try {
-    const { data } = await getMailDnsGuide(row.id)
-    dnsGuide.value = data
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.msg || '加载引导失败')
-    dnsVisible.value = false
-    return
-  }
-  // 弹窗打开后立即自动检测解析是否生效（用户不用点按钮）
-  await runDnsCheck()
-}
-
-async function runDnsCheck() {
+async function checkOne(row) {
   checking.value = true
   try {
-    const { data } = await checkMailDns(currentDomain.value.id)
-    checkResult.value = !!data?.ready
-  } catch (e) {
-    // 后台自动检测：失败不打扰用户，仅标记"未生效"
-    checkResult.value = false
+    await checkOneById(row.id)
   } finally {
     checking.value = false
   }
 }
 
-async function saveDnsMark() {
-  if (!currentDomain.value) return
+// 打开 DNS 引导（给"未对接"域名展示记录值，供去服务商配置）
+async function openDnsGuide(row) {
+  currentRow.value = row
+  dnsGuideVisible.value = true
+  await checkOne(row)
+  let srv = ''
   try {
-    await updateMailDomain(currentDomain.value.id, {
-      mx_configured: dnsMark.value.mx,
-      spf_configured: dnsMark.value.spf,
-      dkim_configured: dnsMark.value.dkim,
-      dmarc_configured: dnsMark.value.dmarc
-    })
-    const row = list.value.find((x) => x.id === currentDomain.value.id)
-    if (row) {
-      row.mx_configured = dnsMark.value.mx
-      row.spf_configured = dnsMark.value.spf
-      row.dkim_configured = dnsMark.value.dkim
-      row.dmarc_configured = dnsMark.value.dmarc
-    }
-  } catch (e) {
-    ElMessage.error(e?.response?.data?.msg || '保存失败')
+    const { data } = await getDomainGuide(row.domain)
+    srv = data?.mail_server || ''
+  } catch { /* ignore */ }
+  if (!srv) srv = '（自动检测到的本机IP）'
+  dnsGuideData.value = [
+    { label: 'A 记录 · 记录值', value: srv, copiable: true },
+    { label: 'MX 记录 · 记录值', value: 'mail.' + row.domain, copiable: true },
+    { label: 'TXT(SPF) · 记录值', value: 'v=spf1 ip4:' + srv + ' ~all', copiable: true }
+  ]
+}
+
+// ===== 添加向导 =====
+function openAdd() {
+  addForm.value = { domain: '' }
+  addErr.value = ''
+  addStep.value = 1
+  addReady.value = false
+  addVisible.value = true
+}
+
+async function goAddStep2() {
+  const d = addForm.value.domain.trim().toLowerCase()
+  if (!d) return (addErr.value = '请输入域名')
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d)) {
+    return (addErr.value = '域名格式不对，示例：example.com')
   }
+  // 查重
+  if (list.value.some((x) => x.domain === d)) {
+    return (addErr.value = '这个域名已经在列表里了')
+  }
+  addErr.value = ''
+  genGuideLoading.value = true
+  try {
+    const { data } = await getDomainGuide(d)
+    guide.value = data || {}
+    guide.value.domain = d
+    addStep.value = 2
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.msg || '获取配置失败')
+  } finally {
+    genGuideLoading.value = false
+  }
+}
+
+function goAddStep3() {
+  addStep.value = 3
+  addReady.value = false
+  addChecking.value = true
+  addCheckDetail.value = ''
+  runAutoCheck()
+}
+
+async function runAutoCheck() {
+  const d = guide.value.domain
+  if (!d) return
+  try {
+    const { data } = await checkDomainReady(d)
+    if (data?.ready) {
+      addReady.value = true
+      addChecking.value = false
+      addCheckDetail.value = data.detail || '检测通过'
+      return
+    }
+    addCheckDetail.value = data?.detail || '还没检测通过'
+  } catch (e) {
+    addCheckDetail.value = ''
+  }
+  // 未通过：继续轮询
+  if (addVisible.value && addStep.value === 3 && !addReady.value) {
+    addCheckTimer = setTimeout(runAutoCheck, 4000)
+  } else {
+    addChecking.value = false
+  }
+}
+
+async function confirmAdd() {
+  if (!addReady.value) return
+  saving.value = true
+  try {
+    const { data } = await addMailDomain({ domain: guide.value.domain })
+    ElMessage.success('域名已添加并检测通过')
+    addVisible.value = false
+    if (addCheckTimer) clearTimeout(addCheckTimer)
+    await load()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.msg || '添加失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+// ===== 域名其他操作 =====
+async function toggleEnabled(row) {
+  try {
+    await updateMailDomain(row.id, { enabled: !row.enabled })
+    load()
+  } catch (e) { ElMessage.error(e?.response?.data?.msg || '操作失败') }
+}
+async function remove(row) {
+  try { await ElMessageBox.confirm(`确定删除域名「${row.domain}」吗？`, '删除', { type: 'warning' }) } catch { return }
+  try { await deleteMailDomain(row.id); ElMessage.success('已删除'); load() } catch (e) { ElMessage.error(e?.response?.data?.msg || '删除失败') }
+}
+
+// ===== 账号 =====
+async function openAccounts(row) {
+  currentDomainName.value = row.domain
+  accountsVisible.value = true
+  accountTab.value = 'single'
+  accSingle.value = { name: '', password: '', quota: 1024 }
+  accBatch.value = { lines: '' }
+  accRandom.value = { prefix: '', length: 6, digit: 0, count: 10, password: '' }
+  accResult.value = []
+  currentDomainId = row.id
+  await loadAccounts()
+}
+let currentDomainId = 0
+
+async function loadAccounts() {
+  accLoading.value = true
+  try {
+    const { data } = await listMailAccounts(currentDomainId)
+    accList.value = data || []
+  } finally { accLoading.value = false }
+}
+
+async function doAddOne() {
+  const name = accSingle.value.name.trim()
+  if (!name) return ElMessage.warning('请输入邮箱名')
+  if (!accSingle.value.password) return ElMessage.warning('请输入密码')
+  accBusy.value = true
+  try {
+    const { data } = await addMailAccount({ domain_id: currentDomainId, name, password: accSingle.value.password, quota: accSingle.value.quota })
+    accResult.value = [{ address: data.address, password: accSingle.value.password }]
+    accSingle.value.name = ''
+    await loadAccounts()
+  } catch (e) { ElMessage.error(e?.response?.data?.msg || '添加失败') } finally { accBusy.value = false }
+}
+
+async function doAddBatch() {
+  accBusy.value = true
+  try {
+    const { data } = await addMailAccountsBatch({ domain_id: currentDomainId, lines: accBatch.value.lines })
+    ElMessage.success(`成功 ${data.created} 个${data.failed?.length ? '，失败 ' + data.failed.length + ' 个' : ''}`)
+    await loadAccounts()
+  } catch (e) { ElMessage.error(e?.response?.data?.msg || '批量失败') } finally { accBusy.value = false }
+}
+
+async function doAddRandom() {
+  accBusy.value = true
+  try {
+    const { data } = await randomMailAccounts({ domain_id: currentDomainId, ...accRandom.value })
+    accResult.value = (data.accounts || []).map((a) => ({ address: a.name + '@' + currentDomainName.value, password: a.password }))
+    if (data.failed?.length) ElMessage.warning(`失败 ${data.failed.length} 个`)
+    await loadAccounts()
+  } catch (e) { ElMessage.error(e?.response?.data?.msg || '生成失败') } finally { accBusy.value = false }
+}
+
+async function toggleAcc(row) {
+  try { await setMailAccountEnabled(row.id, !row.enabled); await loadAccounts() } catch (e) { ElMessage.error('操作失败') }
+}
+async function delAcc(row) {
+  try { await ElMessageBox.confirm(`确定删除账号 ${row.address} 吗？`, '删除', { type: 'warning' }) } catch { return }
+  try { await deleteMailAccount(row.id); await loadAccounts() } catch (e) { ElMessage.error('删除失败') }
 }
 
 async function copy(text) {
-  try {
-    await navigator.clipboard.writeText(String(text || ''))
-    ElMessage.success('已复制，去服务商后台粘贴即可')
-  } catch {
-    ElMessage.error('复制失败')
-  }
+  try { await navigator.clipboard.writeText(String(text || '')); ElMessage.success('已复制') } catch { ElMessage.error('复制失败') }
 }
 
 onMounted(load)
+onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer) })
 </script>
 
 <style scoped>
@@ -347,95 +482,39 @@ onMounted(load)
 .md-card { border-radius: 12px; }
 .md-domain-cell { display: flex; align-items: center; gap: 8px; }
 .md-domain-name { font-weight: 600; color: #0f172a; }
-.md-dns-status { display: flex; gap: 6px; flex-wrap: wrap; }
-.md-dns-chip { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #f1f5f9; color: #94a3b8; }
-.md-dns-chip.ok { background: #ecfdf5; color: #059669; }
-.md-hint { font-size: 12px; color: #94a3b8; }
-.md-dns-alert { margin-bottom: 12px; }
-.md-dns-list { display: flex; flex-direction: column; gap: 8px; }
-.md-dns-row { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 12px; }
-.md-dns-row-head { display: flex; align-items: center; gap: 10px; }
-.md-dns-row-type { flex: 0 0 auto; font-size: 11px; font-weight: 700; color: #059669; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px; padding: 1px 6px; }
-.md-dns-row-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.md-dns-row-label { font-size: 12.5px; color: #475569; word-break: break-all; }
-.md-dns-steps { margin-top: 14px; }
-.md-steps-title { font-size: 13px; font-weight: 600; color: #0f172a; margin-bottom: 6px; }
-.md-step-line { font-size: 12.5px; color: #64748b; line-height: 1.9; padding-left: 4px; }
-.md-dns-checkbar { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.md-check-result { font-size: 13px; font-weight: 500; }
-.md-check-result.ok { color: #059669; }
-.md-check-result.bad { color: #f59e0b; }
-.md-dns-markbar { margin-top: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
-/* 自动检测结果提示 */
-.md-detected { display: flex; align-items: center; gap: 8px; padding: 10px 14px; margin: 8px 0 14px; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; }
-.md-detected-icon { color: #0284c7; }
-.md-detected-text { font-size: 13px; color: #0f172a; }
-.md-detected-tag { font-family: ui-monospace, SFMono-Regular, monospace; }
-/* 行内多行布局 + 必填/可选样式 */
-.md-dns-row-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.md-dns-row-value { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px; color: #0f172a; word-break: break-all; }
-.md-dns-row-note { font-size: 12px; color: #94a3b8; margin-top: 2px; }
-.md-dns-row-opt { background: #f8fafc; border-style: dashed; }
-.md-dns-row-opt .md-dns-row-value { color: #94a3b8; }
-/* ====== 小白版 DNS 引导样式 ====== */
-/* 顶栏：为什么需要这一步 */
-.md-why { font-size: 13.5px; color: #334155; background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px 14px; line-height: 1.7; margin-bottom: 12px; }
-.md-why strong { color: #92400e; }
-/* "服务商"等关键字眼 */
-.md-link { color: #2563eb; font-weight: 600; background: #eff6ff; padding: 1px 6px; border-radius: 4px; }
-/* 引导卡片 */
-.md-dns-row { border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; background: #fff; }
-.md-dns-row-opt { background: #fafafa; border-style: dashed; }
-.md-dns-row-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.md-dns-step-tag { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
-.md-dns-step-tag.must { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-.md-dns-step-tag.opt { background: #f1f5f9; color: #64748b; }
-.md-dns-kind { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
-.md-dns-kind.must { background: #fee2e2; color: #dc2626; }
-.md-dns-kind.opt { background: #e2e8f0; color: #64748b; }
-.md-dns-title { font-size: 15px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }
-.md-dns-why { font-size: 12.5px; color: #64748b; margin-bottom: 10px; line-height: 1.6; }
-/* 服务商后台的"记录类型 / 主机记录 / 记录值"等字段表格化 */
-.md-dns-fields { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
-.md-dns-fields-title { font-size: 12.5px; color: #475569; margin-bottom: 8px; font-weight: 600; }
-.md-dns-field-row { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed #e2e8f0; font-size: 13px; align-items: baseline; }
-.md-dns-field-row:last-child { border-bottom: none; }
-.md-dns-field-label { flex: 0 0 90px; color: #64748b; }
-.md-dns-field-value { flex: 1; color: #0f172a; font-family: ui-monospace, SFMono-Regular, monospace; word-break: break-all; }
-.md-dns-copybar { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
-.md-dns-copy-tip { font-size: 12px; color: #94a3b8; }
-/* DKIM/DMARC 暂不可用项 */
-.md-dns-placeholder { display: flex; align-items: center; gap: 6px; padding: 12px; background: #fff; border: 1px dashed #cbd5e1; border-radius: 8px; color: #94a3b8; font-size: 13px; }
-.md-dns-placeholder .el-icon { font-size: 16px; }
-/* 操作指引 */
-.md-how { background: #f1f5f9; border-radius: 10px; padding: 14px 16px; margin-top: 16px; }
-.md-how-title { font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px; }
-.md-how-list { font-size: 13px; color: #334155; line-height: 1.9; padding-left: 22px; margin: 0; }
-.md-how-list li { margin-bottom: 2px; }
-/* 勾选区（小白化） */
-.md-dns-markbar { margin-top: 14px; padding: 10px 14px; background: #f0f9ff; border-radius: 10px; }
-.md-dns-markbar-title { font-size: 13px; font-weight: 600; color: #0f172a; margin-bottom: 8px; }
-.md-dns-markbar-list { display: flex; flex-direction: column; gap: 6px; }
-/* 保留旧结构 class 兼容，以防 dnsCheck 自检区中用到 */
-.md-dns-alert { margin-bottom: 12px; }
-@media (max-width: 599px) {
-  .md-toolbar { flex-direction: column; align-items: stretch; }
-  .md-dns-field-row { flex-direction: column; gap: 2px; }
-  .md-dns-field-label { flex: 1 0 auto; }
-}
-/* ===== 用途选择 ===== */
-.md-purpose { margin: 6px 0 6px; }
-.md-purpose-hint { font-size: 13px; color: #0369a1; background: #f0f9ff; border: 1px dashed #7dd3fc; padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
-/* ===== 收信/发信分组 ===== */
-.md-dns-group { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; margin-bottom: 14px; }
-.md-group-receive { border-color: #bae6fd; background: #f8fbff; }
-.md-group-send { border-color: #bbf7d0; background: #f9fdf8; }
-.md-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.md-group-badge { flex: 0 0 auto; font-size: 13px; font-weight: 700; padding: 4px 12px; border-radius: 6px; color: #fff; }
-.md-group-badge.receive { background: #0284c7; }
-.md-group-badge.send { background: #16a34a; }
-.md-group-title { font-size: 14px; color: #334155; line-height: 1.5; }
-/* 组内小项卡片间距 */
-.md-dns-group .md-dns-row { background: #fff; }
-.md-dns-group .md-dns-row + .md-dns-row { margin-top: 10px; }
+.md-status-ok { font-size: 12.5px; color: #059669; font-weight: 500; }
+.md-status-bad { font-size: 12.5px; color: #d97706; line-height: 1.5; max-width: 100%; }
+.md-steps { margin: 6px 0 20px; }
+.md-step-body { min-height: 180px; }
+.md-field-hint { font-size: 13px; color: #64748b; margin-bottom: 10px; }
+.md-err { color: #dc2626; font-size: 13px; margin-top: 8px; }
+.md-step2-tip { font-size: 13px; color: #334155; background: #eff6ff; border: 1px solid #bfdbfe; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; line-height: 1.6; }
+.md-link { color: #2563eb; font-weight: 600; }
+.md-guide-rec { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.md-rec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.md-rec-why { font-size: 12.5px; color: #64748b; }
+.md-rec-field { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.md-rec-label { flex: 0 0 84px; color: #64748b; }
+.md-rec-val { flex: 1; color: #0f172a; font-family: ui-monospace, monospace; word-break: break-all; }
+.md-step2-foot { font-size: 13px; color: #475569; margin-top: 6px; }
+.md-checking { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; margin-bottom: 10px; }
+.md-checking .el-icon { font-size: 20px; }
+.md-checking.ok { color: #059669; }
+.md-checking.checking { color: #2563eb; }
+.md-checking:not(.ok):not(.checking) { color: #d97706; }
+.md-check-detail { font-size: 13.5px; color: #475569; background: #f8fafc; border-radius: 8px; padding: 10px 12px; line-height: 1.7; }
+.md-check-sub { font-size: 12.5px; color: #94a3b8; margin-top: 10px; }
+.md-dnsguide-body .md-rec-field { border-bottom: 1px dashed #e2e8f0; padding: 8px 0; }
+.md-dnsguide-foot { margin-top: 14px; display: flex; align-items: center; gap: 12px; }
+.acc-form { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
+.acc-row { display: flex; align-items: center; gap: 10px; }
+.acc-label { flex: 0 0 90px; color: #475569; font-size: 13.5px; }
+.acc-submit { margin-top: 6px; }
+.acc-batch-tip { font-size: 13px; color: #64748b; margin-bottom: 8px; }
+.acc-batch-tip code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; }
+.acc-rand-grid { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
+.acc-result-title { font-size: 13px; font-weight: 600; color: #0f172a; margin-top: 10px; }
+.acc-result-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 12px; max-height: 220px; overflow: auto; margin-top: 8px; }
+.acc-result-line { font-size: 13px; color: #166534; padding: 3px 0; font-family: ui-monospace, monospace; }
+@media (max-width: 599px) { .md-toolbar { flex-direction: column; align-items: stretch; } }
 </style>
