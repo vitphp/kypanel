@@ -1,57 +1,148 @@
 <template>
-  <div class="mail-domains">
-    <!-- 顶部操作条 -->
-    <div class="md-toolbar">
-      <div class="md-toolbar-left">
-        <span class="md-title">域名邮箱</span>
-        <span class="md-subtitle">添加一个域名 → 分步配好解析（面板会自动检测）→ 配好的才能添加用户</span>
+  <div class="mail-shell">
+    <!-- ===== 左栏：域名列表 ===== -->
+    <aside class="mail-side">
+      <div class="mail-side-head">
+        <span class="mail-side-title">域名列表</span>
+        <el-button size="small" :icon="Plus" @click="openAdd">添加域名</el-button>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openAdd">添加域名</el-button>
-    </div>
+      <div v-loading="loading" class="mail-domain-list">
+        <div v-for="row in list" :key="row.id" class="mail-domain-item"
+          :class="{ active: currentDomainId === row.id }"
+          @click="selectDomain(row)">
+          <div class="mail-domain-item-top">
+            <span class="mail-domain-item-name">{{ row.domain }}</span>
+            <span class="mail-dot" :class="statusMap[row.id]?.ready ? 'ok' : 'bad'" :title="statusMap[row.id]?.ready ? '已对接' : '未对接'" />
+          </div>
+          <div class="mail-domain-item-sub" :class="statusMap[row.id]?.ready ? 'ok' : 'bad'">
+            {{ statusMap[row.id]?.ready ? '已对接 · 能收发' : '未对接 · 待配置' }}
+          </div>
+        </div>
+        <div v-if="!list.length" class="mail-domain-empty">还没有域名<br>点右上「添加域名」开始</div>
+      </div>
+    </aside>
 
-    <!-- 域名列表 -->
-    <el-card shadow="never" class="md-card">
-      <el-table v-loading="loading" :data="list" style="width: 100%">
-        <el-table-column prop="domain" label="域名" min-width="200">
-          <template #default="{ row }">
-            <div class="md-domain-cell">
-              <span class="md-domain-name">{{ row.domain }}</span>
-              <el-tag v-if="statusMap[row.id]?.ready" type="success" size="small" effect="light">已对接</el-tag>
-              <el-tag v-else type="warning" size="small" effect="light" @click="checkOne(row)">未对接</el-tag>
+    <!-- ===== 右栏：当前域名功能 ===== -->
+    <section class="mail-main">
+      <!-- 无选中域名时的空状态 -->
+      <div v-if="!currentDomain" class="mail-main-empty">
+        <el-icon :size="40" color="#cbd5e1"><Message /></el-icon>
+        <p>在左侧选择一个域名，查看它的收件箱 / 账号等</p>
+      </div>
+
+      <template v-else>
+        <!-- 右侧顶部：功能 tab -->
+        <div class="mail-main-top">
+          <el-tabs v-model="rightTab" class="mail-tabs">
+            <el-tab-pane label="收件箱" name="inbox" />
+            <el-tab-pane label="已发送" name="sent" />
+            <el-tab-pane label="草稿" name="drafts" />
+            <el-tab-pane label="账号管理" name="accounts" />
+            <el-tab-pane label="域名信息" name="domain" />
+          </el-tabs>
+          <div class="mail-cur-domain">
+            <span class="mail-cur-dot" :class="statusMap[currentDomainId]?.ready ? 'ok' : 'bad'" />
+            {{ currentDomain.domain }}
+            <el-tag v-if="statusMap[currentDomainId]?.ready" type="success" size="small" effect="light">已对接</el-tag>
+            <el-tag v-else type="warning" size="small" effect="light">未对接</el-tag>
+          </div>
+        </div>
+
+        <!-- 右侧内容区 -->
+        <div class="mail-main-body">
+          <!-- 收件箱：占位 -->
+          <div v-if="rightTab === 'inbox'" class="ph">
+            <el-icon :size="36" color="#cbd5e1"><Message /></el-icon>
+            <p class="ph-title">收件箱</p>
+            <p class="ph-sub">正在开发 · 接入真实收发后可用（本域名邮箱收到的来信会显示在这里）</p>
+          </div>
+
+          <!-- 已发送：占位 -->
+          <div v-else-if="rightTab === 'sent'" class="ph">
+            <el-icon :size="36" color="#cbd5e1"><Promotion /></el-icon>
+            <p class="ph-title">已发送</p>
+            <p class="ph-sub">正在开发 · 接入真实发信后，这里显示本域名发出去的信</p>
+          </div>
+
+          <!-- 草稿：占位 -->
+          <div v-else-if="rightTab === 'drafts'" class="ph">
+            <el-icon :size="36" color="#cbd5e1"><EditPen /></el-icon>
+            <p class="ph-title">草稿箱</p>
+            <p class="ph-sub">正在开发</p>
+          </div>
+
+          <!-- 账号管理 -->
+          <div v-else-if="rightTab === 'accounts'" class="mail-accounts-pane">
+            <div class="mail-pane-head">
+              <span class="mail-pane-title">账号管理</span>
+              <el-tag v-if="statusMap[currentDomainId]?.ready" type="success" size="small">已对接，可添加用户</el-tag>
+              <el-tag v-else type="info" size="small">该域名尚未对接，暂不能添加用户</el-tag>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="对接状态" min-width="220">
-          <template #default="{ row }">
-            <template v-if="statusMap[row.id]?.ready">
-              <div class="md-status-ok">✓ 已正确指向本机，能收信，可添加用户</div>
+            <template v-if="statusMap[currentDomainId]?.ready">
+              <el-tabs v-model="accountTab" class="acc-tabs">
+                <el-tab-pane label="单个添加" name="single">
+                  <div class="acc-form">
+                    <div class="acc-row"><span class="acc-label">邮箱名</span><el-input v-model="accSingle.name" placeholder="如 admin（将创建 admin@域名）" style="max-width:360px" /></div>
+                    <div class="acc-row"><span class="acc-label">密码</span><el-input v-model="accSingle.password" type="password" show-password placeholder="登录密码" style="max-width:360px" /></div>
+                    <div class="acc-row"><span class="acc-label">容量(MB)</span><el-input-number v-model="accSingle.quota" :min="1" :max="102400" style="max-width:200px" /></div>
+                    <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddOne">添加这个账号</el-button></div>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="批量添加" name="batch">
+                  <div class="acc-batch-tip">每行一个，格式：<code>邮箱名 密码</code>（或 <code>邮箱名:密码</code>）</div>
+                  <el-input v-model="accBatch.lines" type="textarea" :rows="5" placeholder="admin1 密码123&#10;sales1:pass888" />
+                  <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddBatch">批量添加</el-button></div>
+                </el-tab-pane>
+                <el-tab-pane label="随机生成" name="random">
+                  <div class="acc-rand-grid">
+                    <div class="acc-row"><span class="acc-label">前缀</span><el-input v-model="accRandom.prefix" placeholder="如 vip" style="max-width:160px" /></div>
+                    <div class="acc-row"><span class="acc-label">随机位数</span><el-input-number v-model="accRandom.length" :min="1" :max="16" /></div>
+                    <div class="acc-row"><span class="acc-label">字符</span><el-select v-model="accRandom.digit" style="width:150px"><el-option label="字母+数字" :value="0" /><el-option label="纯数字" :value="1" /><el-option label="纯字母" :value="2" /></el-select></div>
+                    <div class="acc-row"><span class="acc-label">数量</span><el-input-number v-model="accRandom.count" :min="1" :max="200" /></div>
+                    <div class="acc-row"><span class="acc-label">统一密码</span><el-input v-model="accRandom.password" placeholder="留空自动生成" style="max-width:200px" /></div>
+                    <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddRandom">生成账号</el-button></div>
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
+
+              <template v-if="accResult.length">
+                <div class="acc-result-title">本次已生成（请复制保存）：</div>
+                <div class="acc-result-box">
+                  <div v-for="(a, i) in accResult" :key="i" class="acc-result-line">{{ a.address }}<span v-if="a.password">　密码：{{ a.password }}</span></div>
+                </div>
+              </template>
+              <div class="acc-result-title" style="margin-top:12px">该域名下已有账号（{{ accList.length }}）：</div>
+              <el-table v-loading="accLoading" :data="accList" size="small" max-height="280">
+                <el-table-column prop="address" label="邮箱地址" min-width="180" />
+                <el-table-column label="状态" width="70"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
+                <el-table-column prop="quota_mb" label="容量MB" width="80" />
+                <el-table-column label="操作" width="130" align="right"><template #default="{ row }"><el-button link type="warning" size="small" @click="toggleAcc(row)">{{ row.enabled ? '停用' : '启用' }}</el-button><el-button link type="danger" size="small" @click="delAcc(row)">删除</el-button></template></el-table-column>
+              </el-table>
             </template>
-            <template v-else>
-              <div class="md-status-bad" :title="statusMap[row.id]?.not_ready_msg || statusMap[row.id]?.detail || '还未检测'">
-                <span>{{ statusMap[row.id]?.detail || statusMap[row.id]?.not_ready_msg || '检测中…' }}</span>
+          </div>
+
+          <!-- 域名信息 -->
+          <div v-else class="mail-domain-pane">
+            <div class="mail-pane-head"><span class="mail-pane-title">域名信息 · {{ currentDomain.domain }}</span></div>
+            <div class="dom-info">
+              <div class="dom-info-row"><span class="dom-info-label">对接状态</span>
+                <span v-if="statusMap[currentDomainId]?.ready" class="md-status-ok">✓ 已正确指向本机，能收信</span>
+                <span v-else class="md-status-bad">{{ statusMap[currentDomainId]?.detail || '未检测' }}</span>
               </div>
-              <el-button link type="primary" size="small" @click="openDnsGuide(row)">去配置解析</el-button>
-            </template>
-          </template>
-        </el-table-column>
-        <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-        <el-table-column label="操作" width="260" align="right">
-          <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              size="small"
-              :disabled="!statusMap[row.id]?.ready"
-              @click="openAccounts(row)"
-            >
-              添加用户
-            </el-button>
-            <el-button link type="warning" size="small" @click="toggleEnabled(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
-            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+              <div class="dom-info-row"><span class="dom-info-label">备注</span><span>{{ currentDomain.remark || '—' }}</span></div>
+              <div class="dom-info-row"><span class="dom-info-label">启用</span><span>{{ currentDomain.enabled ? '是' : '否' }}</span></div>
+              <div class="dom-info-actions">
+                <el-button size="small" :loading="checking" @click="checkOne(currentDomain)">重新检测对接</el-button>
+                <el-button size="small" @click="openDnsGuide(currentDomain)">查看 / 去配置解析</el-button>
+                <el-button size="small" type="warning" plain @click="toggleEnabled(currentDomain)">{{ currentDomain.enabled ? '停用域名' : '启用域名' }}</el-button>
+                <el-button size="small" type="danger" plain @click="remove(currentDomain)">删除域名</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </section>
+
 
     <!-- ===== 添加域名：3 步向导 ===== -->
     <el-dialog v-model="addVisible" :title="addStep === 1 ? '第 1 步 · 填写你的域名' : addStep === 2 ? '第 2 步 · 去域名服务商添加解析' : '第 3 步 · 检测对接结果'" width="min(640px, 94vw)" align-center :close-on-click-modal="false">
@@ -126,70 +217,13 @@
       </div>
     </el-dialog>
 
-    <!-- ===== 添加用户 / 管理账号 ===== -->
-    <el-dialog v-model="accountsVisible" :title="`账号管理 · ${currentDomainName}`" width="min(720px, 96vw)" align-center>
-      <el-tabs v-model="accountTab">
-        <!-- 单个添加 -->
-        <el-tab-pane label="单个添加" name="single">
-          <div class="acc-form">
-            <div class="acc-row"><span class="acc-label">邮箱名</span><el-input v-model="accSingle.name" placeholder="如 admin（将创建 admin@域名）" style="max-width:360px" /></div>
-            <div class="acc-row"><span class="acc-label">密码</span><el-input v-model="accSingle.password" type="password" show-password placeholder="登录密码" style="max-width:360px" /></div>
-            <div class="acc-row"><span class="acc-label">容量(MB)</span><el-input-number v-model="accSingle.quota" :min="1" :max="102400" style="max-width:200px" /></div>
-            <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddOne">添加这个账号</el-button></div>
-          </div>
-        </el-tab-pane>
-        <!-- 批量 -->
-        <el-tab-pane label="批量添加" name="batch">
-          <div class="acc-batch-tip">每行一个，格式：<code>邮箱名 密码</code>（或 <code>邮箱名:密码</code>）</div>
-          <el-input v-model="accBatch.lines" type="textarea" :rows="6" placeholder="admin1 密码123&#10;admin2 密码456&#10;sales1:pass888" />
-          <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddBatch">批量添加</el-button></div>
-        </el-tab-pane>
-        <!-- 随机 -->
-        <el-tab-pane label="随机生成" name="random">
-          <div class="acc-rand-grid">
-            <div class="acc-row"><span class="acc-label">前缀</span><el-input v-model="accRandom.prefix" placeholder="可选，如 vip" style="max-width:160px" /></div>
-            <div class="acc-row"><span class="acc-label">随机部分位数</span><el-input-number v-model="accRandom.length" :min="1" :max="16" /></div>
-            <div class="acc-row"><span class="acc-label">字符</span>
-              <el-select v-model="accRandom.digit" style="width:140px">
-                <el-option label="字母+数字" :value="0" />
-                <el-option label="纯数字" :value="1" />
-                <el-option label="纯字母" :value="2" />
-              </el-select>
-            </div>
-            <div class="acc-row"><span class="acc-label">生成数量</span><el-input-number v-model="accRandom.count" :min="1" :max="200" /></div>
-            <div class="acc-row"><span class="acc-label">统一密码</span><el-input v-model="accRandom.password" placeholder="留空则自动生成" style="max-width:200px" /></div>
-            <div class="acc-row acc-submit"><el-button type="primary" :loading="accBusy" @click="doAddRandom">生成账号</el-button></div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
-
-      <!-- 生成结果 / 账号列表 -->
-      <template v-if="accResult.length">
-        <div class="acc-result-title">本次已生成（请复制保存）：</div>
-        <div class="acc-result-box">
-          <div v-for="(a, i) in accResult" :key="i" class="acc-result-line">{{ a.address }}<span v-if="a.password">　密码：{{ a.password }}</span></div>
-        </div>
-      </template>
-      <div class="acc-result-title" style="margin-top:14px">该域名下已有账号（{{ accList.length }}）：</div>
-      <el-table v-loading="accLoading" :data="accList" size="small" max-height="300">
-        <el-table-column prop="address" label="邮箱地址" min-width="180" />
-        <el-table-column label="状态" width="80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column prop="quota_mb" label="容量MB" width="90" />
-        <el-table-column label="操作" width="140" align="right">
-          <template #default="{ row }">
-            <el-button link type="warning" size="small" @click="toggleAcc(row)">{{ row.enabled ? '停用' : '启用' }}</el-button>
-            <el-button link type="danger" size="small" @click="delAcc(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Loading, CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
+import { Plus, Loading, CircleCheckFilled, WarningFilled, Message, Promotion, EditPen } from '@element-plus/icons-vue'
 import {
   listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain,
   getDomainGuide, checkDomainReady, checkMailDomainsReady,
@@ -237,9 +271,19 @@ const dnsGuideVisible = ref(false)
 const dnsGuideData = ref([])
 const currentRow = ref(null)
 
+// 布局：当前选中的域名 + 右侧 tab
+const currentDomain = ref(null)     // 当前选中的域名行对象
+const rightTab = ref('accounts')    // 右侧顶部 tab：inbox/sent/drafts/accounts/domain
+const currentDomainId = ref(0)      // 当前域名 id（账号操作等用）
+
+function selectDomain(row) {
+  currentDomain.value = row
+  currentDomainId.value = row.id
+  // 切到该域名时刷新账号列表（若有账号 tab 则刷新）
+  if (accList.value.length || rightTab.value === 'accounts') loadAccounts()
+}
+
 // 账号
-const accountsVisible = ref(false)
-const currentDomainName = ref('')
 const accountTab = ref('single')
 const accList = ref([])
 const accLoading = ref(false)
@@ -256,6 +300,10 @@ async function load() {
     list.value = data || []
     // 加载后自动检测所有域名对接状态
     await checkAll()
+    // 默认选中第一个域名
+    if (list.value.length && !currentDomain.value) {
+      selectDomain(list.value[0])
+    }
   } finally {
     loading.value = false
   }
@@ -404,23 +452,11 @@ async function remove(row) {
 }
 
 // ===== 账号 =====
-async function openAccounts(row) {
-  currentDomainName.value = row.domain
-  accountsVisible.value = true
-  accountTab.value = 'single'
-  accSingle.value = { name: '', password: '', quota: 1024 }
-  accBatch.value = { lines: '' }
-  accRandom.value = { prefix: '', length: 6, digit: 0, count: 10, password: '' }
-  accResult.value = []
-  currentDomainId = row.id
-  await loadAccounts()
-}
-let currentDomainId = 0
-
 async function loadAccounts() {
+  if (!currentDomainId.value) return
   accLoading.value = true
   try {
-    const { data } = await listMailAccounts(currentDomainId)
+    const { data } = await listMailAccounts(currentDomainId.value)
     accList.value = data || []
   } finally { accLoading.value = false }
 }
@@ -431,7 +467,7 @@ async function doAddOne() {
   if (!accSingle.value.password) return ElMessage.warning('请输入密码')
   accBusy.value = true
   try {
-    const { data } = await addMailAccount({ domain_id: currentDomainId, name, password: accSingle.value.password, quota: accSingle.value.quota })
+    const { data } = await addMailAccount({ domain_id: currentDomainId.value, name, password: accSingle.value.password, quota: accSingle.value.quota })
     accResult.value = [{ address: data.address, password: accSingle.value.password }]
     accSingle.value.name = ''
     await loadAccounts()
@@ -441,7 +477,7 @@ async function doAddOne() {
 async function doAddBatch() {
   accBusy.value = true
   try {
-    const { data } = await addMailAccountsBatch({ domain_id: currentDomainId, lines: accBatch.value.lines })
+    const { data } = await addMailAccountsBatch({ domain_id: currentDomainId.value, lines: accBatch.value.lines })
     ElMessage.success(`成功 ${data.created} 个${data.failed?.length ? '，失败 ' + data.failed.length + ' 个' : ''}`)
     await loadAccounts()
   } catch (e) { ElMessage.error(e?.response?.data?.msg || '批量失败') } finally { accBusy.value = false }
@@ -450,8 +486,9 @@ async function doAddBatch() {
 async function doAddRandom() {
   accBusy.value = true
   try {
-    const { data } = await randomMailAccounts({ domain_id: currentDomainId, ...accRandom.value })
-    accResult.value = (data.accounts || []).map((a) => ({ address: a.name + '@' + currentDomainName.value, password: a.password }))
+    const { data } = await randomMailAccounts({ domain_id: currentDomainId.value, ...accRandom.value })
+    const dom = currentDomain.value ? currentDomain.value.domain : ''
+    accResult.value = (data.accounts || []).map((a) => ({ address: a.name + '@' + dom, password: a.password }))
     if (data.failed?.length) ElMessage.warning(`失败 ${data.failed.length} 个`)
     await loadAccounts()
   } catch (e) { ElMessage.error(e?.response?.data?.msg || '生成失败') } finally { accBusy.value = false }
@@ -474,12 +511,53 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer) })
 </script>
 
 <style scoped>
-.mail-domains { display: flex; flex-direction: column; gap: 14px; }
-.md-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.md-toolbar-left { min-width: 0; }
+/* ===== 左右布局外壳 ===== */
+.mail-shell { display: flex; gap: 14px; height: calc(100vh - 140px); min-height: 480px; }
+/* 左栏：域名列表 */
+.mail-side { width: 250px; flex: 0 0 250px; display: flex; flex-direction: column; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+.mail-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 12px; border-bottom: 1px solid #f1f5f9; }
+.mail-side-title { font-weight: 700; color: #0f172a; font-size: 14px; }
+.mail-domain-list { flex: 1; overflow-y: auto; padding: 8px; }
+.mail-domain-item { border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: background .15s; }
+.mail-domain-item:hover { background: #f8fafc; }
+.mail-domain-item.active { background: #eff6ff; border-color: #bfdbfe; }
+.mail-domain-item-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.mail-domain-item-name { font-weight: 600; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mail-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+.mail-dot.ok { background: #22c55e; }
+.mail-dot.bad { background: #f59e0b; }
+.mail-domain-item-sub { font-size: 11px; margin-top: 4px; }
+.mail-domain-item-sub.ok { color: #16a34a; }
+.mail-domain-item-sub.bad { color: #d97706; }
+.mail-domain-empty { color: #94a3b8; font-size: 13px; text-align: center; line-height: 1.8; padding: 40px 0; }
+/* 右栏 */
+.mail-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+.mail-main-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #94a3b8; }
+.mail-main-empty p { margin: 0; font-size: 13px; }
+.mail-main-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #f1f5f9; flex-wrap: wrap; }
+.mail-tabs { flex: 1; min-width: 0; }
+.mail-tabs :deep(.el-tabs__header) { margin: 0; }
+.mail-cur-domain { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #475569; padding-bottom: 14px; font-weight: 600; }
+.mail-cur-dot { width: 8px; height: 8px; border-radius: 50%; }
+.mail-cur-dot.ok { background: #22c55e; }
+.mail-cur-dot.bad { background: #f59e0b; }
+.mail-main-body { flex: 1; overflow-y: auto; padding: 16px; }
+/* 占位 */
+.ph { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 90px 20px; }
+.ph-title { font-size: 16px; font-weight: 600; color: #475569; margin: 4px 0 0; }
+.ph-sub { font-size: 13px; color: #94a3b8; margin: 0; text-align: center; }
+/* 右栏各面板头 */
+.mail-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.mail-pane-title { font-size: 15px; font-weight: 700; color: #0f172a; }
+.mail-accounts-pane { display: flex; flex-direction: column; }
+.acc-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
+/* 域名信息 */
+.dom-info { display: flex; flex-direction: column; gap: 10px; }
+.dom-info-row { display: flex; gap: 10px; font-size: 13.5px; }
+.dom-info-label { flex: 0 0 90px; color: #64748b; }
+.dom-info-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
 .md-title { font-size: 18px; font-weight: 700; color: #0f172a; }
 .md-subtitle { font-size: 12.5px; color: #94a3b8; margin-left: 8px; }
-.md-card { border-radius: 12px; }
 .md-domain-cell { display: flex; align-items: center; gap: 8px; }
 .md-domain-name { font-weight: 600; color: #0f172a; }
 .md-status-ok { font-size: 12.5px; color: #059669; font-weight: 500; }
