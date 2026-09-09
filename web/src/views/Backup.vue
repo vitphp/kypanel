@@ -39,7 +39,7 @@
             <el-table-column label="创建时间" width="160">
               <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" min-width="200">
+            <el-table-column label="操作" :width="isMobile ? 'auto' : 120" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
                 <div class="ops-cell">
                   <el-button link type="primary" size="small" @click="download(row)">下载</el-button>
@@ -83,10 +83,12 @@
                 <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="140" align="center">
+            <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="editStorage(row)">编辑</el-button>
-                <el-button link type="danger" size="small" @click="removeStorage(row)">删除</el-button>
+                <div class="ops-cell">
+                  <el-button link type="primary" size="small" @click="editStorage(row)">编辑</el-button>
+                  <el-button link type="danger" size="small" @click="removeStorage(row)">删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -520,7 +522,7 @@ onMounted(() => {
 .storage-item:last-child { border-bottom: none; }
 .storage-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .storage-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.ops-cell { display: inline-flex; flex-wrap: wrap; gap: 0; }
+
 .doc-link {
   font-size: 12px; color: #6366f1;
   display: inline-flex; align-items: center; gap: 4px;

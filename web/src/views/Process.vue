@@ -134,17 +134,19 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="90" fixed="right">
+      <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
         <template #default="{ row }">
-          <el-button
-            size="small"
-            type="danger"
-            text
-            :disabled="!canKill(row)"
-            @click="kill(row)"
-          >
-            结束
-          </el-button>
+          <div class="ops-cell">
+            <el-button
+              size="small"
+              type="danger"
+              text
+              :disabled="!canKill(row)"
+              @click="kill(row)"
+            >
+              结束
+            </el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>

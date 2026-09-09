@@ -53,7 +53,7 @@
         <el-table-column label="删除时间" width="170">
           <template #default="{ row }">{{ fmtTimeISO(row.deleted_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" min-width="120" align="center">
+        <el-table-column label="操作" :width="isMobile ? 'auto' : 100" align="right" fixed="right" class-name="ops-col">
           <template #default="{ row }">
             <div class="ops-cell">
               <el-button link type="success" @click="restoreOne(row)">还原</el-button>

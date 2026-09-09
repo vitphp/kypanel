@@ -149,10 +149,12 @@
                 <el-table-column label="最后活跃" min-width="160">
                   <template #default="{ row }">{{ fmtTime(row.last_seen) }}</template>
                 </el-table-column>
-                <el-table-column label="操作" min-width="90">
+                <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
                   <template #default="{ row }">
-                    <el-button v-if="row.active && !row.is_current" link type="danger" size="small" @click="kickOne(row)">踢下线</el-button>
-                    <span v-else-if="row.is_current" style="color: #67c23a; font-size: 12px; font-weight: 500">当前登录</span>
+                    <div class="ops-cell">
+                      <el-button v-if="row.active && !row.is_current" link type="danger" size="small" @click="kickOne(row)">踢下线</el-button>
+                      <span v-else-if="row.is_current" style="color: #67c23a; font-size: 12px; font-weight: 500">当前登录</span>
+                    </div>
                   </template>
                 </el-table-column>
               </el-table>
@@ -240,9 +242,11 @@
             <el-table-column label="创建时间" width="140">
               <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="70" fixed="right">
+            <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
-                <el-button link type="danger" size="small" @click="deleteToken(row)">删除</el-button>
+                <div class="ops-cell">
+                  <el-button link type="danger" size="small" @click="deleteToken(row)">删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -322,12 +326,14 @@ Headers: Authorization: Bearer &lt;你的 MCP 令牌&gt;</pre>
                 <el-tag :type="row.status === 1 ? 'success' : 'info'" size="small">{{ row.status === 1 ? '启用' : '禁用' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" :width="isMobile ? 130 : 160" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="copyTempLink(row)">复制链接</el-button>
-                <el-button link type="success" size="small" @click="openTempLogs(row)">记录</el-button>
-                <el-button link size="small" :type="row.status === 1 ? 'warning' : 'success'" @click="toggleTemp(row)">{{ row.status === 1 ? '禁用' : '启用' }}</el-button>
-                <el-button link type="danger" size="small" @click="deleteTemp(row)">删除</el-button>
+                <div class="ops-cell">
+                  <el-button link type="primary" size="small" @click="copyTempLink(row)">复制链接</el-button>
+                  <el-button link type="success" size="small" @click="openTempLogs(row)">记录</el-button>
+                  <el-button link size="small" :type="row.status === 1 ? 'warning' : 'success'" @click="toggleTemp(row)">{{ row.status === 1 ? '禁用' : '启用' }}</el-button>
+                  <el-button link type="danger" size="small" @click="deleteTemp(row)">删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>

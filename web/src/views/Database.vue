@@ -95,7 +95,7 @@
             </div>
           </div>
 
-          <el-table v-else :data="filtered(t.type)" v-loading="loading" stripe>
+          <el-table v-else :key="(isMobile ? 'm' : 'd') + t.type" :data="filtered(t.type)" v-loading="loading" stripe>
             <!-- 通用列：数据库名 -->
             <el-table-column label="数据库名" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">
@@ -241,9 +241,9 @@
               show-overflow-tooltip
             />
 
-            <el-table-column label="操作" min-width="160" align="center" fixed="right">
+            <el-table-column label="操作" width="130" align="right" fixed="right" class-name="ops-col db-ops">
               <template #default="{ row }">
-                <div class="ops-cell">
+                <div class="ops-cell" style="padding: 0 5px">
                   <el-button size="small" type="primary" link @click="manageDb(row)">管理</el-button>
                   <el-button v-if="t.type === 'mysql' || t.type === 'sqlite'" size="small" type="primary" link @click="openImport(row)">导入</el-button>
                   <el-button v-if="t.type === 'mysql'" size="small" type="primary" link @click="openPerms(row)">权限</el-button>
@@ -371,13 +371,13 @@
         <el-button type="primary" :loading="backupLoading" @click="onCreateBackup">立即备份</el-button>
         <span class="backup-db-name">{{ backupRow?.name }}</span>
       </div>
-      <el-table :data="backupList" v-loading="backupLoading" stripe>
+      <el-table :key="isMobile ? 'm' : 'd'" :data="backupList" v-loading="backupLoading" stripe>
         <el-table-column prop="name" label="文件名称" min-width="260" show-overflow-tooltip />
         <el-table-column prop="storage" label="存储对象" min-width="100" />
         <el-table-column prop="sizeText" label="大小" min-width="100" />
         <el-table-column prop="time" label="备份时间" min-width="170" />
         <el-table-column prop="remark" label="备注" min-width="120" />
-        <el-table-column label="操作" min-width="140" align="center" fixed="right">
+        <el-table-column label="操作" width="130" align="right" fixed="right" class-name="ops-col db-ops">
           <template #default="{ row }">
             <div class="ops-cell">
               <el-button size="small" type="primary" link @click="restoreBackup(row)">恢复</el-button>

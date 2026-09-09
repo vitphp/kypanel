@@ -183,9 +183,11 @@
                 {{ row.visited_at ? new Date(row.visited_at).toLocaleString() : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100" fixed="right">
+            <el-table-column label="操作" :width="isMobile ? 60 : 100" fixed="right" class-name="ops-col">
               <template #default="{ row }">
-                <el-button size="small" type="danger" link @click="openBlockIPDialog(row)">拉黑</el-button>
+                <div class="ops-cell">
+                  <el-button size="small" type="danger" link @click="openBlockIPDialog(row)">拉黑</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -276,7 +278,10 @@ function onRangeChange() {
 async function load() {
   if (!props.siteId) return
   loading.value = true
-  data.value = null
+  // 注意：不要清空 data.value。
+  // 旧实现 data.value=null 会让 v-if="data" 的卡片/曲线/表格瞬间卸载，弹窗塌缩，
+  // 新数据回来后再撑开，造成"小一下再撑开"的视觉抖动。
+  // 现在保留旧数据直到新数据就绪，靠 v-loading 遮罩表达"加载中"，弹窗高度始终稳定。
   try {
     const params = { id: props.siteId, range: rangeKind.value }
     if (rangeKind.value === 'custom' && customRange.value && customRange.value.length === 2) {

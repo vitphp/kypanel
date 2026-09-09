@@ -27,33 +27,50 @@
         <!-- ===== Tab 1: 访问控制 ===== -->
         <el-tab-pane label="访问控制" name="access">
           <div class="ss-form">
-            <el-form label-width="120px" size="small">
-              <el-form-item label="防护模式">
-                <el-radio-group v-model="cfg.mode">
-                  <el-radio-button label="block">拦截</el-radio-button>
-                  <el-radio-button label="observe">观察</el-radio-button>
-                </el-radio-group>
-              </el-form-item>
-              <el-form-item label="沿用全局规则">
-                <el-switch v-model="cfg.use_global_rules" />
-                <span class="ss-hint">关闭后本规则独立于全局 WAF（不同站不同安全级别）</span>
-              </el-form-item>
-              <el-form-item label="IP 白名单模式">
-                <el-switch v-model="cfg.ip_whitelist_enabled" />
-                <span class="ss-hint">开启后仅放行下方白名单 IP，其余全部拒绝</span>
-              </el-form-item>
-              <el-form-item label="UA 白名单模式">
-                <el-switch v-model="cfg.ua_whitelist_enabled" />
-                <span class="ss-hint">开启后仅放行下方 UA 白名单，其余 UA 拒绝</span>
-              </el-form-item>
-              <el-form-item label="Referer 校验">
-                <el-select v-model="cfg.referer_check" style="width: 160px">
-                  <el-option label="关闭" value="off" />
-                  <el-option label="黑名单" value="blacklist" />
-                  <el-option label="白名单" value="whitelist" />
-                </el-select>
-                <span class="ss-hint">白名单模式常用于防盗链</span>
-              </el-form-item>
+            <el-form label-width="110px" size="small">
+              <el-row :gutter="16">
+                <el-col :span="12">
+                  <el-form-item label="防护模式">
+                    <el-radio-group v-model="cfg.mode">
+                      <el-radio-button label="block">拦截</el-radio-button>
+                      <el-radio-button label="observe">观察</el-radio-button>
+                    </el-radio-group>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="沿用全局规则">
+                    <el-switch v-model="cfg.use_global_rules" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="16">
+                <el-col :span="12">
+                  <el-form-item label="IP 白名单模式">
+                    <el-switch v-model="cfg.ip_whitelist_enabled" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="UA 白名单模式">
+                    <el-switch v-model="cfg.ua_whitelist_enabled" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="16">
+                <el-col :span="12">
+                  <el-form-item label="Referer 校验">
+                    <el-select v-model="cfg.referer_check" style="width: 140px">
+                      <el-option label="关闭" value="off" />
+                      <el-option label="黑名单" value="blacklist" />
+                      <el-option label="白名单" value="whitelist" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="禁海外">
+                    <el-switch v-model="cfg.block_overseas" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
             </el-form>
           </div>
 
@@ -61,13 +78,14 @@
           <div class="ss-sub-card">
             <div class="ss-sub-head">
               <span>IP 规则</span>
+              <span class="ss-hint" style="margin-left: 12px">
+                IP 规则支持单 IP、CIDR 网段、IP 段
+              </span>
               <div class="ss-sub-actions">
                 <el-select v-model="ipForm.match_type" size="small" style="width: 100px">
                   <el-option label="单 IP" value="ip" />
                   <el-option label="CIDR" value="cidr" />
                   <el-option label="IP 段" value="range" />
-                  <el-option label="国家" value="country" />
-                  <el-option label="ISP" value="isp" />
                 </el-select>
                 <el-select v-model="ipForm.action" size="small" style="width: 90px">
                   <el-option label="拉黑" value="block" />
@@ -85,8 +103,19 @@
               </div>
             </div>
             <el-table :data="ipRules" size="small">
-              <el-table-column prop="content" label="内容" min-width="160" />
-              <el-table-column prop="match_type" label="类型" width="80" />
+              <el-table-column label="内容" min-width="200">
+                <template #default="{ row }">
+                  <div class="ss-ip-cell">
+                    <span class="ss-ip-main">{{ row.content }}</span>
+                    <RegionCell :rule="row" />
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="类型" width="80">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="matchTypeTag(row.match_type)">{{ matchTypeLabel(row.match_type) }}</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="动作" width="80">
                 <template #default="{ row }">
                   <el-tag :type="row.action === 'block' ? 'danger' : 'success'" size="small">{{ row.action === 'block' ? '拉黑' : '放行' }}</el-tag>
@@ -275,7 +304,15 @@
             <el-table-column label="时间" width="150">
               <template #default="{ row }">{{ fmtTime(row.time) }}</template>
             </el-table-column>
-            <el-table-column prop="ip" label="IP" width="130" />
+            <el-table-column label="IP" width="150">
+              <template #default="{ row }">
+                <div class="ss-ip-cell">
+                  <span class="ss-ip-main">{{ row.ip }}</span>
+                  <span v-if="row.region" class="ss-region-text">{{ row.region }}</span>
+                  <span v-else class="ss-muted">未知</span>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column prop="rule_name" label="规则" min-width="120" />
             <el-table-column prop="method" label="方法" width="70" />
             <el-table-column prop="uri" label="URI" min-width="180" show-overflow-tooltip />
@@ -295,15 +332,76 @@
             />
           </div>
         </el-tab-pane>
+
+        <!-- ===== Tab 6: 拖拽验证码 ===== -->
+        <el-tab-pane label="拖拽验证码" name="captcha">
+          <div class="ss-form">
+            <el-form label-width="150px" size="small">
+              <el-form-item label="启用拖拽验证码">
+                <el-switch v-model="cfg.captcha_enabled" />
+                <span class="ss-hint">开启后访客须完成拖拽拼图验证才能访问站点（nginx 边缘层拦截，与访问量无关）</span>
+              </el-form-item>
+              <el-form-item label="被 CC 攻击自动开启">
+                <el-switch v-model="cfg.captcha_auto_on_cc" :disabled="!cfg.cc_enabled" />
+                <span class="ss-hint">需先启用 CC 防护；触发封禁时自动拉起验证码护盾（改完点保存生效）</span>
+              </el-form-item>
+              <el-form-item label="验证通过后放行">
+                <el-input-number v-model="cfg.captcha_ttl" :min="60" :max="86400" :step="300" style="width: 160px" />
+                <span class="ss-hint">秒，过期后需重新验证</span>
+              </el-form-item>
+            </el-form>
+            <el-alert type="info" :closable="false" show-icon title="工作原理"
+              description="访客首次访问被 nginx 拦截并展示拼图挑战页；拖拽对齐成功后，面板下发 HttpOnly Cookie，之后该站点请求全部放行，不会随流量变大而变慢。" />
+            <div style="margin-top: 12px">
+              <el-button size="small" @click="previewCaptcha">预览验证码</el-button>
+            </div>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, h } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+
+// IP 规则类型 → 中文标签（ip/cidr/range 在表格里显示为中文而非英文）
+function matchTypeLabel(t) {
+  return { ip: 'IP', cidr: '网段', range: 'IP段' }[t] || t
+}
+function matchTypeTag(t) {
+  return { ip: 'primary', cidr: 'info', range: 'info' }[t] || 'info'
+}
+
+// 归属地单元格：match_type=ip 时显示后端查到的 region；country/isp 直接显示 content；
+// cidr/range 不展示归属地（无意义）。
+const RegionCell = {
+  props: ['rule'],
+  setup(props) {
+    return () => {
+      const r = props.rule
+      if (!r) return null
+      // country/isp 类型的内容列本身已是地区/运营商名，不重复显示副标题
+      if (r.match_type === 'country' || r.match_type === 'isp') {
+        return null
+      }
+      if (r.match_type === 'ip') {
+        const reg = r.region
+        if (!reg) return h('span', { class: 'ss-muted' }, '查询失败')
+        const parts = []
+        if (reg.country && reg.country !== '0') parts.push(reg.country)
+        if (reg.province && reg.province !== '0' && reg.province !== reg.country) parts.push(reg.province)
+        if (reg.city && reg.city !== '0' && reg.city !== reg.province) parts.push(reg.city)
+        if (reg.isp && reg.isp !== '0') parts.push(reg.isp)
+        if (!parts.length) return h('span', { class: 'ss-muted' }, reg.raw || '-')
+        return h('span', { class: 'ss-region-text' }, parts.join(' / '))
+      }
+      return null
+    }
+  }
+}
 
 const props = defineProps({
   modelValue: Boolean,
@@ -328,6 +426,7 @@ const cfg = ref({
   ip_whitelist_enabled: false,
   ua_whitelist_enabled: false,
   referer_check: 'off',
+  block_overseas: false,
   cc_enabled: false,
   cc_max_requests: 100,
   cc_window_sec: 10,
@@ -336,7 +435,10 @@ const cfg = ref({
   hsts: false,
   x_frame_options: 'DENY',
   no_sniff: true,
-  no_dir_list: true
+  no_dir_list: true,
+  captcha_enabled: false,
+  captcha_auto_on_cc: false,
+  captcha_ttl: 1800
 })
 
 // 规则列表
@@ -427,6 +529,11 @@ async function saveConfig() {
   } catch (e) { /* interceptor handles */ } finally {
     saving.value = false
   }
+}
+
+// 在新标签预览验证码挑战页（面板直连域名下回退到 /api/ 接口，可正常演示）
+function previewCaptcha() {
+  window.open('/captcha-challenge?site=' + props.siteId, '_blank')
 }
 
 async function addIpRule() {
@@ -536,4 +643,26 @@ function fmtTime(t) {
 .ss-log-stat-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
 .ss-log-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
 .ss-log-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
+.ss-ip-cell { display: flex; flex-direction: column; line-height: 1.35; }
+.ss-ip-main { font-size: 13px; color: #1f2937; word-break: break-all; }
+.ss-region-text { color: #94a3b8; font-size: 11px; margin-top: 2px; }
+.ss-tag-country { display: inline-block; margin-top: 2px; font-size: 11px; color: #64748b; }
+.ss-muted { color: #cbd5e1; font-size: 11px; margin-top: 2px; }
+
+/* ===== 移动端：横排控件换行 + 宽度自适应，配合全局 dialog 限宽防超屏 ===== */
+@media (max-width: 767px) {
+  .ss-dialog { min-height: auto; }
+  .ss-switch-row { flex-wrap: wrap; gap: 8px; }
+  .ss-sub-head { flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+  .ss-sub-actions { flex-wrap: wrap; width: 100%; }
+  .ss-sub-actions :deep(.el-input),
+  .ss-sub-actions :deep(.el-select) { width: auto !important; flex: 1 1 130px; min-width: 110px; }
+  .ss-log-toolbar { flex-wrap: wrap; }
+  .ss-log-toolbar :deep(.el-input) { width: auto !important; flex: 1 1 150px; }
+  .ss-log-stats { flex-wrap: wrap; gap: 8px; }
+  .ss-log-stat { flex: 1 1 30%; min-width: 90px; padding: 10px; }
+  .ss-log-stat-value { font-size: 18px; }
+  .ss-form :deep(.el-form-item__label) { width: 100px !important; }
+  .ss-form :deep(.el-col-12) { flex: 0 0 100% !important; max-width: 100% !important; }
+}
 </style>

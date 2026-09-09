@@ -70,9 +70,9 @@
             <el-tag :type="row.days <= 7 ? 'danger' : row.days <= 30 ? 'warning' : 'success'" size="small">{{ row.days }} 天</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="120" align="center" fixed="right">
+        <el-table-column label="操作" :width="isMobile ? 86 : 120" align="center" fixed="right" class-name="ops-col">
           <template #default="{ row }">
-            <span class="ssl-ops">
+            <span class="ssl-ops ops-cell">
               <el-button size="small" link type="primary" @click="deployCert(row)">部署</el-button>
               <el-button size="small" link type="primary" @click="downloadCert(row)">下载</el-button>
               <el-button size="small" link type="danger" @click="deleteCert(row)">删除</el-button>

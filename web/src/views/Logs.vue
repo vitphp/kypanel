@@ -18,7 +18,7 @@
               <el-tag size="small">{{ moduleName(row.action.split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" min-width="260">
+          <el-table-column label="操作" min-width="260" class-name="ops-col">
             <template #default="{ row }">
               <div class="op-line">
                 <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>
@@ -62,7 +62,7 @@
               <el-tag size="small" type="primary">{{ moduleName(row.action.replace(/^api\./, '').split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" min-width="260">
+          <el-table-column label="操作" min-width="260" class-name="ops-col">
             <template #default="{ row }">
               <div class="op-line">
                 <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>
@@ -106,7 +106,7 @@
               <el-tag size="small" type="success">{{ moduleName(row.action.replace(/^mcp\./, '').split('.')[0]) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" min-width="260">
+          <el-table-column label="操作" min-width="260" class-name="ops-col">
             <template #default="{ row }">
               <div class="op-line">
                 <el-tag v-if="opVerb(row)" size="small" type="info" class="op-verb">{{ opVerb(row) }}</el-tag>

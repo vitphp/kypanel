@@ -114,9 +114,9 @@
         </div>
       </div>
 
-      <el-table v-else :data="filteredSites" empty-text="该分类下暂无网站，点击右上角创建">
+      <el-table v-else :data="filteredSites" empty-text="该分类下暂无网站，点击右上角创建" :cell-style="padCellStyle">
         <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column label="名称" width="180">
+        <el-table-column v-if="showNameCol" label="名称" :width="isMobile ? 100 : 180">
           <template #default="{ row }">
             <div class="remark-text" :class="{ empty: !row.name }" @click="editSiteName(row)">
               <span>{{ row.name }}</span>
@@ -124,16 +124,20 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="域名 / 地址" min-width="220">
+        <el-table-column label="域名 / 地址" :width="domainWidth">
           <template #default="{ row }">
             <template v-if="siteAllDomains(row).length">
               <div
                 class="domain-cell"
                 :class="{ 'has-more': siteAllDomains(row).length > 1 }"
-                @mouseenter="openDomainList($event, row)"
-                @mouseleave="closeDomainList"
               >
-                <a :href="visitHref(row)" target="_blank" class="domain-link">
+                <a
+                  :href="visitHref(row)"
+                  target="_blank"
+                  class="domain-link"
+                  @mouseenter="openDomainList($event, row)"
+                  @mouseleave="closeDomainList"
+                >
                   {{ siteAllDomains(row)[0] }}
                 </a>
                 <el-button class="copy-btn" size="small" text :title="`复制域名 ${siteAllDomains(row)[0]}`" @click="copyDomain(siteAllDomains(row)[0])">
@@ -145,29 +149,29 @@
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="端口" width="80">
+        <el-table-column v-if="!isMobile" label="端口" width="70">
           <template #default="{ row }">{{ row.port }}</template>
         </el-table-column>
-        <el-table-column label="类型" width="110">
+        <el-table-column v-if="!isMobile" label="类型" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="typeMeta[row.type]?.tag || 'info'">
               {{ typeMeta[row.type]?.label || row.type }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="运行版本" width="120" show-overflow-tooltip>
+        <el-table-column v-if="showRuntimeCol" label="运行版本" width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.runtime_version">{{ row.runtime_version }}</span>
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="网站目录" min-width="200" show-overflow-tooltip>
+        <el-table-column v-if="!isMobile" label="网站目录" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <el-link v-if="siteDir(row)" type="primary" @click="openFiles(siteDir(row))">{{ siteDir(row) }}</el-link>
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column label="SSL证书" width="110" align="center">
+        <el-table-column v-if="showSslCol" label="SSL证书" width="110" align="center">
           <template #default="{ row }">
             <el-link type="primary" @click="openSSL(row)">
               <span v-if="row.ssl_days >= 0" :class="{ 'ssl-soon': row.ssl_days <= 14 }">{{ row.ssl_status }}</span>
@@ -175,7 +179,7 @@
             </el-link>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="130">
+        <el-table-column label="状态" :width="isMobile ? 100 : 130">
           <template #default="{ row }">
             <el-dropdown
               v-if="row.active === 'running' || row.active === 'stopped'"
@@ -199,7 +203,7 @@
             <el-tag v-else size="small" type="info">未知</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="270" fixed="right">
+        <el-table-column label="操作" :width="opsWidth" align="right" fixed="right" class-name="ops-col">
           <template #default="{ row }">
             <div class="ops-cell">
               <el-button size="small" type="primary" link @click="openSettings(row)">设置</el-button>
@@ -589,10 +593,29 @@ const runtimeInstallKey = computed(() => {
 // 已移至 runtimeAppKey 之后定义，见下方「运行时安装状态（含排队）」区块。
 // 弹窗宽度 / label 对齐方式：根据视口响应式（移动端避免超出屏幕）
 const isMobile = ref(false)
+const isCompact = ref(false) // 768–1199：紧凑布局，砍掉次要列避免横向溢出产生空隙
 const dialogWidth = computed(() => isMobile.value ? '92vw' : '620px')
 const labelPosition = computed(() => isMobile.value ? 'top' : 'left')
+// 列显隐：紧凑态隐藏「名称 / 运行版本 / SSL」三个次要列；移动端再额外隐藏更多
+const showNameCol = computed(() => !isMobile.value && !isCompact.value)
+const showRuntimeCol = computed(() => !isMobile.value && !isCompact.value)
+const showSslCol = computed(() => !isMobile.value && !isCompact.value)
+// 域名列宽度：固定收窄到贴合内容（域名文本 + 复制 + 二维码 ≈ 170~200），
+// 不再作为弹性列吸走表格剩余空间，避免列内出现大块空隙
+const domainWidth = computed(() => isMobile.value ? 200 : isCompact.value ? 190 : 210)
+// 操作列宽度：按内容自适应（5 个 link 按钮约需 186px），避免右对齐后左侧留出大块空隙
+const opsWidth = computed(() => isMobile.value ? 190 : isCompact.value ? 196 : 200)
+// 端口 / 类型 / 运行版本 三列单元格左右各 12px 内边距：用 el-table 的 cell-style 返回内联样式，
+// 优先级最高，必定覆盖 el-table 默认 td 内边距（class-name / 列上 cell-style 在该版本无效）
+function padCellStyle({ column }) {
+  if (column.label === '端口' || column.label === '类型' || column.label === '运行版本') {
+    return { padding: '0 12px' }
+  }
+}
 const updateResponsive = () => {
-  isMobile.value = window.innerWidth < 768
+  const w = window.innerWidth
+  isMobile.value = w < 768
+  isCompact.value = w >= 768 && w < 1200
 }
 const TAB_STORAGE_KEY = 'website_active_tab'
 const activeTab = ref(localStorage.getItem(TAB_STORAGE_KEY) || 'all')
@@ -1684,7 +1707,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 .card-header-actions { display: flex; align-items: center; gap: 8px; }
-.domain-cell { display: inline-flex; align-items: center; gap: 2px; line-height: 1; margin-left: -12px; position: relative; }
+.domain-cell { display: inline-flex; align-items: center; gap: 2px; line-height: 1; overflow: visible; position: relative; }
 .domain-cell.has-more { padding-right: 4px; cursor: pointer; }
 .domain-caret { color: #909399; cursor: pointer; font-size: 12px; margin-left: -2px; }
 .domain-list-wrap { position: fixed; z-index: 2000; background: #fff; border: 1px solid #ebeef5; border-radius: 4px; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.1); white-space: nowrap; padding: 4px 0; }
@@ -1696,6 +1719,33 @@ onBeforeUnmount(() => {
 .domain-link { display: inline-flex; align-items: center; vertical-align: middle; line-height: 1; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none !important; color: #409eff; }
 .domain-link:hover { text-decoration: none !important; }
 .domain-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #409eff; line-height: 18px; text-align: left; }
+/* 操作列：5 个 link 按钮单行排列，整体不换行不溢出 */
+::deep(.ops-cell) {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 0 4px;
+  white-space: nowrap;
+  min-width: 0;
+  font-size: 12px;
+}
+::deep(.ops-cell .el-button.is-link) {
+  padding: 4px 5px;
+  font-size: 12px;
+  min-height: auto;
+}
+::deep(.ops-cell .el-button.is-link + .el-button.is-link) {
+  margin-left: 0;
+}
+
+@media (max-width: 767px) {
+  .domain-cell { margin-left: 0; }
+  .domain-cell .copy-btn,
+  .domain-cell .qr-trigger { display: none; }
+  .domain-link { white-space: normal; word-break: break-all; overflow: visible; }
+}
 .site-tabs { margin-bottom: 4px; }
 .tab-badge { margin-left: 4px; }
 .env-missing {

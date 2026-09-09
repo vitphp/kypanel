@@ -9,6 +9,7 @@ import App from './App.vue'
 import router from './router'
 import './styles/index.css'
 import Skeleton from './components/Skeleton.vue'
+import { useIsMobile } from './composables/useIsMobile'
 
 // 安全入口（/<entrance>）即登录页，相关处理在 router/index.js 中：
 // 把入口路径动态注册为登录页路由，登录页对外地址统一用入口，不暴露 /login。
@@ -21,6 +22,14 @@ for (const [name, comp] of Object.entries(Icons)) {
 }
 // 全局注册骨架屏组件
 app.component('Skeleton', Skeleton)
+
+// 全局注入 isMobile（<768px 为 true），供各表格在移动端收窄操作列宽度
+app.mixin({
+  setup() {
+    const { isMobile } = useIsMobile()
+    return { isMobile }
+  },
+})
 
 app.use(createPinia())
 app.use(router)

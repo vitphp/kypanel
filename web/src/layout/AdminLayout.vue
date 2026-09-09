@@ -13,12 +13,12 @@
 
     <div class="lp-body">
       <div v-if="viewport !== 'desktop'" class="lp-sidebar-mask" :class="{ open: mobileDrawerOpen }" @click="mobileDrawerOpen = false"></div>
-      <TheSidebar
-        :collapsed="viewport === 'desktop' && collapsed"
-        class="lp-sidebar-wrap"
-        :class="{ 'is-drawer': viewport !== 'desktop' }"
-        @toggle-collapse="viewport !== 'desktop' ? (mobileDrawerOpen = !mobileDrawerOpen) : toggleCollapse()"
-      />
+      <div class="lp-sidebar-wrap" :class="{ 'is-drawer': viewport !== 'desktop' }">
+        <TheSidebar
+          :collapsed="viewport === 'desktop' && collapsed"
+          @toggle-collapse="viewport !== 'desktop' ? (mobileDrawerOpen = !mobileDrawerOpen) : toggleCollapse()"
+        />
+      </div>
 
       <main class="lp-main">
         <div class="lp-main-content">
@@ -86,7 +86,8 @@ function applyViewport() {
 }
 
 function toggleCollapse() {
-  if (viewport.value === 'mobile') {
+  // 手机 / 平板：侧栏为抽屉式，点击顶栏按钮切换开合
+  if (viewport.value !== 'desktop') {
     mobileDrawerOpen.value = !mobileDrawerOpen.value
     return
   }

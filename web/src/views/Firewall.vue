@@ -65,10 +65,12 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="160" fixed="right">
+          <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
             <template #default="{ row }">
-              <el-button size="small" type="primary" text @click="openPortDialog(row)">编辑</el-button>
-              <el-button size="small" type="danger" text @click="removeRule(row)">删除</el-button>
+              <div class="ops-cell">
+                <el-button size="small" type="primary" text @click="openPortDialog(row)">编辑</el-button>
+                <el-button size="small" type="danger" text @click="removeRule(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -79,13 +81,13 @@
         <WafPanel />
       </el-tab-pane>
 
-      <!-- IP 规则（IP / 国家 / 运营商） -->
+      <!-- IP 规则 -->
       <el-tab-pane label="IP规则" name="ips">
         <div class="toolbar">
           <div class="toolbar-title">
             <el-icon><Lock /></el-icon>
             <span>IP 规则</span>
-            <span class="tip">可添加 IP/网段/范围、国家、运营商，一行一个</span>
+            <span class="tip">可添加 IP/网段/范围，一行一个</span>
           </div>
           <div class="toolbar-actions">
             <el-button type="primary" :icon="Plus" @click="openIpDialog">添加IP规则</el-button>
@@ -157,10 +159,12 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="160" fixed="right">
+          <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
             <template #default="{ row }">
-              <el-button size="small" type="primary" text @click="openPortDialog(row)">编辑</el-button>
-              <el-button size="small" type="danger" text @click="removeRule(row)">删除</el-button>
+              <div class="ops-cell">
+                <el-button size="small" type="primary" text @click="openPortDialog(row)">编辑</el-button>
+                <el-button size="small" type="danger" text @click="removeRule(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -221,8 +225,6 @@
         <el-form-item label="类型">
           <el-radio-group v-model="ipForm.type">
             <el-radio-button value="ip">IP</el-radio-button>
-            <el-radio-button value="country">国家</el-radio-button>
-            <el-radio-button value="isp">运营商</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="内容">
@@ -230,9 +232,7 @@
             v-model="ipForm.content"
             type="textarea"
             :rows="6"
-            :placeholder="ipForm.type === 'ip'
-              ? '每行一个：IP、网段或范围\n1.2.3.4\n1.2.3.0/24\n1.2.3.10-1.2.3.50'
-              : '每行一个：' + (ipForm.type === 'country' ? '国家名称\n美国\n日本' : '运营商名称\n电信\n联通')"
+            :placeholder="'每行一个：IP、网段或范围\n1.2.3.4\n1.2.3.0/24\n1.2.3.10-1.2.3.50'"
           />
           <div class="form-tip">一行一个，支持 IP、网段(CIDR)、范围(1.2.3.10-1.2.3.50)</div>
         </el-form-item>
@@ -337,10 +337,10 @@ function protoLabel(p) {
   return { tcp: 'TCP', udp: 'UDP', tcpudp: 'TCP+UDP' }[p] || p
 }
 function typeLabel(t) {
-  return { ip: 'IP', country: '国家', isp: '运营商' }[t] || t
+  return { ip: 'IP' }[t] || t
 }
 function typeTag(t) {
-  return { ip: 'primary', country: 'success', isp: 'warning' }[t] || 'info'
+  return { ip: 'primary' }[t] || 'info'
 }
 function directionLabel(d) {
   return { in: '入站', out: '出站', both: '双向' }[d] || '-'
@@ -364,11 +364,8 @@ async function loadPortRules() {
 async function loadIpRules() {
   loadingIps.value = true
   try {
-    const [ipRes, geoRes] = await Promise.all([
-      request.get('/security/rules', { params: { type: 'ip' } }),
-      request.get('/security/rules', { params: { type: 'geo' } }),
-    ])
-    ipRules.value = [...(ipRes.data.rules || []), ...(geoRes.data.rules || [])]
+    const res = await request.get('/security/rules', { params: { type: 'ip' } })
+    ipRules.value = res.data.rules || []
   } finally {
     loadingIps.value = false
   }
@@ -463,7 +460,7 @@ async function addIpRule() {
 }
 
 async function removeRule(row) {
-  const label = row.type === 'port' ? `端口 ${row.port} 规则` : row.type === 'ip' ? `IP 规则` : row.type === 'country' ? '国家规则' : '运营商规则'
+  const label = row.type === 'port' ? `端口 ${row.port} 规则` : `IP 规则`
   await ElMessageBox.confirm(`确认删除该${label}？`, '提示', { type: 'warning' })
   await request.post('/security/rule/delete', { id: row.id })
   ElMessage.success('已删除')

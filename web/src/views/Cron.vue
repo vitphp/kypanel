@@ -45,7 +45,7 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="160" align="center">
+        <el-table-column label="操作" :width="isMobile ? 130 : 160" align="right" fixed="right" class-name="ops-col">
           <template #default="{ row }">
             <div class="ops-cell">
               <el-button link type="success" @click="run(row)">执行</el-button>
@@ -265,10 +265,12 @@
         <el-table-column prop="mtime" label="备份时间" width="180">
           <template #default="{ row }">{{ fmtTime(row.mtime * 1000) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="160" align="center">
+        <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="downloadBackup(row)">下载</el-button>
-            <el-button link type="danger" size="small" @click="deleteBackup(row)">删除</el-button>
+            <div class="ops-cell">
+              <el-button link type="primary" size="small" @click="downloadBackup(row)">下载</el-button>
+              <el-button link type="danger" size="small" @click="deleteBackup(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>

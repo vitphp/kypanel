@@ -31,3 +31,7 @@ login.yaml
 panel.exe~
 webui/dist.tar.gz
 .playwright-cli/
+
+# 部署脚本（含明文服务器 root 凭据，禁止入库，防止 push 泄露）
+deploy*.bat
+*.ps1

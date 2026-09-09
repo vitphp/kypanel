@@ -172,10 +172,12 @@
               <el-switch :model-value="row.enabled" @change="(v) => toggleRule(row, v)" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" :width="isMobile ? 86 : 120" fixed="right" class-name="ops-col">
             <template #default="{ row }">
-              <el-button size="small" text type="primary" @click="editCustomRule(row)">编辑</el-button>
-              <el-button size="small" text type="danger" @click="deleteRule(row)">删除</el-button>
+              <div class="ops-cell">
+                <el-button size="small" text type="primary" @click="editCustomRule(row)">编辑</el-button>
+                <el-button size="small" text type="danger" @click="deleteRule(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -232,9 +234,11 @@
               <span class="muted">{{ row.remark || '-' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column label="操作" :width="isMobile ? 60 : 90" fixed="right" class-name="ops-col">
             <template #default="{ row }">
-              <el-button size="small" text type="danger" @click="deleteIpRule(row)">删除</el-button>
+              <div class="ops-cell">
+                <el-button size="small" text type="danger" @click="deleteIpRule(row)">删除</el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>

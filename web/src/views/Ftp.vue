@@ -54,7 +54,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" min-width="120" align="center">
+          <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
             <template #default="{ row }">
               <div class="ops-cell">
                 <el-button link :type="row.status === 'enabled' ? 'warning' : 'success'" @click="toggle(row)">

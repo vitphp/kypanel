@@ -57,7 +57,7 @@
             </el-table-column>
             <el-table-column prop="ports" label="端口" min-width="180" show-overflow-tooltip />
             <el-table-column prop="id" label="容器 ID" min-width="120" show-overflow-tooltip />
-            <el-table-column label="操作" min-width="160" align="center">
+            <el-table-column label="操作" :width="isMobile ? 130 : 160" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
                 <div class="ops-cell">
                   <el-button v-if="row.running" link type="warning" @click="action(row, 'stop')">停止</el-button>
@@ -104,14 +104,16 @@
             <el-table-column prop="gateway" label="网关" min-width="130" show-overflow-tooltip />
             <el-table-column prop="containers" label="容器数" width="85" align="center" />
             <el-table-column prop="id" label="网络 ID" min-width="110" show-overflow-tooltip />
-            <el-table-column label="操作" min-width="80" align="center">
+            <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
-                <el-button
-                  link
-                  type="danger"
-                  :disabled="['bridge', 'host', 'none'].includes(row.name)"
-                  @click="removeNetwork(row)"
-                >删除</el-button>
+                <div class="ops-cell">
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="['bridge', 'host', 'none'].includes(row.name)"
+                    @click="removeNetwork(row)"
+                  >删除</el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>

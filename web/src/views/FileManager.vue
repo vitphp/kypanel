@@ -237,7 +237,7 @@
               <span>{{ row.mod_time }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" min-width="140" fixed="right" align="right">
+          <el-table-column label="操作" :width="isMobile ? 130 : 140" fixed="right" align="right" class-name="ops-col">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button size="small" link type="primary" @click="openRow(row)">打开</el-button>
@@ -315,7 +315,7 @@
             </template>
           </el-table-column>
           <el-table-column label="大小" width="100" :formatter="sizeFmt" prop="size" />
-          <el-table-column label="操作" min-width="140" fixed="right" align="right">
+          <el-table-column label="操作" :width="isMobile ? 130 : 140" fixed="right" align="right" class-name="ops-col">
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button size="small" link type="primary" @click="cd(row.dir)">打开目录</el-button>
@@ -2729,8 +2729,8 @@ watch(currentPath, (p) => {
 @media (max-width: 767px) {
   .row-actions { flex-wrap: wrap; row-gap: 2px; column-gap: 0; }
   .row-actions .el-button {
-    font-size: 11px;
-    padding: 1px 4px;
+    font-size: 14px;
+    padding: 2px 6px;
     min-width: 0;
   }
   /* 「打开/压缩/解压/下载」隐藏文字，只留紧凑按钮 */

@@ -27,7 +27,7 @@
             <el-table-column label="创建时间" width="170">
               <template #default="{ row }">{{ fmtTimeISO(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" min-width="220">
+            <el-table-column label="操作" :width="isMobile ? 130 : 160" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
                 <div class="ops-cell">
                   <template v-if="row.can_delete">
@@ -65,7 +65,7 @@
             <el-table-column label="权限" show-overflow-tooltip>
               <template #default="{ row }">{{ permText(row.permissions) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="120">
+            <el-table-column label="操作" :width="isMobile ? 'auto' : 90" align="right" fixed="right" class-name="ops-col">
               <template #default="{ row }">
                 <div class="ops-cell">
                   <el-button link type="primary" size="small" @click="editRolePerm(row)">编辑</el-button>
@@ -296,7 +296,7 @@ onMounted(load)
 
 <style scoped>
 .card-head { display: flex; justify-content: space-between; align-items: center; }
-.ops-cell { display: inline-flex; flex-wrap: wrap; gap: 0; }
+
 .super-tip { color: #c0c4cc; font-size: 12px; }
 .perm-list { width: 100%; }
 .perm-list .el-checkbox { margin-right: 16px; margin-bottom: 6px; }

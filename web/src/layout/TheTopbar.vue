@@ -250,9 +250,9 @@ async function onRestartCommand(cmd) {
   align-items: center;
   gap: 10px;
 }
-/* 窄屏（手机 / 小屏平板 < 900px）：隐藏品牌区，只留汉堡按钮作为侧栏入口；
+/* 窄屏（< 500px）：隐藏品牌区，只留汉堡按钮作为侧栏入口；
    顶栏空间让给终端、重启等更多功能按钮，避免被挤压 */
-@media (max-width: 899px) {
+@media (max-width: 499px) {
   .lp-brand { display: none; }
 }
 /* 进一步窄屏（< 700px）：隐藏文档按钮（保留终端/重启/账号下拉等核心操作，避免顶栏被压成两行） */
