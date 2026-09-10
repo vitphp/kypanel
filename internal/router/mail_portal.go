@@ -19,7 +19,7 @@ import (
 //
 // 这些接口由门户站点（mail.<domain>）的 nginx 片段把 /api/mail-portal/ 反代到面板，
 // 供访客自助注册 / 登录 / 收发邮件。会话鉴权用独立的邮箱会话 token（Authorization: Bearer mb.xxx），
-// 与面板管理员登录体系隔离。必须在 serveFrontend 之前注册。
+// 与面板管理员登录体系隔离。
 func setupMailPortalRoutes(r *gin.Engine) {
 	g := r.Group("/api/mail-portal")
 

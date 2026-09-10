@@ -441,8 +441,7 @@ const statusMap = ref({}) // domainId -> {ready, detail}
 const checking = ref(false)
 const checkingAll = ref(false)   // 后台批量检测中（用于状态文字显示「检测中」）
 
-// 注意：main.js 里 app.mixin 注入的 isMobile 到不了模板（恒为 falsy），
-// 必须像其它页面一样自行声明，否则移动端列显隐不生效。
+// 本组件自行声明 isMobile
 const { isMobile } = useIsMobile()
 
 // 添加向导
@@ -1223,7 +1222,7 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 12px; border-bottom: 1px solid #f1f5f9; }
 .mail-side-title { font-weight: 700; color: #0f172a; font-size: 14px; }
 .mail-domain-list { flex: 1; overflow-y: auto; padding: 8px; }
-/* 手机专用的域名下拉区：桌面/平板隐藏（见下方媒体查询） */
+/* 手机专用的域名下拉区：桌面/平板隐藏 */
 .mail-side-mobile { display: none; }
 .mail-domain-item { border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: background .15s; }
 .mail-domain-item:hover { background: #f8fafc; }
@@ -1258,7 +1257,6 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-pane-title { font-size: 15px; font-weight: 700; color: #0f172a; }
 .mail-pane-head-actions { display: flex; align-items: center; gap: 8px; }
 .mail-accounts-pane { display: flex; flex-direction: column; }
-/* 账号管理表格：size="small" 默认字号只有 12px，统一放大到 14px 并加大行高 */
 .mail-accounts-pane :deep(.el-table--small),
 .mail-accounts-pane :deep(.el-table--small .el-table__cell),
 .mail-accounts-pane :deep(.el-table--small .cell) { font-size: 14px; }
@@ -1364,14 +1362,14 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 /* ============ 平板适配（<1024px，此时侧栏已是抽屉，右侧整宽） ============ */
 @media (max-width: 1023px) {
   .mail-side { width: 210px; flex: 0 0 210px; }
-  /* 域名操作按钮两行排列，避免在窄栏里被压成小方块 */
+  /* 域名操作按钮两行排列 */
   .mail-domain-actions { flex-wrap: wrap; row-gap: 4px; }
   .mail-domain-actions .el-button { flex: 1 1 40%; }
 }
 
 /* ============ 手机适配（<768px）：左右两栏改为上下堆叠 ============ */
 @media (max-width: 767px) {
-  /* 外壳不再锁死一屏高，交给外层 .lp-main-content 自然滚动 */
+  /* 外壳高度自适应，交给外层容器滚动 */
   .mail-shell { flex-direction: column; height: auto; min-height: 0; }
 
   .mail-side { width: 100%; flex: 0 0 auto; }
@@ -1389,13 +1387,13 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
   .mail-main-body { overflow: visible; padding: 12px; }
   .mail-main-empty { padding: 40px 20px; }
 
-  /* 收窄页签内边距与字号，保证 4 个页签一行放得下 */
+  /* 收窄页签内边距与字号 */
   .mail-tabs :deep(.el-tabs__item) { padding: 0 10px; font-size: 13.5px; }
 
   .mail-pane-head { flex-wrap: wrap; gap: 10px; min-height: 0; margin-bottom: 12px; }
   .mail-pane-head-left { flex: 1 1 100%; min-width: 0; }
   .mail-pane-head-actions { flex: 1 1 auto; justify-content: flex-start; }
-  /* 邮箱账号下拉占满剩余宽度（覆盖模板里的内联 width:220px） */
+  /* 邮箱账号下拉占满剩余宽度 */
   .mail-pane-head-left :deep(.el-select) { flex: 1 1 120px; min-width: 0; width: auto !important; }
 
   .msg-detail-top { padding: 12px; }

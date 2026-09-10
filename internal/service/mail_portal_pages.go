@@ -47,7 +47,6 @@ func materializePortalLogo(site *model.Site, logo string) string {
 		}
 		return "/" + dstName
 	}
-	// 上传记录已丢失：不输出无效地址，交给页面用首字母徽标兜底
 	return ""
 }
 
@@ -57,8 +56,6 @@ func writeMailPortalFiles(dom *model.MailDomain, site *model.Site, portalDomain 
 	if err := os.MkdirAll(site.Root, 0o755); err != nil {
 		return err
 	}
-	// 上传的 Logo 同步复制到站点根目录，页面改用站点内静态路径引用，
-	// 不依赖「/api/mail-portal」反代（Apache 等场景也能正常显示）。
 	logo = materializePortalLogo(site, logo)
 	indexHTML := renderMailPortalIndex(portalDomain, dom.Domain, title, name, logo, footer, register)
 	if err := os.WriteFile(filepath.Join(site.Root, "index.html"), []byte(indexHTML), 0o644); err != nil {
@@ -81,8 +78,7 @@ func portalBadgeLetter(name string) string {
 }
 
 // portalLogoFallback 生成首字母渐变徽标的内联 SVG（data URI）：
-// 既用作默认的浏览器标签页图标，也用作 Logo 图片加载失败时的兜底，
-// 避免出现浏览器默认的「破图」图标。
+// 既用作默认的浏览器标签页图标，也用作 Logo 图片加载失败时的兜底。
 func portalLogoFallback(name string) string {
 	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">` +
 		`<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
@@ -748,7 +744,6 @@ var LP = (function(){
       });
   }
 
-  // 上传（multipart，不能手动设置 Content-Type，交给浏览器带 boundary）
   function apiUpload(path,fd){
     var headers={};
     if(token)headers['Authorization']='Bearer '+token;
@@ -859,7 +854,6 @@ var LP = (function(){
       });
   }
 
-  // 从邮件详情返回列表（腾讯/新浪邮箱那种交互）
   function back(){
     $('main').className='main';
     renderMsgs();
@@ -882,7 +876,6 @@ var LP = (function(){
       var useHtml=!!m.html_body;
       var body='';
       if(useHtml){
-        // 正文用 srcdoc 属性赋值（而非拼 HTML 字符串），避免正文里的引号把属性截断
         body='<iframe class="mail-html" sandbox></iframe>';
       }else{
         body='<div class="body" style="white-space:pre-wrap">'+esc(m.text_body||'(无正文内容)')+'</div>';
@@ -1079,7 +1072,6 @@ var LP = (function(){
   }
 
   function onFilesUp(e){
-    // 注意：清空 input.value 会同时清空 FileList，必须先复制成数组
     var fs=Array.prototype.slice.call(e.target.files||[]);
     e.target.value='';
     var before=files.map(function(x){return x.name;});
@@ -1205,7 +1197,6 @@ var LP = (function(){
   if(!REGISTER){var tr=$('tabReg');if(tr)tr.style.display='none';}
   else if(location.hash==='#register'){tab('register');}
   if(token){
-    // 有登录态：先显示启动遮罩，校验通过直接进邮箱，失败再回登录页，避免闪一下登录页
     loadMe().catch(function(){logout();}).then(bootDone);
   }else{
     bootDone();

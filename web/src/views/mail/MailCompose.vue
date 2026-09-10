@@ -476,7 +476,7 @@ async function doSaveDraft() {
 
 /* ============ 手机适配 ============ */
 @media (max-width: 767px) {
-  /* 发件人下拉自适应宽度，避免固定 260px 撑破弹窗 */
+  /* 发件人下拉自适应宽度 */
   .mc-row :deep(.el-select) { width: auto !important; flex: 1; min-width: 0; }
   .mc-row { flex-wrap: wrap; }
   .mc-label { flex: 0 0 56px; }

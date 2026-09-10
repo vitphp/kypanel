@@ -26,10 +26,6 @@ import (
 //   - 可配置 HTTPS、绑定其他域名
 //   - 可设置官网标题 / 网站名称 / Logo / 底部版权
 //   - 可开放注册（供他人自助注册邮箱）或关闭注册
-//
-// 实现方式：门户是一个 static 类型的站点，站点根目录下生成 index.html（官网）
-// 与 webmail.html（自包含 webmail 单页），并通过 nginx 片段把 /api/mail-portal/
-// 反代回面板的公开接口，实现「邮箱登录 / 注册 / 收发信」。
 // ============================================================================
 
 // MailPortalView 门户配置视图（返回给前端）
@@ -86,7 +82,7 @@ type MailPortalCertReq struct {
 	Domains   []string `json:"domains"`
 }
 
-// mailPortalSnippetPath 门户反代 nginx 片段路径（.inc 后缀，避免被 conf.d/*.conf 自动加载）
+// mailPortalSnippetPath 门户反代 nginx 片段路径
 func mailPortalSnippetPath(name string) string {
 	return filepath.Join(nginxConfDir, "lp_"+name+"_mailportal.inc")
 }
@@ -279,18 +275,16 @@ func SaveMailPortal(domainID uint, req SaveMailPortalReq) (*MailPortalView, erro
 	algo := normalizeCertAlgo(req.CertAlgo)
 	certEmail := strings.TrimSpace(req.CertEmail)
 
-	// 统一先落库门户字段（关闭时也要保存设置）
 	applyPortalFields(dom, pd, extras, req.SSL, title, name, logo, footer, req.Register)
 	dom.PortalCertBrand = brand
 	dom.PortalCertAlgo = algo
 	dom.PortalCertEmail = certEmail
 	dom.PortalCertDomains = strings.Join(certDomains, ",")
 
-	// ---- 关闭门户：停用站点（写停用占位页），保留站点与页面文件 ----
+	// ---- 关闭门户 ----
 	if !req.Enabled {
 		if dom.PortalSiteID > 0 {
 			if s, e := getSiteOrErr(dom.PortalSiteID); e == nil {
-				// 先把配置切换为「停用占位」，再移除反代片段，避免残留引用导致校验失败
 				_ = SiteAction(SiteActionReq{ID: s.ID, Action: "stop"})
 				_ = os.Remove(mailPortalSnippetPath(s.Name))
 			}
@@ -308,8 +302,6 @@ func SaveMailPortal(domainID uint, req SaveMailPortalReq) (*MailPortalView, erro
 		return nil, err
 	}
 
-	// 先落库「已开启 + 站点ID」：否则重建站点配置时 MailPortalIncludeLine 查不到，
-	// 反代片段不会被 include，webmail 接口将 404。
 	dom.PortalEnabled = true
 	dom.PortalSiteID = site.ID
 	if err := model.DB.Save(dom).Error; err != nil {
@@ -437,8 +429,6 @@ func writeMailPortalSnippet(site *model.Site) error {
 	sb.WriteString("# kypanel 邮箱门户接口反代（自动生成，请勿手动修改）\n")
 	sb.WriteString("location ^~ /api/mail-portal/ {\n")
 	fmt.Fprintf(&sb, "    proxy_pass %s://%s/api/mail-portal/;\n", scheme, host)
-	// 透传原始 Host（门户域名），后端据此定位对应邮箱域名；不能改成 127.0.0.1，
-	// 否则 MailPortalDomainByHost 无法识别是哪个域名的门户。
 	sb.WriteString("    proxy_set_header Host $host;\n")
 	sb.WriteString("    proxy_set_header X-Forwarded-Host $host;\n")
 	sb.WriteString("    proxy_set_header X-Real-IP $remote_addr;\n")
@@ -447,8 +437,6 @@ func writeMailPortalSnippet(site *model.Site) error {
 	sb.WriteString("    client_max_body_size 30m;\n")
 	sb.WriteString(sslOpts)
 	sb.WriteString("}\n")
-	// 「我的文件」附件库位于站点根目录 files/ 下，禁止直接静态访问，
-	// 仅允许登录账号通过 /api/mail-portal/files/ 接口读写，避免附件被公开下载。
 	sb.WriteString("# kypanel 邮箱门户附件目录保护（自动生成，请勿手动修改）\n")
 	sb.WriteString("location ^~ /files/ {\n")
 	sb.WriteString("    return 404;\n")
@@ -483,8 +471,7 @@ func isMailPortalSite(siteID uint) bool {
 }
 
 // RegenerateAllMailPortals 按当前模板重新生成所有已开启门户的静态页面
-// （index.html / webmail.html）。面板升级后模板可能变化，启动时调用一次即可
-// 自动生效，无需逐个重新保存门户配置。返回成功重建的域名数量。
+// （index.html / webmail.html），返回成功重建的域名数量。
 func RegenerateAllMailPortals() (int, error) {
 	var doms []model.MailDomain
 	if err := model.DB.Where("portal_enabled = ? AND portal_site_id > 0", true).Find(&doms).Error; err != nil {
@@ -578,8 +565,7 @@ func ApplyMailPortalCert(domainID uint, req MailPortalCertReq) (*MailPortalView,
 // 门户 Logo 上传
 // ============================================================================
 
-// mailPortalLogoDir 门户 Logo 存储目录（面板数据目录下，独立于站点根目录，
-// 站点尚未创建时也可先上传 Logo）。
+// mailPortalLogoDir 门户 Logo 存储目录
 func mailPortalLogoDir() string {
 	return filepath.Join(config.Get().DataDir, "mailportal", "logo")
 }
@@ -610,7 +596,7 @@ func SaveMailPortalLogo(domainID uint, filename string, data []byte) (string, er
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	// 清理旧 Logo（换格式时避免残留旧文件）
+	// 清理旧 Logo
 	cleanupMailPortalLogo(domainID)
 	name := strconv.FormatUint(uint64(domainID), 10) + ext
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {

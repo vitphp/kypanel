@@ -1002,9 +1002,6 @@ func writeSiteService(s *model.Site) error {
 	if s.Root != "" {
 		fmt.Fprintf(&sb, "cd %s\n", s.Root)
 	}
-	// 启动命令为空（Go 站点多可执行文件待选入口）：不生成 exec，直接退出，
-	// 避免写出 "exec " 造成服务反复启动失败；待前端选择入口后由
-	// SetSiteStartCommand 重新写入并启动。
 	if strings.TrimSpace(s.StartCommand) == "" {
 		sb.WriteString("echo 'start command not set, waiting for entry selection'\n")
 		sb.WriteString("exit 0\n")
@@ -1137,9 +1134,6 @@ func writeSiteConf(s *model.Site) error {
 	conf := genSiteConf(s)
 	// 注入拖拽验证码 include 行（覆盖站点存在 config_override 时 genSiteConf 直接返回 override 的情况）
 	conf = ensureCaptchaInclude(conf, s)
-	// 自愈：全局 WAF 开启时 genSiteConf 会 include /etc/nginx/waf/lp_<name>.conf，
-	// 但新建站点此前从未生成该片段文件，导致 nginx -t 报 "open() ... failed" 而站点创建失败。
-	// 这里先确保片段文件存在（内容为空时写占位），使 include 永远可解析。
 	regenerateSiteWAFSnippet(s)
 	ws := WebServerType()
 

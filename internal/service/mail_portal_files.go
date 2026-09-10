@@ -14,7 +14,6 @@ import (
 
 // 门户「我的文件」：每个邮箱账号在门户站点根目录下拥有独立目录
 // <门户站点根目录>/files/<账号>，用于存放发信附件，可在 webmail 中上传 / 下载 / 删除。
-// 目录位于站点根目录内，便于通过文件管理器或 FTP 统一备份管理。
 
 // MailPortalMaxFileSize 单个附件上限 25MB
 const MailPortalMaxFileSize = 25 * 1024 * 1024

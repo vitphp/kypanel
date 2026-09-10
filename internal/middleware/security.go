@@ -53,7 +53,6 @@ func DomainGuard() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		// 邮箱门户公开接口同样由门户站点 nginx 同域反代到面板，需豁免域名白名单。
 		if strings.HasPrefix(cp, "/api/mail-portal/") {
 			c.Next()
 			return
