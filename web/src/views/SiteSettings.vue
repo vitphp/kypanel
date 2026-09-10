@@ -1,45 +1,41 @@
 <template>
   <el-drawer v-model="visible" :title="`网站设置 - ${site.name || ''}`" size="780px" destroy-on-close>
     <el-tabs v-model="activeTab">
-      <!-- 域名（拖拽排序、批量添加） -->
+      <!-- 域名（排序、批量添加） -->
       <el-tab-pane label="域名" name="domains">
         <div class="domain-tab">
           <div class="domain-list-wrap">
             <div class="domain-list-header">
-              <span class="drag-handle-placeholder"></span>
+              <span class="domain-order-header">排序</span>
               <span class="domain-name-cell header">域名</span>
               <span class="domain-port header">端口</span>
               <span class="domain-actions-header">操作</span>
             </div>
-            <draggable v-model="form.domains" item-key="(d) => d" animation="150" ghost-class="domain-ghost" @update="onDomainListChange">
-              <template #item="{ element: d, index }">
-                <div class="domain-row">
-                  <div class="domain-col-handle">
-                    <el-icon class="drag-handle" :size="14"><Rank /></el-icon>
-                  </div>
-                  <div class="domain-col-name">
-                    <el-input
-                      v-if="editingDomainIdx === index"
-                      ref="domainInputRefs"
-                      v-model="form.domains[index]"
-                      size="small"
-                      @blur="saveDomainRowEdit(index)"
-                      @keyup.enter="saveDomainRowEdit(index)"
-                      @input="form.domains[index] = normalizeColon(form.domains[index])"
-                      @mousedown.stop
-                    />
-                    <a v-else :href="domainVisitUrl(d)" target="_blank" class="domain-text" @click.stop>{{ domainHostLabel(d) }}</a>
-                  </div>
-                  <div class="domain-col-port">
-                    <span class="domain-port">{{ domainPortLabel(d) }}</span>
-                  </div>
-                  <div class="domain-col-actions">
-                    <el-button link type="primary" size="small" @click="startEditDomain(index)" @mousedown.stop>编辑</el-button>
-                    <el-button link type="danger" size="small" @click="deleteDomainRow(index)" @mousedown.stop>删除</el-button>
-                  </div>
-                </div>
-              </template>
-            </draggable>
+            <div v-for="(d, index) in form.domains" :key="index" class="domain-row">
+              <div class="domain-col-handle">
+                <el-button link size="small" :icon="ArrowUp" :disabled="index === 0" title="上移" @click="moveDomain(index, -1)" />
+                <el-button link size="small" :icon="ArrowDown" :disabled="index === form.domains.length - 1" title="下移" @click="moveDomain(index, 1)" />
+              </div>
+              <div class="domain-col-name">
+                <el-input
+                  v-if="editingDomainIdx === index"
+                  ref="domainInputRefs"
+                  v-model="form.domains[index]"
+                  size="small"
+                  @blur="saveDomainRowEdit(index)"
+                  @keyup.enter="saveDomainRowEdit(index)"
+                  @input="form.domains[index] = normalizeColon(form.domains[index])"
+                />
+                <a v-else :href="domainVisitUrl(d)" target="_blank" class="domain-text" @click.stop>{{ domainHostLabel(d) }}</a>
+              </div>
+              <div class="domain-col-port">
+                <span class="domain-port">{{ domainPortLabel(d) }}</span>
+              </div>
+              <div class="domain-col-actions">
+                <el-button link type="primary" size="small" @click="startEditDomain(index)">编辑</el-button>
+                <el-button link type="danger" size="small" @click="deleteDomainRow(index)">删除</el-button>
+              </div>
+            </div>
             <div v-if="!form.domains.length" class="domain-empty">暂无绑定域名，请下方添加</div>
           </div>
 
@@ -383,8 +379,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
-import { FolderOpened, ArrowUp, Folder, Rank } from '@element-plus/icons-vue'
-import draggable from 'vuedraggable'
+import { FolderOpened, ArrowUp, ArrowDown, Folder } from '@element-plus/icons-vue'
 import CodeEditor from '../components/CodeEditor.vue'
 
 const visible = ref(false)
@@ -828,10 +823,18 @@ function addBatchDomains() {
   }
 }
 
-// 拖拽结束自动保存
+// 排序变更后静默保存，不弹"设置已保存并生效"提示
 function onDomainListChange() {
-  // 拖拽排序：静默保存，不弹"设置已保存并生效"提示
   saveSettings({ silent: true })
+}
+
+// 上移 / 下移某一行域名（-1 上移，1 下移）
+function moveDomain(index, delta) {
+  const to = index + delta
+  if (to < 0 || to >= form.domains.length) return
+  const [item] = form.domains.splice(index, 1)
+  form.domains.splice(to, 0, item)
+  onDomainListChange()
 }
 
 // 开始编辑某行域名（默认显示为文本，点编辑后切输入框）
@@ -1083,25 +1086,24 @@ defineExpose({ open })
 .drag-tag { cursor: move; }
 .rewrite-preset { margin-bottom: 12px; }
 .domain-tab { padding: 0 4px; }
-/* 域名列表（vuedraggable + 固定列宽） */
+/* 域名列表（排序按钮 + 固定列宽） */
 .domain-list-wrap { border: 1px solid #ebeef5; border-radius: 6px; padding: 6px; min-height: 80px; }
 /* 标题行 + 内容行都用同一套 grid 列宽（handle / name / port / actions） */
 .domain-list-header,
 .domain-row {
   display: grid;
-  grid-template-columns: 22px 1fr 64px 130px;
+  grid-template-columns: 52px 1fr 64px 130px;
   align-items: center;
   gap: 8px;
 }
 .domain-list-header { padding: 6px 8px; font-size: 13px; color: #909399; font-weight: 600; border-bottom: 1px solid #ebeef5; margin-bottom: 4px; background: #fafbfc; border-radius: 4px; }
-.domain-list-header .drag-handle-placeholder::before { content: ''; display: inline-block; width: 14px; height: 14px; }
+.domain-list-header .domain-order-header { text-align: center; }
 .domain-list-header .domain-name-cell.header { padding-left: 0; }
 .domain-list-header .domain-port.header { text-align: center; }
 .domain-list-header .domain-actions-header { text-align: right; padding-right: 8px; }
 .domain-row { padding: 6px 8px; background: #fff; border-radius: 4px; margin-bottom: 4px; }
 .domain-row.is-primary { background: #ecf5ff; }
-.domain-row .domain-col-handle { display: flex; align-items: center; justify-content: center; cursor: grab; color: #909399; }
-.domain-row .domain-col-handle:active { cursor: grabbing; }
+.domain-row .domain-col-handle { display: flex; align-items: center; justify-content: center; gap: 2px; }
 .domain-row .domain-col-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-row .domain-col-port { text-align: center; font-size: 13px; color: #909399; }
 .domain-row .domain-col-actions { text-align: right; padding-right: 0; }
@@ -1109,7 +1111,6 @@ defineExpose({ open })
 .domain-row .el-input { width: 100%; }
 .domain-text { color: #409eff; text-decoration: none; }
 .domain-text:hover { text-decoration: underline; }
-.domain-ghost { opacity: 0.4; background: #f0f9ff; }
 .domain-empty { grid-column: 1 / -1; text-align: center; color: #909399; padding: 24px 0; font-size: 13px; }
 .rewrite-preset :deep(.el-form-item__content) { display: block; }
 .preset-row { display: flex; gap: 8px; align-items: center; }

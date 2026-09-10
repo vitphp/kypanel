@@ -12,14 +12,12 @@
     "@element-plus/icons-vue": "^2.3.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "axios": "^1.7.9",
     "element-plus": "^2.9.3",
     "highlight.js": "^11.12.0",
     "pinia": "^2.3.0",
     "qrcode": "^1.5.4",
     "vue": "^3.5.13",
-    "vue-router": "^4.5.0",
-    "vuedraggable": "^4.1.0"
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

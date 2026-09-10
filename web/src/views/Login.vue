@@ -42,7 +42,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { User, Lock, Key, Picture } from '@element-plus/icons-vue'
-import axios from 'axios'
+import { rawClient } from '../utils/request'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
 
@@ -91,7 +91,7 @@ async function refreshCaptcha() {
 // 查询后端：当前 IP 是否需要验证码（不生成图片，只读状态）
 async function checkCaptchaNeeded() {
   try {
-    const resp = await axios.get(`/api${entrancePrefix}/auth/captcha-check`, { baseURL: '' })
+    const resp = await rawClient.get(`/api${entrancePrefix}/auth/captcha-check`)
     if (resp.data?.need_captcha) {
       showCaptcha.value = true
       // 立即拉取一张验证码图片
@@ -118,7 +118,7 @@ async function handleLogin() {
   }
   loading.value = true
   try {
-    const resp = await axios.post(`/api${entrancePrefix}/auth/login`, form, { baseURL: '' })
+    const resp = await rawClient.post(`/api${entrancePrefix}/auth/login`, form)
     const data = resp.data
     if (data.code === 0) {
       // 登录成功

@@ -20,7 +20,7 @@
 </template>
 
 <script setup>
-import axios from 'axios'
+import { rawClient } from '../utils/request'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -48,7 +48,7 @@ onMounted(async () => {
     // 如果 token 已过期/失效，会返回 401 并附带具体原因。
     // 用裸 axios（不走共享 request 实例）：避免本地残留登录 JWT 覆盖临时 token，
     // 导致后端按 JWT 放行、临时链接使用次数不计数。
-    const resp = await axios.get('/api/system/info', { headers: { Authorization: `Bearer ${token}` } })
+    const resp = await rawClient.get('/api/system/info', { headers: { Authorization: `Bearer ${token}` } })
     const res = resp.data
     if (res.code !== 0) {
       throw new Error(res.msg || '链接校验失败')

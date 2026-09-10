@@ -89,3 +89,15 @@ func SHA256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// NewUUID 生成 v4 格式的 UUID 字符串（8-4-4-4-12 十六进制）
+func NewUUID() string {
+	b := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return hex.EncodeToString(b)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // 版本 4
+	b[8] = (b[8] & 0x3f) | 0x80 // 变体 RFC 4122
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}

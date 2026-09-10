@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/goccy/go-yaml"
 )
 
 // SyntaxError 单条语法错误
@@ -36,9 +35,130 @@ var (
 	rePyLine     = regexp.MustCompile(`line (\d+)`)
 	reGoLine     = regexp.MustCompile(`:(\d+):(\d+):`)
 	reBashLine   = regexp.MustCompile(`line (\d+)`)
-	reYamlLine   = regexp.MustCompile(`(?m)^(\d+):(\d+):`)
-	reYamlLine2  = regexp.MustCompile(`line (\d+), column (\d+)`)
 )
+
+// checkYAML YAML 结构体检：Tab 缩进、缩进层级不一致、引号/括号未闭合。
+// 不做完整语法解析（无法识别的写法按正常处理），只报确定的问题。
+func checkYAML(content string) (int, string) {
+	lines := strings.Split(content, "\n")
+	var levels []int // 已出现的缩进层级
+	blockIndent := -1
+	for i, raw := range lines {
+		no := i + 1
+		line := strings.TrimRight(raw, " \r")
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "---") || strings.HasPrefix(trimmed, "...") {
+			continue
+		}
+		if strings.ContainsRune(line[:len(line)-len(trimmed)], '\t') {
+			return no, fmt.Sprintf("第 %d 行使用了 Tab 缩进，YAML 只允许空格缩进", no)
+		}
+		indent := len(line) - len(trimmed)
+		// 块标量（| 或 >）内部：缩进更深的内容按字面量处理，不参与结构校验
+		if blockIndent >= 0 {
+			if indent > blockIndent {
+				continue
+			}
+			blockIndent = -1
+		}
+		if msg := checkQuotesAndBrackets(trimmed); msg != "" {
+			return no, fmt.Sprintf("第 %d 行%s", no, msg)
+		}
+		switch {
+		case len(levels) == 0 || indent > levels[len(levels)-1]:
+			levels = append(levels, indent)
+		default:
+			for len(levels) > 0 && indent < levels[len(levels)-1] {
+				levels = levels[:len(levels)-1]
+			}
+			if len(levels) == 0 || indent != levels[len(levels)-1] {
+				return no, fmt.Sprintf("第 %d 行缩进层级不一致（%d 个空格），同级内容需对齐", no, indent)
+			}
+		}
+		if isBlockScalar(trimmed) {
+			blockIndent = indent
+		}
+	}
+	return 0, ""
+}
+
+// isBlockScalar 判断该行是否为块标量起始（key: | / key: > / - | 等）
+func isBlockScalar(trimmed string) bool {
+	body := trimmed
+	if idx := strings.LastIndex(body, ":"); idx >= 0 {
+		body = strings.TrimSpace(body[idx+1:])
+	} else if strings.HasPrefix(body, "- ") {
+		body = strings.TrimSpace(body[2:])
+	}
+	if body == "" || (body[0] != '|' && body[0] != '>') {
+		return false
+	}
+	for _, c := range body[1:] {
+		if c != '+' && c != '-' && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// checkQuotesAndBrackets 检查一行内引号与流式括号是否闭合（引号内与注释内的括号忽略）
+func checkQuotesAndBrackets(s string) string {
+	var (
+		inSingle, inDouble, escaped, done bool
+		prevSpace                         = true
+		stack                             []rune
+	)
+	for _, r := range s {
+		if done {
+			break
+		}
+		if inDouble && escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if r == '\\' {
+				escaped = true
+			} else if r == '"' {
+				inDouble = false
+			}
+		case r == '\'':
+			inSingle = true
+		case r == '"':
+			inDouble = true
+		case r == '#' && prevSpace:
+			done = true
+		case r == '[' || r == '{':
+			stack = append(stack, r)
+		case r == ']' || r == '}':
+			if len(stack) == 0 {
+				return "有多余的 " + string(r)
+			}
+			open := stack[len(stack)-1]
+			if (r == ']' && open != '[') || (r == '}' && open != '{') {
+				return "括号不匹配：" + string(open) + " 与 " + string(r)
+			}
+			stack = stack[:len(stack)-1]
+		}
+		prevSpace = r == ' ' || r == '\t'
+	}
+	if inSingle {
+		return "单引号未闭合"
+	}
+	if inDouble {
+		return "双引号未闭合"
+	}
+	if len(stack) > 0 {
+		return "括号未闭合"
+	}
+	return ""
+}
 
 // runTimeout 执行命令并返回输出，带超时（命令不存在时返回 ErrNotFound 标志）
 func runTimeout(timeout time.Duration, name string, args ...string) (string, bool) {
@@ -98,15 +218,7 @@ func SyntaxCheck(lang, content string) SyntaxResult {
 		}
 		return res
 	case "yaml", "yml":
-		var v any
-		if err := yaml.Unmarshal([]byte(content), &v); err != nil {
-			line := 0
-			msg := err.Error()
-			if m := reYamlLine.FindStringSubmatch(msg); len(m) > 1 {
-				line, _ = strconv.Atoi(m[1])
-			} else if m := reYamlLine2.FindStringSubmatch(msg); len(m) > 1 {
-				line, _ = strconv.Atoi(m[1])
-			}
+		if line, msg := checkYAML(content); msg != "" {
 			res.OK = false
 			res.Errors = append(res.Errors, SyntaxError{Line: line, Message: msg})
 			res.Raw = msg

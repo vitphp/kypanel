@@ -8,10 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"kypanel/internal/config"
 	"kypanel/internal/model"
+	"kypanel/internal/utils"
 )
 
 // trashDir 回收站根目录：<DataDir>/trash
@@ -44,7 +43,7 @@ func DeleteToTrash(path string) error {
 	}
 
 	// 回收站内唯一目录
-	uid := uuid.NewString()
+	uid := utils.NewUUID()
 	dstDir := filepath.Join(trashRoot, uid)
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return errors.New("创建回收站目录失败: " + err.Error())
