@@ -473,4 +473,21 @@ async function doSaveDraft() {
 .mc-footer-left { display: flex; align-items: center; gap: 10px; }
 .mc-tip { font-size: 12px; color: #94a3b8; }
 .mc-footer-right { display: flex; gap: 10px; }
+
+/* ============ 手机适配 ============ */
+@media (max-width: 767px) {
+  /* 发件人下拉自适应宽度，避免固定 260px 撑破弹窗 */
+  .mc-row :deep(.el-select) { width: auto !important; flex: 1; min-width: 0; }
+  .mc-row { flex-wrap: wrap; }
+  .mc-label { flex: 0 0 56px; }
+  .mc-recipients { flex: 1 1 100%; }
+  .mc-recipient-input { width: 100%; min-width: 0; }
+  .mc-toolbar { gap: 1px; padding: 5px 6px; }
+  .mc-tb { min-width: 28px; padding: 0 4px; }
+  .mc-sep { margin: 0 2px; }
+  .mc-editor { min-height: 34vh; max-height: 46vh; }
+  .mc-footer { flex-direction: column; align-items: stretch; gap: 10px; }
+  .mc-footer-left { flex-wrap: wrap; }
+  .mc-footer-right { justify-content: flex-end; flex-wrap: wrap; }
+}
 </style>

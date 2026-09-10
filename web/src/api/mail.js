@@ -30,6 +30,29 @@ export function checkMailDomainsReady(domainIds) {
   return request({ url: '/mail/domains/check-ready', method: 'post', data: { domain_ids: domainIds } })
 }
 
+// ===== 邮箱门户网站（官网 / webmail）=====
+export function getMailPortal(id) {
+  return request({ url: `/mail/domains/${id}/portal`, method: 'get' })
+}
+export function saveMailPortal(id, data) {
+  // 开启 HTTPS 且无证书时后端会自动申请证书（ACME 文件验证可能耗时数分钟），故放宽超时
+  return request({ url: `/mail/domains/${id}/portal`, method: 'put', data, timeout: 600000 })
+}
+// 上传门户 Logo（图片，≤2MB）
+export function uploadMailPortalLogo(id, formData) {
+  return request({
+    url: `/mail/domains/${id}/portal/logo`,
+    method: 'post',
+    data: formData,
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000
+  })
+}
+// 为门户申请/重新申请免费证书（可一次签发多个域名）
+export function applyMailPortalCert(id, data) {
+  return request({ url: `/mail/domains/${id}/portal/apply-cert`, method: 'post', data, timeout: 600000 })
+}
+
 // ===== 账号 =====
 export function listMailAccounts(domainId) {
   return request({ url: '/mail/accounts', method: 'get', params: { domain_id: domainId } })

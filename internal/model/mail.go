@@ -20,6 +20,26 @@ type MailDomain struct {
 	DkimConfigured  bool `gorm:"default:false" json:"dkim_configured"`
 	DmarcConfigured bool `gorm:"default:false" json:"dmarc_configured"`
 
+	// ===== 邮箱门户网站（官网 + webmail）=====
+	// 每个邮箱域名可开启一个门户站点：默认域名 mail.<domain>，默认关闭。
+	// 开启后该站点对外可访问，作为官网并可开放注册供他人使用邮箱。
+	PortalEnabled      bool   `gorm:"default:false" json:"portal_enabled"`        // 门户是否开启
+	PortalDomain       string `gorm:"size:255" json:"portal_domain"`              // 门户域名（默认 mail.<domain>）
+	PortalExtraDomains string `gorm:"size:1024" json:"portal_extra_domains"`      // 附加绑定域名（逗号分隔）
+	PortalSSL          bool   `gorm:"default:false" json:"portal_ssl"`            // 是否启用 HTTPS
+	PortalTitle        string `gorm:"size:255" json:"portal_title"`               // 官网标题（浏览器标题）
+	PortalName         string `gorm:"size:255" json:"portal_name"`                // 网站名称
+	PortalLogo         string `gorm:"size:1024" json:"portal_logo"`               // Logo 图片地址
+	PortalFooter       string `gorm:"size:512" json:"portal_footer"`              // 底部版权
+	PortalRegister     bool   `gorm:"default:false" json:"portal_register"`       // 是否开放注册
+	PortalSiteID       uint   `gorm:"default:0" json:"portal_site_id"`            // 关联的站点 ID（0=未创建）
+
+	// 门户 HTTPS 证书申请配置（开启 HTTPS 时按此自动申请免费证书）
+	PortalCertBrand   string `gorm:"size:32" json:"portal_cert_brand"`     // 证书品牌：letsencrypt | litessl
+	PortalCertAlgo    string `gorm:"size:32" json:"portal_cert_algo"`      // 证书算法：rsa2048 | ecc256
+	PortalCertEmail   string `gorm:"size:255" json:"portal_cert_email"`    // 证书到期通知邮箱（可选）
+	PortalCertDomains string `gorm:"size:1024" json:"portal_cert_domains"` // 证书覆盖的域名（逗号分隔）
+
 	// DKIM 私钥
 	DkimPrivateKey string `gorm:"size:4096" json:"-"`
 

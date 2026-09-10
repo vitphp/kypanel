@@ -6,15 +6,39 @@
         <span class="mail-side-title">域名列表</span>
         <el-button size="small" :icon="Plus" @click="openAdd">添加域名</el-button>
       </div>
+      <!-- 手机端：下拉切换域名 + 该域名操作按钮（桌面端隐藏） -->
+      <div class="mail-side-mobile">
+        <template v-if="list.length">
+          <div class="msm-row">
+            <el-select
+              :model-value="currentDomainId"
+              placeholder="选择域名"
+              size="default"
+              class="msm-select"
+              @change="onMobileDomainChange"
+            >
+              <el-option v-for="row in list" :key="row.id" :label="row.domain" :value="row.id" />
+            </el-select>
+            <span v-if="currentDomain" class="mail-domain-status" :class="domainStatusClass(currentDomainId)">{{ domainStatusText(currentDomainId) }}</span>
+          </div>
+          <div v-if="currentDomain" class="msm-actions">
+            <el-button size="small" :loading="checking" @click="checkOne(currentDomain)">检测</el-button>
+            <el-button size="small" @click="openDnsGuide(currentDomain)">配置</el-button>
+            <el-button size="small" :type="currentDomain.enabled ? 'warning' : 'success'" plain @click="toggleEnabledConfirm(currentDomain)">{{ currentDomain.enabled ? '停用' : '启用' }}</el-button>
+            <el-button size="small" type="danger" plain @click="remove(currentDomain)">删除</el-button>
+          </div>
+        </template>
+        <div v-else class="mail-domain-empty">还没有域名<br>点右上「添加域名」开始</div>
+      </div>
+
       <div v-loading="loading" class="mail-domain-list">
         <div v-for="row in list" :key="row.id" class="mail-domain-item"
           :class="{ active: currentDomainId === row.id }"
           @click="selectDomain(row)">
           <div class="mail-domain-item-top">
             <span class="mail-domain-item-name">{{ row.domain }}</span>
-            <span class="mail-domain-status" :class="statusMap[row.id]?.ready ? 'ok' : (checkingAll && statusMap[row.id] === undefined ? 'checking' : 'bad')">{{ statusMap[row.id]?.ready ? '已对接' : (checkingAll && statusMap[row.id] === undefined ? '检测中' : '未完成') }}</span>
+            <span class="mail-domain-status" :class="domainStatusClass(row.id)">{{ domainStatusText(row.id) }}</span>
           </div>
-          <!-- 选中时显示操作按钮 -->
           <div v-if="currentDomainId === row.id" class="mail-domain-actions">
             <el-button size="small" :loading="checking" @click.stop="checkOne(row)">检测</el-button>
             <el-button size="small" @click.stop="openDnsGuide(row)">配置</el-button>
@@ -28,14 +52,12 @@
 
     <!-- ===== 右栏：当前域名功能 ===== -->
     <section class="mail-main">
-      <!-- 无选中域名时的空状态 -->
       <div v-if="!currentDomain" class="mail-main-empty">
         <el-icon :size="40" color="#cbd5e1"><Message /></el-icon>
         <p>在左侧选择一个域名，查看它的收件箱 / 账号等</p>
       </div>
 
       <template v-else>
-        <!-- 右侧顶部：功能 tab -->
         <div class="mail-main-top">
           <el-tabs v-model="rightTab" class="mail-tabs" @tab-click="onRightTabClick">
             <el-tab-pane label="收件箱" name="inbox" />
@@ -45,7 +67,6 @@
           </el-tabs>
         </div>
 
-        <!-- 右侧内容区 -->
         <div class="mail-main-body">
           <!-- 收件箱 -->
           <div v-if="rightTab === 'inbox'" class="mail-inbox-pane">
@@ -118,25 +139,28 @@
                   @row-click="onInboxRowClick"
                   @selection-change="onInboxSelectionChange"
                 >
-                  <el-table-column type="selection" width="50" reserve-selection />
-                  <el-table-column width="30">
+                  <el-table-column type="selection" :width="isMobile ? 40 : 50" reserve-selection />
+                  <el-table-column :width="isMobile ? 22 : 30">
                     <template #default="{ row }">
                       <span class="msg-unread-dot" v-if="!row.seen"></span>
                     </template>
                   </el-table-column>
-                  <el-table-column label="发件人" min-width="180">
-                    <template #default="{ row }"><span :class="{ 'msg-unread': !row.seen }">{{ row.from_name || row.from_addr || '(未知)' }}</span></template>
+                  <el-table-column label="发件人" :min-width="isMobile ? 110 : 180">
+                    <template #default="{ row }">
+                      <span :class="{ 'msg-unread': !row.seen }">{{ row.from_name || row.from_addr || '(未知)' }}</span>
+                      <span v-if="isMobile" class="msg-time-sub">{{ fmtTime(row.date) }}</span>
+                    </template>
                   </el-table-column>
-                  <el-table-column label="主题" min-width="260">
+                  <el-table-column label="主题" :min-width="isMobile ? 130 : 260">
                     <template #default="{ row }">
                       <el-icon v-if="row.has_attach" class="msg-attach-icon" title="含附件"><Paperclip /></el-icon>
                       <span :class="{ 'msg-unread': !row.seen }">{{ row.subject || '(无主题)' }}</span>
                     </template>
                   </el-table-column>
-                  <el-table-column label="时间" width="150">
+                  <el-table-column v-if="!isMobile" label="时间" width="150">
                     <template #default="{ row }"><span class="msg-time">{{ fmtTime(row.date) }}</span></template>
                   </el-table-column>
-                  <el-table-column label="操作" width="90" align="center">
+                  <el-table-column label="操作" :width="isMobile ? 56 : 90" align="center">
                     <template #default="{ row }">
                       <el-button link type="danger" @click.stop="removeInboxMsgById(row)">删除</el-button>
                     </template>
@@ -168,16 +192,19 @@
             </div>
             <div v-if="inboxMailboxId" class="msg-list-wrap">
               <el-table v-loading="sentLoading" :data="sentList" row-key="id" max-height="560" empty-text="还没有发出去的邮件">
-                <el-table-column label="收件人" min-width="200">
-                  <template #default="{ row }"><span class="sent-to">{{ row.to_addrs || '—' }}</span></template>
+                <el-table-column label="收件人" :min-width="isMobile ? 130 : 200">
+                  <template #default="{ row }">
+                    <span class="sent-to">{{ row.to_addrs || '—' }}</span>
+                    <span v-if="isMobile" class="msg-time-sub">{{ fmtTime(row.date) }}</span>
+                  </template>
                 </el-table-column>
-                <el-table-column label="主题" min-width="260">
+                <el-table-column label="主题" :min-width="isMobile ? 130 : 260">
                   <template #default="{ row }"><span>{{ row.subject || '(无主题)' }}</span></template>
                 </el-table-column>
-                <el-table-column label="时间" width="150">
+                <el-table-column v-if="!isMobile" label="时间" width="150">
                   <template #default="{ row }"><span class="msg-time">{{ fmtTime(row.date) }}</span></template>
                 </el-table-column>
-                <el-table-column label="操作" width="90" align="center">
+                <el-table-column label="操作" :width="isMobile ? 56 : 90" align="center">
                   <template #default="{ row }">
                     <el-button link type="danger" @click.stop="removeSentMsg(row)">删除</el-button>
                   </template>
@@ -206,16 +233,19 @@
             </div>
             <div v-if="inboxMailboxId" class="msg-list-wrap">
               <el-table v-loading="draftLoading" :data="draftList" row-key="id" max-height="560" empty-text="没有草稿" :row-style="{ cursor: 'pointer' }" @row-click="editDraft">
-                <el-table-column label="收件人" min-width="200">
-                  <template #default="{ row }"><span class="sent-to">{{ row.to_addrs || '（未填写）' }}</span></template>
+                <el-table-column label="收件人" :min-width="isMobile ? 130 : 200">
+                  <template #default="{ row }">
+                    <span class="sent-to">{{ row.to_addrs || '（未填写）' }}</span>
+                    <span v-if="isMobile" class="msg-time-sub">{{ fmtTime(row.date) }}</span>
+                  </template>
                 </el-table-column>
-                <el-table-column label="主题" min-width="260">
+                <el-table-column label="主题" :min-width="isMobile ? 120 : 260">
                   <template #default="{ row }"><span>{{ row.subject || '(无主题)' }}</span></template>
                 </el-table-column>
-                <el-table-column label="时间" width="150">
+                <el-table-column v-if="!isMobile" label="时间" width="150">
                   <template #default="{ row }"><span class="msg-time">{{ fmtTime(row.date) }}</span></template>
                 </el-table-column>
-                <el-table-column label="操作" width="120" align="center">
+                <el-table-column label="操作" :width="isMobile ? 96 : 120" align="center">
                   <template #default="{ row }">
                     <el-button link type="primary" @click.stop="editDraft(row)">编辑</el-button>
                     <el-button link type="danger" @click.stop="removeDraft(row)">删除</el-button>
@@ -234,8 +264,8 @@
             <div class="mail-pane-head">
               <div class="mail-pane-head-left">
                 <span class="mail-pane-title">账号管理</span>
-                <el-tag v-if="statusMap[currentDomainId]?.ready" type="success" size="small">已对接，可添加用户</el-tag>
-                <el-tag v-else type="info" size="small">该域名尚未对接，暂不能添加用户</el-tag>
+                <!-- 未对接时才提示：此时下方列表为空、按钮不可用，需说明原因 -->
+                <el-tag v-if="!statusMap[currentDomainId]?.ready" type="info" size="small">该域名尚未对接，暂不能添加用户</el-tag>
               </div>
               <el-button type="primary" size="small" :disabled="!statusMap[currentDomainId]?.ready" @click="openAccAdd">添加用户</el-button>
             </div>
@@ -246,12 +276,16 @@
                   <div v-for="(a, i) in accResult" :key="i" class="acc-result-line">{{ a.address }}<span v-if="a.password">　密码：{{ a.password }}</span></div>
                 </div>
               </template>
-              <div class="acc-result-title" style="margin-top:12px">该域名下已有账号（{{ accList.length }}）：</div>
-              <el-table v-loading="accLoading" :data="accList" size="small" max-height="280">
-                <el-table-column prop="address" label="邮箱地址" min-width="180" />
-                <el-table-column label="状态" width="70"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-                <el-table-column prop="quota_mb" label="容量MB" width="80" />
-                <el-table-column label="操作" width="130" align="right"><template #default="{ row }"><el-button link type="warning" size="small" @click="toggleAcc(row)">{{ row.enabled ? '停用' : '启用' }}</el-button><el-button link type="danger" size="small" @click="delAcc(row)">删除</el-button></template></el-table-column>
+              <el-table v-loading="accLoading" :class="{ 'acc-table-gap': accResult.length }" :data="accList" size="small" max-height="280">
+                <el-table-column label="邮箱地址" :min-width="isMobile ? 130 : 180">
+                  <template #default="{ row }">
+                    <div>{{ row.address }}</div>
+                    <div v-if="isMobile" class="acc-addr-sub">容量 {{ row.quota_mb }} MB</div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" :width="isMobile ? 68 : 80"><template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
+                <el-table-column v-if="!isMobile" prop="quota_mb" label="容量MB" width="92" />
+                <el-table-column label="操作" :width="isMobile ? 110 : 130" align="right"><template #default="{ row }"><el-button link type="warning" size="small" @click="toggleAcc(row)">{{ row.enabled ? '停用' : '启用' }}</el-button><el-button link type="danger" size="small" @click="delAcc(row)">删除</el-button></template></el-table-column>
               </el-table>
             </template>
           </div>
@@ -322,18 +356,24 @@
       </template>
     </el-dialog>
 
-    <!-- DNS 引导（用于列表里"未对接"时点开看配置，复用配置展示） -->
-    <el-dialog v-model="dnsGuideVisible" title="去配置解析" width="min(620px, 92vw)" align-center>
-      <div v-if="dnsGuideData" class="md-dnsguide-body">
-        <div v-for="(f, j) in dnsGuideData" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
-      </div>
-      <div class="md-dnsguide-foot">
-        <el-button :loading="checking" @click="checkOne(currentRow)">再检测一次</el-button>
-        <span v-if="currentRow && statusMap[currentRow.id]?.ready" class="md-status-ok" style="font-size:13px">✓ 已对接</span>
-      </div>
+    <!-- 域名配置：解析引导 + 门户网站 -->
+    <el-dialog v-model="configVisible" title="域名配置" width="min(760px, 94vw)" align-center>
+      <el-tabs v-model="configTab" class="md-config-tabs">
+        <el-tab-pane label="域名解析" name="dns">
+          <div v-if="dnsGuideData" class="md-dnsguide-body">
+            <div v-for="(f, j) in dnsGuideData" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
+          </div>
+          <div class="md-dnsguide-foot">
+            <el-button :loading="checking" @click="checkOne(currentRow)">再检测一次</el-button>
+            <span v-if="currentRow && statusMap[currentRow.id]?.ready" class="md-status-ok" style="font-size:13px">✓ 已对接</span>
+          </div>
+        </el-tab-pane>
+        <el-tab-pane label="门户网站" name="portal" lazy>
+          <MailPortalPanel ref="portalPanelRef" :domain="currentRow" @saved="load" />
+        </el-tab-pane>
+      </el-tabs>
     </el-dialog>
 
-    <!-- 添加用户弹窗 -->
     <el-dialog v-model="accAddVisible" title="添加用户" width="min(560px, 92vw)" align-center>
       <el-tabs v-model="accountTab" class="acc-tabs">
         <el-tab-pane label="单个添加" name="single">
@@ -365,7 +405,6 @@
       </template>
     </el-dialog>
 
-    <!-- 写信 / 回复 / 转发 / 草稿 -->
     <MailCompose
       v-model="composeVisible"
       :accounts="enabledAccOptions"
@@ -381,10 +420,12 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Loading, CircleCheckFilled, WarningFilled, Message, Promotion, EditPen, Refresh, Share, Paperclip, Document } from '@element-plus/icons-vue'
 import MailCompose from './MailCompose.vue'
+import MailPortalPanel from './MailPortalPanel.vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 import {
   listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain,
   getDomainGuide, checkDomainReady, checkMailDomainsReady,
@@ -399,6 +440,10 @@ const loading = ref(false)
 const statusMap = ref({}) // domainId -> {ready, detail}
 const checking = ref(false)
 const checkingAll = ref(false)   // 后台批量检测中（用于状态文字显示「检测中」）
+
+// 注意：main.js 里 app.mixin 注入的 isMobile 到不了模板（恒为 falsy），
+// 必须像其它页面一样自行声明，否则移动端列显隐不生效。
+const { isMobile } = useIsMobile()
 
 // 添加向导
 const addVisible = ref(false)
@@ -430,10 +475,17 @@ const recFields3 = computed(() => [
   { label: '记录值', value: guide.value.spf_value, copiable: true }
 ])
 
-// DNS 引导（列表"未对接"查看）
-const dnsGuideVisible = ref(false)
+// 域名配置（列表"配置"按钮打开：解析引导 + 门户网站）
+const configVisible = ref(false)
+const configTab = ref('dns')
 const dnsGuideData = ref([])
 const currentRow = ref(null)
+const portalPanelRef = ref(null)
+
+// 切到「门户网站」页签时再读取一次最新配置，避免沿用上一次打开的旧数据
+watch([configVisible, configTab], ([vis, tab]) => {
+  if (vis && tab === 'portal') nextTick(() => portalPanelRef.value?.load())
+})
 
 // 布局：当前选中的域名 + 右侧 tab
 const currentDomain = ref(null)     // 当前选中的域名行对象
@@ -450,11 +502,9 @@ watch(rightTab, (v) => {
   if (v === 'inbox' && currentDomainId.value) {
     loadAccounts().then(() => { if (rightTab.value === 'inbox') resetInboxForDomain() })
   }
-  // 进入已发送
   if (v === 'sent' && currentDomainId.value) {
     loadAccounts().then(() => { if (rightTab.value === 'sent') loadSentMessages() })
   }
-  // 进入草稿箱
   if (v === 'drafts' && currentDomainId.value) {
     loadAccounts().then(() => { if (rightTab.value === 'drafts') loadDrafts() })
   }
@@ -470,6 +520,23 @@ function selectDomain(row) {
     else if (rightTab.value === 'sent') loadSentMessages()
     else if (rightTab.value === 'drafts') loadDrafts()
   })
+}
+
+function onMobileDomainChange(id) {
+  const row = list.value.find((x) => x.id === id)
+  if (row) selectDomain(row)
+}
+
+// 域名对接状态：文字 / 颜色 class（桌面卡片与手机下拉共用）
+function domainStatusText(id) {
+  if (statusMap.value[id]?.ready) return '已对接'
+  if (checkingAll.value && statusMap.value[id] === undefined) return '检测中'
+  return '未完成'
+}
+function domainStatusClass(id) {
+  if (statusMap.value[id]?.ready) return 'ok'
+  if (checkingAll.value && statusMap.value[id] === undefined) return 'checking'
+  return 'bad'
 }
 
 // 账号
@@ -683,7 +750,6 @@ function updateInboxDragRect(e) {
   }
 }
 
-// 按行 DOM 位置找鼠标所在行索引
 function findInboxRowAt(x, y) {
   const rows = document.querySelectorAll('.mail-inbox-pane .el-table__body-wrapper table tbody .el-table__row')
   if (!rows.length) return -1
@@ -806,12 +872,10 @@ function stopInboxPoll() {
   if (inboxPollTimer) { clearInterval(inboxPollTimer); inboxPollTimer = null }
 }
 
-// 列表行样式：未读行加高亮 class
 function msgRowClass({ row }) {
   return row.seen ? '' : 'msg-row-unread'
 }
 
-// 一键已读：当前账号收件箱全部未读标为已读
 async function markAllSeen() {
   if (!inboxMailboxId.value) return
   inboxLoading.value = true
@@ -823,7 +887,6 @@ async function markAllSeen() {
   finally { inboxLoading.value = false }
 }
 
-// 批量标已读 / 未读
 async function batchSetSeen(seen) {
   const ids = selectionIds.value
   if (!ids.length) return
@@ -837,7 +900,6 @@ async function batchSetSeen(seen) {
   finally { inboxLoading.value = false }
 }
 
-// 批量删除
 async function batchDelete() {
   const ids = selectionIds.value
   if (!ids.length) return
@@ -860,7 +922,6 @@ async function openInboxMsg(row) {
   try {
     const { data } = await getMailMessage(inboxMailboxId.value, row.id)
     detailMsg.value = data
-    // 列表里标已读
     const m = msgList.value.find((x) => x.id === row.id)
     if (m) m.seen = true
   } catch (e) { ElMessage.error(e?.response?.data?.msg || '读取失败') }
@@ -890,7 +951,7 @@ function fmtTime(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-// 纯文本正文做简单转义，避免 HTML 注入（有 html_body 则直接用 iframe 之外安全场景）
+// 纯文本正文转义，避免 HTML 注入
 function toText(t) {
   const s = String(t || '')
   return s.split('\n').map((l) => `<div>${escapeHtml(l)}</div>`).join('')
@@ -977,7 +1038,8 @@ async function checkOne(row) {
 // 打开 DNS 引导（给"未对接"域名展示记录值，供去服务商配置）
 async function openDnsGuide(row) {
   currentRow.value = row
-  dnsGuideVisible.value = true
+  configTab.value = 'dns'
+  configVisible.value = true
   await checkOne(row)
   let srv = ''
   try {
@@ -1007,7 +1069,6 @@ async function goAddStep2() {
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d)) {
     return (addErr.value = '域名格式不对，示例：example.com')
   }
-  // 查重
   if (list.value.some((x) => x.domain === d)) {
     return (addErr.value = '这个域名已经在列表里了')
   }
@@ -1162,12 +1223,14 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 12px; border-bottom: 1px solid #f1f5f9; }
 .mail-side-title { font-weight: 700; color: #0f172a; font-size: 14px; }
 .mail-domain-list { flex: 1; overflow-y: auto; padding: 8px; }
+/* 手机专用的域名下拉区：桌面/平板隐藏（见下方媒体查询） */
+.mail-side-mobile { display: none; }
 .mail-domain-item { border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; cursor: pointer; transition: background .15s; }
 .mail-domain-item:hover { background: #f8fafc; }
 .mail-domain-item.active { background: #eff6ff; border-color: #bfdbfe; }
-.mail-domain-item-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.mail-domain-item-name { font-weight: 600; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mail-domain-status { flex: 0 0 auto; font-size: 12px; font-weight: 600; }
+.mail-domain-item-top { display: flex; align-items: center; gap: 6px; }
+.mail-domain-item-name { flex: 0 1 auto; min-width: 0; font-size: 15px; font-weight: 600; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mail-domain-status { flex: 0 0 auto; margin-left: auto; font-size: 13.5px; font-weight: 600; }
 .mail-domain-status.ok { color: #16a34a; }
 .mail-domain-status.bad { color: #dc2626; }
 .mail-domain-status.checking { color: #2563eb; }
@@ -1175,7 +1238,7 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-domain-item-sub.ok { color: #16a34a; }
 .mail-domain-item-sub.bad { color: #d97706; }
 .mail-domain-actions { margin-top: 8px; display: flex; flex-wrap: nowrap; gap: 2px; }
-.mail-domain-actions .el-button { flex: 1 1 0; min-width: 0; margin: 0; padding: 4px 2px; font-size: 12px; }
+.mail-domain-actions .el-button { flex: 1 1 0; min-width: 0; margin: 0; padding: 5px 2px; font-size: 13px; }
 .mail-domain-empty { color: #94a3b8; font-size: 13px; text-align: center; line-height: 1.8; padding: 40px 0; }
 /* 右栏 */
 .mail-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; border-left: 1px solid #e5e7eb; overflow: hidden; }
@@ -1185,7 +1248,6 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-tabs { flex: 1; min-width: 0; }
 .mail-tabs :deep(.el-tabs__header) { margin: 0; }
 .mail-main-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; min-height: 0; }
-/* 占位 */
 .ph { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 90px 20px; }
 .ph-title { font-size: 16px; font-weight: 600; color: #475569; margin: 4px 0 0; }
 .ph-sub { font-size: 13px; color: #94a3b8; margin: 0; text-align: center; }
@@ -1196,6 +1258,15 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mail-pane-title { font-size: 15px; font-weight: 700; color: #0f172a; }
 .mail-pane-head-actions { display: flex; align-items: center; gap: 8px; }
 .mail-accounts-pane { display: flex; flex-direction: column; }
+/* 账号管理表格：size="small" 默认字号只有 12px，统一放大到 14px 并加大行高 */
+.mail-accounts-pane :deep(.el-table--small),
+.mail-accounts-pane :deep(.el-table--small .el-table__cell),
+.mail-accounts-pane :deep(.el-table--small .cell) { font-size: 14px; }
+.mail-accounts-pane :deep(.el-table--small .el-table__cell) { padding: 10px 0; }
+.mail-accounts-pane :deep(.el-table__header th.el-table__cell) { font-size: 14px; font-weight: 700; color: #334155; }
+.mail-accounts-pane :deep(.el-table .el-tag--small) { font-size: 13px; }
+.mail-accounts-pane :deep(.el-table .el-button--small) { font-size: 14px; }
+.mail-accounts-pane :deep(.mail-pane-head .el-button--small) { font-size: 13.5px; }
 .acc-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
 /* 域名信息 */
 .dom-info { display: flex; flex-direction: column; gap: 10px; }
@@ -1239,6 +1310,7 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .acc-rand-grid { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
 .acc-result-title { font-size: 13px; font-weight: 600; color: #0f172a; margin-top: 10px; }
 .acc-result-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 12px; max-height: 220px; overflow: auto; margin-top: 8px; }
+.acc-table-gap { margin-top: 12px; }
 .acc-result-line { font-size: 13px; color: #166534; padding: 3px 0; font-family: ui-monospace, monospace; }
 /* 收件箱 */
 .mail-inbox-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -1265,6 +1337,9 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .muted { color: #94a3b8; }
 .mono { font-family: ui-monospace, monospace; }
 .msg-time { font-size: 13.5px; color: #475569; white-space: nowrap; }
+/* 手机端：时间折行到发件人/收件人下方（配合隐藏「时间」列） */
+.msg-time-sub { display: block; font-size: 11px; color: #94a3b8; margin-top: 2px; white-space: nowrap; }
+.acc-addr-sub { font-size: 11.5px; color: #94a3b8; margin-top: 2px; }
 .msg-attach-icon { color: #94a3b8; margin-right: 4px; vertical-align: -2px; }
 .sent-to { color: #334155; word-break: break-all; }
 .mail-msg-detail { border: 1px solid #e2e8f0; border-radius: 10px; }
@@ -1285,5 +1360,57 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .mc-quote-head { color: #64748b; font-size: 13px; margin: 4px 0 4px; }
 .mc-quote-meta { color: #94a3b8; font-size: 12.5px; line-height: 1.6; }
 .mc-quote { border-left: 3px solid #cbd5e1; margin: 4px 0; padding: 4px 10px; color: #475569; background: #f8fafc; }
-@media (max-width: 599px) { .md-toolbar { flex-direction: column; align-items: stretch; } }
+
+/* ============ 平板适配（<1024px，此时侧栏已是抽屉，右侧整宽） ============ */
+@media (max-width: 1023px) {
+  .mail-side { width: 210px; flex: 0 0 210px; }
+  /* 域名操作按钮两行排列，避免在窄栏里被压成小方块 */
+  .mail-domain-actions { flex-wrap: wrap; row-gap: 4px; }
+  .mail-domain-actions .el-button { flex: 1 1 40%; }
+}
+
+/* ============ 手机适配（<768px）：左右两栏改为上下堆叠 ============ */
+@media (max-width: 767px) {
+  /* 外壳不再锁死一屏高，交给外层 .lp-main-content 自然滚动 */
+  .mail-shell { flex-direction: column; height: auto; min-height: 0; }
+
+  .mail-side { width: 100%; flex: 0 0 auto; }
+  .mail-side-head { padding: 10px 12px; }
+  .mail-domain-list { display: none; }
+  .mail-domain-empty { padding: 18px 0; }
+  .mail-side-mobile { display: block; padding: 12px; }
+  .msm-row { display: flex; align-items: center; gap: 8px; }
+  .msm-select { flex: 1; min-width: 0; }
+  .msm-actions { display: flex; gap: 6px; margin-top: 10px; }
+  .msm-actions .el-button { flex: 1 1 0; min-width: 0; margin: 0; padding: 5px 2px; font-size: 13px; }
+
+  .mail-main { border-left: none; border-top: 1px solid #e5e7eb; }
+  .mail-main-top { padding: 0 12px; flex-wrap: nowrap; }
+  .mail-main-body { overflow: visible; padding: 12px; }
+  .mail-main-empty { padding: 40px 20px; }
+
+  /* 收窄页签内边距与字号，保证 4 个页签一行放得下 */
+  .mail-tabs :deep(.el-tabs__item) { padding: 0 10px; font-size: 13.5px; }
+
+  .mail-pane-head { flex-wrap: wrap; gap: 10px; min-height: 0; margin-bottom: 12px; }
+  .mail-pane-head-left { flex: 1 1 100%; min-width: 0; }
+  .mail-pane-head-actions { flex: 1 1 auto; justify-content: flex-start; }
+  /* 邮箱账号下拉占满剩余宽度（覆盖模板里的内联 width:220px） */
+  .mail-pane-head-left :deep(.el-select) { flex: 1 1 120px; min-width: 0; width: auto !important; }
+
+  .msg-detail-top { padding: 12px; }
+  .msg-body { padding: 12px; max-height: none; }
+  .msg-attach-box { padding: 10px 12px; }
+  .msg-detail-actions { flex-wrap: wrap; gap: 8px; padding: 12px; }
+
+  .msg-list-wrap :deep(.el-table td.el-table__cell) { padding: 9px 0; }
+  .mail-inbox-pane :deep(.el-table .el-table-column--selection .cell) { padding-left: 8px !important; padding-right: 2px !important; }
+
+  .acc-form, .acc-rand-grid { max-width: 100%; }
+  .acc-row { flex-wrap: wrap; }
+  .acc-label { flex: 0 0 72px; }
+  .acc-row :deep(.el-input), .acc-row :deep(.el-input-number) { max-width: none !important; flex: 1 1 auto; }
+  .acc-row :deep(.el-select) { width: 100% !important; }
+  .acc-form > .acc-row, .acc-rand-grid > .acc-row { align-items: center; }
+}
 </style>

@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -185,6 +186,111 @@ func setupMailRoutes(g *gin.RouterGroup) {
 				result[id] = service.CheckMailDomainReady(id)
 			}
 			utils.Ok(c, result)
+		})
+
+		// 邮箱门户（官网 / webmail）配置读取
+		mail.GET("/domains/:id/portal", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			view, err := service.GetMailPortal(uint(id))
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, view)
+		})
+
+		// 保存邮箱门户配置（开启/关闭网站、域名、HTTPS、官网标题/名称/Logo/版权、开放注册）
+		mail.PUT("/domains/:id/portal", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			var req service.SaveMailPortalReq
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			view, err := service.SaveMailPortal(uint(id), req)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.portal.save", "保存邮箱门户配置 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, view)
+		})
+
+		// 上传门户 Logo（图片，≤2MB），返回可直接引用的相对地址
+		mail.POST("/domains/:id/portal/logo", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			fileHeader, err := c.FormFile("file")
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, "缺少上传文件")
+				return
+			}
+			if fileHeader.Size > 2*1024*1024 {
+				utils.Fail(c, http.StatusBadRequest, "Logo 文件不能超过 2MB")
+				return
+			}
+			f, err := fileHeader.Open()
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, "读取上传文件失败")
+				return
+			}
+			defer f.Close()
+			data, err := io.ReadAll(io.LimitReader(f, 2*1024*1024+1))
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, "读取上传文件失败")
+				return
+			}
+			url, err := service.SaveMailPortalLogo(uint(id), fileHeader.Filename, data)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.portal.logo", "上传邮箱门户 Logo #"+strconv.Itoa(id), "success")
+			utils.Ok(c, gin.H{"url": url})
+		})
+
+		// 为门户申请（或重新申请）免费证书并启用 HTTPS（可一次签发多个域名）
+		mail.POST("/domains/:id/portal/apply-cert", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			var req service.MailPortalCertReq
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			view, err := service.ApplyMailPortalCert(uint(id), req)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.portal.apply_cert", "申请邮箱门户证书 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, view)
 		})
 	}
 

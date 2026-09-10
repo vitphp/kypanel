@@ -268,6 +268,14 @@ func main() {
 	// 防止某个站点的坏证书导致 nginx 全局校验失败、所有网站起不来（升级/重启后尤为关键）
 	service.SelfHealWebServerOnBoot()
 
+	// 门户页面模板随版本升级会变化：启动时按当前模板重新生成所有已开启的邮箱门户
+	// 页面（index.html / webmail.html），免去升级后逐个重新保存门户配置。
+	if n, err := service.RegenerateAllMailPortals(); err != nil {
+		slog.Warn("重新生成邮箱门户页面失败", "err", err)
+	} else if n > 0 {
+		slog.Info("已重新生成邮箱门户页面", "count", n)
+	}
+
 	// 自愈 SQL Server：已安装但未 setup（未接受 EULA / 未设置 SA 密码，启动报 exit 255）时自动补齐。
 	// 异步执行避免阻塞面板启动（mssql-conf setup 首次初始化可能耗时数十秒）。
 	go func() {

@@ -63,6 +63,10 @@ func UpdateMailDomain(id uint, patch map[string]interface{}) error {
 
 // DeleteMailDomain 删除邮箱域名
 func DeleteMailDomain(id uint) error {
+	// 先清理该域名已开启的邮箱门户站点（站点 + nginx 配置 + 片段）
+	if dom, err := MailDomainByID(id); err == nil {
+		DeleteMailPortalForDomain(dom)
+	}
 	res := model.DB.Delete(&model.MailDomain{}, id)
 	if res.Error != nil {
 		return res.Error

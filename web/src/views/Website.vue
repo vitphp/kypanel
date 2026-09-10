@@ -407,11 +407,22 @@
             </el-select>
           </el-form-item>
           <el-form-item label="项目路径" prop="root">
-            <el-input v-model="form.root" placeholder="如 /www/wwwroot/站点名（留空自动创建）" />
+            <div class="root-picker">
+              <el-input v-model="form.root" placeholder="如 /www/wwwroot/站点名（留空自动创建）" />
+              <el-button :icon="FolderOpened" @click="pickerVisible = true" />
+            </div>
+          </el-form-item>
+          <el-form-item label="源码">
+            <div class="src-picker">
+              <el-button :icon="Upload" @click="sourceInputRef.click()">选择源码</el-button>
+              <span v-if="sourceFile" class="src-name" :title="sourceFile.name">{{ sourceFile.name }}</span>
+              <span v-else class="tip">支持 .zip 压缩包（Go 源码或含二进制的包）或单个二进制文件</span>
+            </div>
+            <span class="tip">上传 Go 源码（含 go.mod）时将按服务器系统自动编译成二进制；压缩包会自动解压</span>
           </el-form-item>
           <el-form-item label="启动命令" prop="start_command">
-            <el-input v-model="form.start_command" placeholder="如 ./app / go run main.go" />
-            <span class="tip">将由 systemd 守护运行</span>
+            <el-input v-model="form.start_command" placeholder="选填，留空自动推断（如 ./站点名）" />
+            <span class="tip">留空时按上传内容自动生成；有多个可执行文件时会提示选择入口</span>
           </el-form-item>
           <el-form-item label="项目端口" prop="proxy_port">
             <el-input-number v-model="form.proxy_port" :min="1" :max="65535" />
@@ -420,6 +431,11 @@
           <el-form-item label="环境变量">
             <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个，可选" />
           </el-form-item>
+          <!-- 创建进度 -->
+          <div v-if="deploying" class="deploy-progress">
+            <div class="deploy-stage">{{ deployStageText }}</div>
+            <el-progress :percentage="deployPercent" :status="deployPercent >= 100 ? 'success' : ''" />
+          </div>
         </template>
 
         <!-- 反向代理 -->
@@ -434,6 +450,26 @@
         <el-button type="primary" :loading="submitting" @click="submit">创建</el-button>
       </template>
     </el-dialog>
+
+    <!-- 创建 Go 站点：选择项目路径 -->
+    <FilePickerDialog v-model="pickerVisible" title="选择项目路径" start-path="/www/wwwroot" @confirm="onPickRoot" />
+
+    <!-- 创建 Go 站点：选择启动入口（解压后存在多个可执行文件时） -->
+    <el-dialog v-model="entryVisible" title="选择启动文件" width="480px" :close-on-click-modal="false">
+      <div class="entry-tip">检测到多个可执行文件，请选择程序入口（将自动填入启动命令）：</div>
+      <el-radio-group v-model="entryPick" class="entry-list">
+        <el-radio v-for="f in entryOptions" :key="f.path" :value="f.path" class="entry-item">
+          {{ f.path }} <span class="entry-size">（{{ fmtBytes(f.size) }}）</span>
+        </el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button @click="cancelEntry">取消</el-button>
+        <el-button type="primary" :disabled="!entryPick" @click="confirmEntry">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 隐藏的源码文件选择 -->
+    <input ref="sourceInputRef" type="file" style="display:none" @change="onPickSource" />
 
     <!-- 网站设置抽屉：success 只更新对应站点行的域名字段，不重新拉整个列表 -->
     <SiteSettings ref="settingsRef" @success="onSiteSettingsSaved" />
@@ -496,9 +532,10 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument, Files, Refresh } from '@element-plus/icons-vue'
+import { Edit, ArrowDown, WarningFilled, Warning, Download, Tools, Setting, Delete, CopyDocument, Files, Refresh, FolderOpened, Upload } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import SiteSettings from './SiteSettings.vue'
+import FilePickerDialog from '../components/FilePickerDialog.vue'
 import SiteStatDialog from '../components/SiteStatDialog.vue'
 import SiteSecurityDialog from '../components/SiteSecurityDialog.vue'
 import SiteLogsDialog from '../components/SiteLogsDialog.vue'
@@ -548,6 +585,48 @@ const openEnvManager = () => {
 }
 const submitting = ref(false)
 const formRef = ref()
+
+// Go 站点创建：路径选择 / 源码上传 / 入口选择 / 进度
+const pickerVisible = ref(false)
+const sourceInputRef = ref(null)
+const sourceFile = ref(null)
+const deploying = ref(false)
+const deployPercent = ref(0)
+const deployStageText = ref('')
+const entryVisible = ref(false)
+const entryOptions = ref([])
+const entryPick = ref('')
+let pendingCreate = null // 待最终提交的创建参数
+
+function onPickRoot(p) { form.root = p }
+
+function onPickSource(e) {
+  const f = e.target.files?.[0]
+  e.target.value = ''
+  if (!f) return
+  sourceFile.value = f
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+// 上传源码到临时目录（带真实进度）
+function uploadSource(file, onProgress) {
+  const fd = new FormData()
+  fd.append('filename', file.name)
+  fd.append('file', file)
+  return request.post('/site/upload-source', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 0,
+    onUploadProgress: (ev) => {
+      if (ev.total) onProgress(Math.round((ev.loaded / ev.total) * 100))
+    }
+  })
+}
 
 // Web 服务器环境状态（nginx / apache）
 const nginxInstalled = ref(true)
@@ -1286,6 +1365,8 @@ async function openCreate() {
   })
   // 自动带出已安装版本
   onTypeChange()
+  sourceFile.value = null
+  deploying.value = false
   createVisible.value = true
 }
 
@@ -1345,9 +1426,18 @@ async function submit() {
     ElMessage.warning('请填写代理目标')
     return
   }
-  if (form.type === 'node' || form.type === 'python' || form.type === 'go') {
+  if (form.type === 'node' || form.type === 'python') {
     if (!form.proxy_port) { ElMessage.warning('请填写项目端口'); return }
     if (!form.start_command) { ElMessage.warning('请填写启动命令'); return }
+  }
+  if (form.type === 'go') {
+    if (!form.proxy_port) { ElMessage.warning('请填写项目端口'); return }
+    if (!form.runtime_version) { ElMessage.warning('请选择 Go 版本（需先在应用商店安装 Golang）'); return }
+    if (!sourceFile.value) {
+      ElMessage.warning('请选择源码（.zip 压缩包或单个二进制文件）')
+      return
+    }
+    // 启动命令选填：留空时由后端按上传内容自动推断
   }
   if (form.type === 'php' && form.create_db && !form.db_password) {
     ElMessage.warning('创建数据库需要填写数据库密码')
@@ -1357,6 +1447,11 @@ async function submit() {
     ElMessage.warning('创建 FTP 需要填写 FTP 密码')
     return
   }
+
+  if (form.type === 'go') {
+    return submitGoSite()
+  }
+
   submitting.value = true
   try {
     await request.post('/site/create', buildPayload())
@@ -1366,6 +1461,73 @@ async function submit() {
   } catch (e) { /* interceptor handles */ } finally {
     submitting.value = false
   }
+}
+
+// Go 站点：上传源码 → 创建 → （多个可执行文件时）选择入口 → 完成
+async function submitGoSite() {
+  submitting.value = true
+  deploying.value = true
+  deployPercent.value = 0
+  deployStageText.value = '正在上传源码…'
+  try {
+    // 1) 上传源码
+    const up = await uploadSource(sourceFile.value, (p) => {
+      deployPercent.value = Math.min(90, p)
+      deployStageText.value = `正在上传源码… ${p}%`
+    })
+    const tmp = up.data?.tmp
+    if (!tmp) throw new Error('上传失败')
+    // 2) 创建（后端解压/编译/落盘，源码编译可能耗时较久）
+    deployPercent.value = 92
+    deployStageText.value = '正在解压并配置…（Go 源码将自动编译，请稍候）'
+    const payload = buildPayload()
+    payload.source_tmp = tmp
+    payload.source_name = up.data?.filename || sourceFile.value.name
+    const res = await request.post('/site/create', payload)
+    finishCreate()
+    // 若后端返回多个可执行文件且用户没填启动命令，让用户选入口
+    const site = res.data
+    const execs = site?.exec_files || []
+    if (Array.isArray(execs) && execs.length > 1 && !form.start_command) {
+      entryOptions.value = execs
+      entryPick.value = ''
+      pendingCreate.value = { siteId: site.id, siteName: site.name }
+      entryVisible.value = true
+    } else {
+      ElMessage.success('网站创建成功')
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.msg || e?.message || '创建失败')
+  } finally {
+    submitting.value = false
+    deploying.value = false
+    deployPercent.value = 0
+    deployStageText.value = ''
+  }
+}
+
+function finishCreate() {
+  createVisible.value = false
+  loadSites()
+}
+
+async function confirmEntry() {
+  if (!entryPick.value || !pendingCreate.value) return
+  try {
+    await request.post('/site/entry', {
+      id: pendingCreate.value.siteId,
+      start_command: './' + entryPick.value
+    })
+    ElMessage.success('网站创建成功')
+    entryVisible.value = false
+    pendingCreate.value = null
+    loadSites()
+  } catch (e) { /* handled */ }
+}
+
+function cancelEntry() {
+  entryVisible.value = false
+  pendingCreate.value = null
 }
 
 function siteDir(row) {
@@ -2023,4 +2185,15 @@ onBeforeUnmount(() => {
 .ssl-undeployed {
   color: #f56c6c;
 }
+/* Go 站点创建：路径选择 / 源码选择 / 部署进度 / 入口选择 */
+.root-picker { display: flex; gap: 8px; width: 100%; }
+.root-picker .el-input { flex: 1; }
+.src-picker { display: flex; align-items: center; gap: 10px; width: 100%; }
+.src-name { font-size: 13px; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deploy-progress { margin: 4px 0 6px; }
+.deploy-stage { font-size: 13px; color: #606266; margin-bottom: 6px; }
+.entry-tip { font-size: 13px; color: #606266; margin-bottom: 10px; }
+.entry-list { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.entry-item { height: auto; padding: 6px 0; }
+.entry-size { color: #909399; font-size: 12px; }
 </style>

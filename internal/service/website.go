@@ -109,9 +109,12 @@ type CreateSiteReq struct {
 
 	// python/node/go 项目参数
 	StartCommand string `json:"start_command"` // 启动命令，如 python app.py / npm run start
-	EnvVars      string `json:"env_vars"`      // 环境变量，KEY=VALUE 每行一个
-	ProxyPort    int    `json:"proxy_port"`    // 应用运行端口（nginx 反代目标）
-	Framework    string `json:"framework"`     // python 框架：flask / django / generic
+	// go 站点源码部署：上传后的临时文件路径 + 原始文件名（创建时解压/落盘到项目目录）
+	SourceTmp  string `json:"source_tmp"`
+	SourceName string `json:"source_name"`
+	EnvVars    string `json:"env_vars"`   // 环境变量，KEY=VALUE 每行一个
+	ProxyPort  int    `json:"proxy_port"` // 应用运行端口（nginx 反代目标）
+	Framework  string `json:"framework"`  // python 框架：flask / django / generic
 
 	// PHP 可选：创建数据库
 	CreateDB   bool   `json:"create_db"`
@@ -676,6 +679,10 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 	if inc := CaptchaIncludeLine(s.ID); inc != "" {
 		sb.WriteString(inc)
 	}
+	// 邮箱门户接口反代片段（存在则 include，不存在为空）
+	if inc := MailPortalIncludeLine(s.Name, s.ID); inc != "" {
+		sb.WriteString(inc)
+	}
 	sb.WriteString("}\n")
 	return sb.String()
 }
@@ -995,7 +1002,15 @@ func writeSiteService(s *model.Site) error {
 	if s.Root != "" {
 		fmt.Fprintf(&sb, "cd %s\n", s.Root)
 	}
-	fmt.Fprintf(&sb, "exec %s\n", s.StartCommand)
+	// 启动命令为空（Go 站点多可执行文件待选入口）：不生成 exec，直接退出，
+	// 避免写出 "exec " 造成服务反复启动失败；待前端选择入口后由
+	// SetSiteStartCommand 重新写入并启动。
+	if strings.TrimSpace(s.StartCommand) == "" {
+		sb.WriteString("echo 'start command not set, waiting for entry selection'\n")
+		sb.WriteString("exit 0\n")
+	} else {
+		fmt.Fprintf(&sb, "exec %s\n", s.StartCommand)
+	}
 	if err := os.WriteFile(siteRunnerPath(s.Name), []byte(sb.String()), 0o755); err != nil {
 		return err
 	}
@@ -1122,6 +1137,10 @@ func writeSiteConf(s *model.Site) error {
 	conf := genSiteConf(s)
 	// 注入拖拽验证码 include 行（覆盖站点存在 config_override 时 genSiteConf 直接返回 override 的情况）
 	conf = ensureCaptchaInclude(conf, s)
+	// 自愈：全局 WAF 开启时 genSiteConf 会 include /etc/nginx/waf/lp_<name>.conf，
+	// 但新建站点此前从未生成该片段文件，导致 nginx -t 报 "open() ... failed" 而站点创建失败。
+	// 这里先确保片段文件存在（内容为空时写占位），使 include 永远可解析。
+	regenerateSiteWAFSnippet(s)
 	ws := WebServerType()
 
 	var dir, path string
@@ -1329,13 +1348,33 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
 			return nil, errors.New("请填写应用运行端口（1-65535）")
 		}
-		if s.StartCommand == "" {
+		// 启动命令选填：不填时按上传内容自动推断（见下方 Go 分支）。
+		// 非 Go 的进程型站点（python/node）仍要求填写。
+		if s.Type != model.SiteTypeGo && s.StartCommand == "" {
 			return nil, errors.New("请填写启动命令，如 python app.py / npm run start")
 		}
 		if err := os.MkdirAll(s.Root, 0o755); err != nil {
 			return nil, errors.New("创建项目目录失败: " + err.Error())
 		}
 		_ = ChownToWebUser(s.Root, true)
+		// Go 站点：部署上传的源码（压缩包解压/自动编译 / 单二进制落盘）
+		if s.Type == model.SiteTypeGo && req.SourceTmp != "" {
+			execs, err := DeploySiteSource(req.SourceTmp, req.SourceName, s.Root, req.RuntimeVersion, s.Name)
+			if err != nil {
+				return nil, err
+			}
+			CleanupUpload(req.SourceTmp)
+			s.ExecFiles = execs
+			// 启动命令未填写时自动推断：唯一可执行文件 → ./文件名
+			if s.StartCommand == "" {
+				if len(execs) == 1 {
+					s.StartCommand = "./" + execs[0].Path
+				} else if len(execs) == 0 {
+					return nil, errors.New("未在源码中找到可执行文件，也无法编译出二进制；请上传已编译的程序或包含 go.mod 的 Go 源码")
+				}
+				// len(execs) > 1 时留空，交由前端弹窗选择入口
+			}
+		}
 		s.ProxyPass = fmt.Sprintf("http://127.0.0.1:%d", s.ProxyPort)
 		if s.RuntimeVersion == "" {
 			s.RuntimeVersion = runtimeVersionOf(s.Type)
@@ -1371,7 +1410,7 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 			}
 			// 生成默认 index.html 与 404.html（不生成假 index.php）
 			writeDefaultPages(s.Root, s.Name)
-		_ = ChownToWebUser(s.Root, true)
+			_ = ChownToWebUser(s.Root, true)
 			// 可选：创建数据库
 			if req.CreateDB {
 				dbName := req.DBName
@@ -1399,7 +1438,7 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		} else {
 			// 静态站点：生成默认 index.html 与 404.html
 			writeDefaultPages(s.Root, s.Name)
-		_ = ChownToWebUser(s.Root, true)
+			_ = ChownToWebUser(s.Root, true)
 		}
 
 	default: // proxy 反向代理
@@ -1714,4 +1753,24 @@ func UpdateSiteRemark(req UpdateSiteRemarkReq) error {
 	}
 	s.Remark = strings.TrimSpace(req.Remark)
 	return model.UpdateSiteField(s.ID, "remark", s.Remark)
+}
+
+// SetSiteStartCommand 设置进程型站点的启动命令并重启服务（Go 站点选择入口后调用）。
+func SetSiteStartCommand(id uint, cmd string) error {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return errors.New("启动命令不能为空")
+	}
+	s, err := getSiteOrErr(id)
+	if err != nil {
+		return err
+	}
+	if !isRuntimeSite(s.Type) {
+		return errors.New("仅进程型站点支持修改启动命令")
+	}
+	s.StartCommand = cmd
+	if err := model.UpdateSiteField(s.ID, "start_command", cmd); err != nil {
+		return err
+	}
+	return rewriteSiteService(s)
 }

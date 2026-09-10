@@ -1,7 +1,10 @@
 package router
 
 import (
+	"io"
+	"mime/multipart"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -54,6 +57,80 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 			return
 		}
 		recordOpForCtx(c, "site.default_site", "设置默认站点："+siteName(req.ID), "success")
+		utils.Ok(c, nil)
+	})
+
+	// 上传站点源码（Go 项目：压缩包或单个二进制），流式写入临时目录
+	g.POST("/site/upload-source", func(c *gin.Context) {
+		mr, err := c.Request.MultipartReader()
+		if err != nil {
+			utils.Fail(c, 400, "请求不是合法的 multipart 格式")
+			return
+		}
+		var filename string
+		var filePart *multipart.Part
+		for {
+			p, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				utils.Fail(c, 400, "读取上传数据失败")
+				return
+			}
+			if p.FormName() == "file" {
+				filePart = p
+				break
+			}
+			buf, _ := io.ReadAll(io.LimitReader(p, 1<<20))
+			if p.FormName() == "filename" {
+				filename = strings.TrimSpace(string(buf))
+			}
+		}
+		if filePart == nil {
+			utils.Fail(c, 400, "缺少上传文件")
+			return
+		}
+		defer filePart.Close()
+		if filename == "" {
+			filename = filePart.FileName()
+		}
+		tmp, err := service.SaveUploadedSource(filePart, filename)
+		if err != nil {
+			utils.Fail(c, 500, "保存上传文件失败: "+err.Error())
+			return
+		}
+		utils.Ok(c, gin.H{
+			"tmp":        tmp,
+			"filename":   filename,
+			"is_archive": service.IsArchive(filename),
+		})
+	})
+
+	// 扫描目录中的可执行文件（Go 站点选择启动入口）
+	g.GET("/site/scan-binaries", func(c *gin.Context) {
+		path := c.Query("path")
+		if strings.TrimSpace(path) == "" {
+			utils.Fail(c, 400, "缺少目录路径")
+			return
+		}
+		utils.Ok(c, service.ScanExecutables(path))
+	})
+
+	// 设置 Go 站点启动命令（创建后选择入口）
+	g.POST("/site/entry", func(c *gin.Context) {
+		var req struct {
+			ID           uint   `json:"id" binding:"required"`
+			StartCommand string `json:"start_command" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, 400, "参数错误")
+			return
+		}
+		if err := service.SetSiteStartCommand(req.ID, req.StartCommand); err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
 		utils.Ok(c, nil)
 	})
 
@@ -536,10 +613,10 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 		}
 		ok, path, lerr := service.GetSiteStatImporterStatus(uint(id64))
 		utils.Ok(c, gin.H{
-			"running":     ok,
-			"log_path":    path,
-			"last_error":  lerr,
-			"ip_region":   service.IpRegionEnabled(),
+			"running":    ok,
+			"log_path":   path,
+			"last_error": lerr,
+			"ip_region":  service.IpRegionEnabled(),
 		})
 	})
 }
