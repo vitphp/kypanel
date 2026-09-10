@@ -61,7 +61,7 @@ func UpdateMailDomain(id uint, patch map[string]interface{}) error {
 	return model.DB.Model(&model.MailDomain{}).Where("id = ?", id).Updates(patch).Error
 }
 
-// DeleteMailDomain 删除邮箱域名（P1 仅删域名记录；后续 P 会级联清理账号与邮件）
+// DeleteMailDomain 删除邮箱域名
 func DeleteMailDomain(id uint) error {
 	res := model.DB.Delete(&model.MailDomain{}, id)
 	if res.Error != nil {
@@ -141,7 +141,7 @@ func BuildMailDnsGuide(domain string) (*model.MailDnsGuide, error) {
 		MxValue:    fmt.Sprintf("mail.%s", rec.Domain),
 		SpfValue:   spf,
 		DkimHost:   "default._domainkey",
-		DkimValue:  "v=DKIM1; k=rsa; p=<生成后自动填写>", // P4 签名就绪后自动替换为真实公钥
+		DkimValue:  "v=DKIM1; k=rsa; p=<生成后自动填写>",
 		DmarcHost:  "_dmarc",
 		DmarcValue: "v=DMARC1; p=quarantine; rua=mailto:postmaster@" + rec.Domain,
 	}
@@ -149,15 +149,13 @@ func BuildMailDnsGuide(domain string) (*model.MailDnsGuide, error) {
 		"1) A 记录：mail." + rec.Domain + " 解析到本服务器（主机 mail，类型 A，值 " + srv + "）",
 		"2) MX 记录：主机 @，值 mail." + rec.Domain + "，优先级 10",
 		"3) SPF 记录：TXT，主机 @，值 " + spf + "（声明本服务器 " + srv + " 是唯一代发方）",
-		"4) DKIM 与 DMARC 可后续补（P4 签名功能上线后面板会自动填真实公钥）",
+		"4) DKIM 与 DMARC 可后续补",
 		"5) 生效通常需几分钟到数小时，可点页面上的「检测解析是否生效」自动查 MX",
 	}
 	return g, nil
 }
 
-// CheckMailDnsRecord 简易"自检"：尝试解析某域名的 MX 记录并看是否生效。
-// 使用标准库 net 查询 MX。注意 DNS 传播有延迟，未解析到可能是还没生效（不代表配错）。
-// 留到 P2 收信功能就绪后用于指导用户确认解析是否已生效。
+// CheckMailDnsRecord 查询某域名的 MX 记录（DNS 传播有延迟，未解析到可能只是还没生效）
 func CheckMailDnsRecord(domain string) (mxRecords []string, err error) {
 	hosts, err := net.LookupMX(domain)
 	if err != nil {

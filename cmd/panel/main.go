@@ -249,6 +249,10 @@ func main() {
 	service.InitSecurityRules()
 	service.ApplySecurityRules()
 
+	// 启动 SMTP 收信服务（进程内自研，maildir 落盘）。监听端口可用环境变量
+	// PANEL_MAIL_SMTP_PORTS 覆盖，默认 2525。放行端口请在防火墙里开放。
+	service.StartMailSmtpServer()
+
 	// 确保 cron 任务 wrapper 脚本存在（系统 cron 调起任务时用它执行用户命令并写日志）
 	service.EnsureCronWrapper()
 	// 同步 crontab（用新格式覆盖旧"直接命令"行，确保系统 cron 调起时走 wrapper 记录日志）

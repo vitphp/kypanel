@@ -10,7 +10,7 @@
             <span class="tip">支持多端口(80,443)、范围(8000-8100)、指定来源 IP</span>
           </div>
           <div class="toolbar-actions">
-            <el-button type="primary" :icon="Plus" @click="openPortDialog">添加端口规则</el-button>
+            <el-button type="primary" :icon="Plus" @click="openPortDialog()">添加端口规则</el-button>
           </div>
         </div>
         <Skeleton v-if="loadingPorts" type="table" :rows="5" :columns="[{width:'140px'},{width:'100px'},{width:'160px'},{width:'90px'},{width:'90px'},{width:'90px'},{flex:1},{width:'90px'}]" />

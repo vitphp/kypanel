@@ -1,8 +1,11 @@
 package router
 
 import (
+	"encoding/base64"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -212,7 +215,7 @@ func setupMailRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, gin.H{"ready": ready, "detail": detail})
 	})
 
-	// ========== 邮箱账号 ==========
+	// 邮箱账号
 	accounts := mail.Group("/accounts")
 	{
 		// 某域名下账号列表
@@ -373,4 +376,280 @@ func setupMailRoutes(g *gin.RouterGroup) {
 			utils.Ok(c, nil)
 		})
 	}
+
+	// 收件箱（消息）
+	messages := mail.Group("/messages")
+	{
+		// 某账号收件箱消息列表（folder 默认 inbox）
+		messages.GET("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+			if mbID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少账号参数")
+				return
+			}
+			folder := c.Query("folder")
+			list, err := service.ListMailboxMessagesAPI(uint(mbID), folder)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, list)
+		})
+
+		// 某账号收件箱未读数
+		messages.GET("/unread-count", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+			if mbID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少账号参数")
+				return
+			}
+			utils.Ok(c, gin.H{"count": service.CountMailboxUnseenAPI(uint(mbID))})
+		})
+
+		// 一键已读：把某账号收件箱全部未读标为已读
+		messages.POST("/read-all", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			var req struct {
+				MailboxID uint `json:"mailbox_id"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if req.MailboxID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少账号参数")
+				return
+			}
+			if err := service.MarkMailboxAllSeenAPI(req.MailboxID); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.message.readall", "一键标记全部已读", "success")
+			utils.Ok(c, nil)
+		})
+
+		// 读某封信详情（并标记已读）
+		messages.GET("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			msgID, _ := strconv.Atoi(c.Param("id"))
+			mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+			if msgID <= 0 || mbID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			detail, err := service.ReadMailboxMessageAPI(uint(mbID), uint(msgID))
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, detail)
+		})
+
+		// 下载附件
+		messages.GET("/:id/attachment", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			msgID, _ := strconv.Atoi(c.Param("id"))
+			mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+			idx, _ := strconv.Atoi(c.Query("index"))
+			if msgID <= 0 || mbID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			fname, ctype, data, err := service.GetMailAttachmentAPI(uint(mbID), uint(msgID), idx)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			if ctype == "" {
+				ctype = "application/octet-stream"
+			}
+			c.Header("Content-Type", ctype)
+			c.Header("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(fname))
+			c.Data(http.StatusOK, ctype, data)
+		})
+
+		// 删除消息
+		messages.DELETE("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			msgID, _ := strconv.Atoi(c.Param("id"))
+			mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+			if msgID <= 0 || mbID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.DeleteMailboxMessageAPI(uint(mbID), uint(msgID)); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.message.delete", "删除邮件 #"+strconv.Itoa(msgID), "success")
+			utils.Ok(c, nil)
+		})
+
+		// 批量标记已读/未读
+		messages.POST("/seen", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			var req struct {
+				MailboxID uint   `json:"mailbox_id"`
+				IDs       []uint `json:"ids"`
+				Seen      bool   `json:"seen"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if req.MailboxID <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少账号参数")
+				return
+			}
+			if err := service.SetMailboxMessagesSeenAPI(req.MailboxID, req.IDs, req.Seen); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, nil)
+		})
+	}
+
+	// 全部邮箱账号未读总数（左侧菜单红点）
+	mail.GET("/unread-count", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		utils.Ok(c, gin.H{"count": service.CountSystemUnseenAPI()})
+	})
+
+	// 发信
+	mail.POST("/send", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		var req struct {
+			MailboxID   uint     `json:"mailbox_id"`
+			To          []string `json:"to"`
+			Cc          []string `json:"cc"`
+			Subject     string   `json:"subject"`
+			Text        string   `json:"text"`
+			Html        string   `json:"html"`
+			Attachments []struct {
+				Filename string `json:"filename"`
+				Type     string `json:"type"`
+				Data     string `json:"data"` // base64
+				Inline   bool   `json:"inline"`
+				CID      string `json:"cid"`
+			} `json:"attachments"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+			return
+		}
+		if req.MailboxID == 0 {
+			utils.Fail(c, http.StatusBadRequest, "缺少发件账号")
+			return
+		}
+		attach, ok := parseAttachments(c, req.Attachments)
+		if !ok {
+			return
+		}
+		result, err := service.SendMail(service.SendMailRequest{
+			MailboxID: req.MailboxID,
+			To:        req.To,
+			Cc:        req.Cc,
+			Subject:   req.Subject,
+			TextBody:  req.Text,
+			HtmlBody:  req.Html,
+			Attach:    attach,
+		})
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		recordOpForCtx(c, "mail.send", "发送邮件: "+strings.Join(req.To, ","), "success")
+		utils.Ok(c, result)
+	})
+
+	// 保存草稿
+	mail.POST("/drafts", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		var req struct {
+			MailboxID   uint     `json:"mailbox_id"`
+			DraftID     uint     `json:"draft_id"`
+			To          []string `json:"to"`
+			Subject     string   `json:"subject"`
+			Text        string   `json:"text"`
+			Html        string   `json:"html"`
+			Attachments []struct {
+				Filename string `json:"filename"`
+				Type     string `json:"type"`
+				Data     string `json:"data"`
+				Inline   bool   `json:"inline"`
+				CID      string `json:"cid"`
+			} `json:"attachments"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			utils.Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+			return
+		}
+		if req.MailboxID == 0 {
+			utils.Fail(c, http.StatusBadRequest, "缺少账号")
+			return
+		}
+		attach, ok := parseAttachments(c, req.Attachments)
+		if !ok {
+			return
+		}
+		rec, err := service.SaveDraft(service.SaveDraftRequest{
+			MailboxID: req.MailboxID, DraftID: req.DraftID, To: req.To,
+			Subject: req.Subject, TextBody: req.Text, HtmlBody: req.Html, Attach: attach,
+		})
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		utils.Ok(c, gin.H{"id": rec.ID})
+	})
+}
+
+// parseAttachments 解析请求里的附件（base64 → bytes），总大小限 25MB。
+func parseAttachments(c *gin.Context, in []struct {
+	Filename string `json:"filename"`
+	Type     string `json:"type"`
+	Data     string `json:"data"`
+	Inline   bool   `json:"inline"`
+	CID      string `json:"cid"`
+}) ([]service.MailAttachment, bool) {
+	var out []service.MailAttachment
+	var total int
+	for _, a := range in {
+		raw, err := base64.StdEncoding.DecodeString(a.Data)
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, "附件数据无效: "+a.Filename)
+			return nil, false
+		}
+		total += len(raw)
+		if total > 25*1024*1024 {
+			utils.Fail(c, http.StatusBadRequest, "附件总大小超过 25MB")
+			return nil, false
+		}
+		out = append(out, service.MailAttachment{
+			Filename: a.Filename, ContentType: a.Type, Data: raw, Inline: a.Inline, ContentID: a.CID,
+		})
+	}
+	return out, true
 }

@@ -5,14 +5,14 @@ import "time"
 // MailDomain 一个邮箱域名租户。每域名独立邮箱命名空间，互不可见。
 // 用户在此域名下拥有 name@domain 的邮箱。
 type MailDomain struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Domain    string    `gorm:"size:255;uniqueIndex;not null" json:"domain"` // 如 example.com（小写，不带 @/*）
-	Enabled   bool      `gorm:"default:true" json:"enabled"`                 // 是否启用该域名邮箱（收信开关）
-	Remark    string    `gorm:"size:255" json:"remark"`                      // 备注
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	Domain  string `gorm:"size:255;uniqueIndex;not null" json:"domain"` // 如 example.com（小写，不带 @/*）
+	Enabled bool   `gorm:"default:true" json:"enabled"`                 // 是否启用该域名邮箱（收信开关）
+	Remark  string `gorm:"size:255" json:"remark"`                      // 备注
 
 	// 容量/配额（单位 MB，0 = 使用面板默认）
-	MaxAccounts  int64 `gorm:"default:0" json:"max_accounts"` // 0 = 不限账号数
-	QuotaPerBox  int64 `gorm:"default:1024" json:"quota_per_box"` // 单账号容量上限 MB
+	MaxAccounts int64 `gorm:"default:0" json:"max_accounts"`     // 0 = 不限账号数
+	QuotaPerBox int64 `gorm:"default:1024" json:"quota_per_box"` // 单账号容量上限 MB
 
 	// DNS / 防伪配置状态（供前端"绑定/解析引导"展示，是否已配由用户勾选/自检）
 	MxConfigured    bool `gorm:"default:false" json:"mx_configured"`
@@ -20,7 +20,7 @@ type MailDomain struct {
 	DkimConfigured  bool `gorm:"default:false" json:"dkim_configured"`
 	DmarcConfigured bool `gorm:"default:false" json:"dmarc_configured"`
 
-	// DKIM 私钥（加密/明文存储由 service 决定；P4 启用签名时写入）
+	// DKIM 私钥
 	DkimPrivateKey string `gorm:"size:4096" json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
@@ -47,14 +47,14 @@ func (MailDomain) TableName() string { return "mail_domains" }
 
 // MailDnsGuide 某域名的 DNS 绑定引导信息（返回给前端展示"怎么解析"）
 type MailDnsGuide struct {
-	Domain    string `json:"domain"`
+	Domain     string `json:"domain"`
 	MailServer string `json:"mail_server"` // 指向的 A/主机记录目标
 	// MX
 	MxHost  string `json:"mx_host"`
 	MxValue string `json:"mx_value"`
 	// SPF
 	SpfValue string `json:"spf_value"`
-	// DKIM（P4 签名启用后有真实公钥；P1 给出占位引导）
+	// DKIM
 	DkimHost  string `json:"dkim_host"`
 	DkimValue string `json:"dkim_value"`
 	// DMARC
@@ -95,4 +95,53 @@ type MailboxView struct {
 	QuotaMb   int64     `json:"quota_mb"`
 	Remark    string    `json:"remark"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// MailMessage 一封邮件的索引元数据（正文存 maildir 文件，这里存便于收件箱列表/已读/搜索）。
+type MailMessage struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	MailboxID uint   `gorm:"not null;index" json:"mailbox_id"` // 所属账号 id
+	Domain    string `gorm:"size:255;index" json:"domain"`
+	Mailbox   string `gorm:"size:64" json:"mailbox"`    // @ 前的账号名
+	Address   string `gorm:"size:255" json:"address"`   // 完整收件地址 name@domain
+	Filename  string `gorm:"size:255" json:"-"`         // maildir 文件名（不含路径）
+	FromAddr  string `gorm:"size:255" json:"from_addr"` // 解析出的发件人
+	FromName  string `gorm:"size:255" json:"from_name"` // 发件人显示名（已解码）
+	ToAddrs   string `gorm:"size:1024" json:"to_addrs"` // 收件人（逗号分隔，发件/草稿用）
+	Subject   string `gorm:"size:512" json:"subject"`   // 主题（已解码）
+	Date      int64  `json:"date"`                      // 投递时间 unix 秒
+	Seen      bool   `gorm:"default:false;index" json:"seen"`
+	HasAttach bool   `gorm:"default:false" json:"has_attach"`     // 是否含附件
+	Folder    string `gorm:"size:32;default:inbox" json:"folder"` // inbox / sent / drafts ...
+	RawSize   int64  `json:"raw_size"`
+	MessageID string `gorm:"size:255" json:"message_id"`
+}
+
+// TableName 指定表名
+func (MailMessage) TableName() string { return "mail_messages" }
+
+// MailMessageView 收件箱列表/详情视图
+type MailMessageView struct {
+	ID          uint                 `json:"id"`
+	Address     string               `json:"address"`
+	FromAddr    string               `json:"from_addr"`
+	FromName    string               `json:"from_name"`
+	ToAddrs     string               `json:"to_addrs"`
+	Subject     string               `json:"subject"`
+	Date        int64                `json:"date"`
+	Seen        bool                 `json:"seen"`
+	HasAttach   bool                 `json:"has_attach"`
+	Folder      string               `json:"folder"`
+	RawSize     int64                `json:"raw_size"`
+	TextBody    string               `json:"text_body,omitempty"`
+	HtmlBody    string               `json:"html_body,omitempty"`
+	Attachments []MailAttachmentView `json:"attachments,omitempty"` // 仅详情接口填充
+}
+
+// MailAttachmentView 附件展示信息（不含内容）
+type MailAttachmentView struct {
+	Index       int    `json:"index"` // 在附件列表中的序号（下载用）
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
 }

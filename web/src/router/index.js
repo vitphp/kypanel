@@ -117,7 +117,7 @@ const routes = [
         meta: { title: '用户管理', icon: 'User' }
       },
       {
-        path: 'mail/domains',
+        path: 'mail',
         name: 'MailDomains',
         component: () => import('../views/mail/MailDomains.vue'),
         meta: { title: '域名邮箱', icon: 'Message' }

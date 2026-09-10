@@ -177,7 +177,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 16px;              /* 统一四周留白，与计划任务/数据库/监控页保持一致 */
+  padding: 0;
 }
 
 .lp-footer {

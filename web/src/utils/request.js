@@ -26,6 +26,10 @@ request.interceptors.response.use(
   (response) => {
     // 任一请求成功即说明会话恢复正常，解除 401 重定向锁，允许后续再发生 401 时重新跳转。
     request._authRedirecting = false
+    // 二进制响应（如附件下载）不走业务码判断，直接返回整个 response
+    if (response.config?.responseType === 'blob') {
+      return response
+    }
     const res = response.data
     if (res.code !== 0) {
       if (!response.config?.silent) {

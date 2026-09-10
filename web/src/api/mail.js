@@ -52,3 +52,48 @@ export function setMailAccountEnabled(id, enabled) {
 export function resetMailAccountPassword(id, password) {
   return request({ url: `/mail/accounts/${id}/password`, method: 'patch', data: { password } })
 }
+
+// ===== 收件箱（消息）=====
+export function listMailMessages(mailboxId, folder) {
+  return request({ url: '/mail/messages', method: 'get', params: { mailbox_id: mailboxId, folder: folder || 'inbox' } })
+}
+export function getMailMessage(mailboxId, id) {
+  return request({ url: `/mail/messages/${id}`, method: 'get', params: { mailbox_id: mailboxId } })
+}
+export function deleteMailMessage(mailboxId, id) {
+  return request({ url: `/mail/messages/${id}`, method: 'delete', params: { mailbox_id: mailboxId } })
+}
+export function setMailMessagesSeen(mailboxId, ids, seen) {
+  return request({ url: '/mail/messages/seen', method: 'post', data: { mailbox_id: mailboxId, ids, seen } })
+}
+// 全部未读数（左侧菜单红点）
+export function getMailUnreadCount() {
+  return request({ url: '/mail/unread-count', method: 'get' })
+}
+// 某账号收件箱未读数
+export function getMailboxUnreadCount(mailboxId) {
+  return request({ url: '/mail/messages/unread-count', method: 'get', params: { mailbox_id: mailboxId } })
+}
+// 一键全部已读
+export function markMailAllSeen(mailboxId) {
+  return request({ url: '/mail/messages/read-all', method: 'post', data: { mailbox_id: mailboxId } })
+}
+
+// ===== 发信 =====
+export function sendMail(data) {
+  return request({ url: '/mail/send', method: 'post', data, timeout: 120000 })
+}
+// 保存草稿
+export function saveMailDraft(data) {
+  return request({ url: '/mail/drafts', method: 'post', data })
+}
+// 下载附件（返回 blob）
+export function downloadMailAttachment(mailboxId, msgId, index) {
+  return request({
+    url: `/mail/messages/${msgId}/attachment`,
+    method: 'get',
+    params: { mailbox_id: mailboxId, index },
+    responseType: 'blob',
+    silent: true
+  })
+}

@@ -12,6 +12,8 @@
           >
             <el-icon class="lp-nav-icon" :size="18"><component :is="item.icon || 'Menu'" /></el-icon>
             <span class="lp-nav-label">{{ item.title }}</span>
+            <!-- 域名邮箱有新邮件未读时显示红点 -->
+            <span v-if="item.path === '/mail' && mailUnreadCount > 0" class="lp-nav-badge">{{ mailUnreadCount > 99 ? '99+' : mailUnreadCount }}</span>
           </router-link>
 
           <!-- 有子菜单：手风琴分组 -->
@@ -154,11 +156,12 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Promotion } from '@element-plus/icons-vue'
 import { getUpgradeProgress } from '../api/update'
+import { getMailUnreadCount } from '../api/mail'
 import { useAuthStore } from '../stores/auth'
 import { usePanelStore } from '../stores/panel'
 
@@ -171,6 +174,35 @@ defineEmits(['toggle-collapse'])
 const route = useRoute()
 const auth = useAuthStore()
 const panel = usePanelStore()
+
+// 域名邮箱未读数（红点）：进入邮件页 / 收件箱列表刷新时即时刷新 + 兜底轮询
+const mailUnreadCount = ref(0)
+let mailUnreadTimer = null
+async function refreshMailUnread() {
+  if (!auth.hasPermission('mail')) return
+  try {
+    const { data } = await getMailUnreadCount()
+    mailUnreadCount.value = Number(data?.count || 0)
+  } catch { /* 失败保持上次值 */ }
+}
+function onMailListChanged() { refreshMailUnread() }
+watch(
+  () => route.path,
+  (p) => { if (p === '/mail') refreshMailUnread() }
+)
+onMounted(() => {
+  if (auth.hasPermission('mail')) refreshMailUnread()
+  window.addEventListener('mail-list-refreshed', onMailListChanged)
+  // 兜底轮询：不在邮件页时也能感知新邮件。处于 /mail 时红点由收件箱列表刷新事件驱动，
+  // 避免独立轮询比列表先 +1 造成“红点先、列表后”的不同步观感。
+  mailUnreadTimer = setInterval(() => {
+    if (route.path !== '/mail') refreshMailUnread()
+  }, 15000)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('mail-list-refreshed', onMailListChanged)
+  if (mailUnreadTimer) clearInterval(mailUnreadTimer)
+})
 const openGroups = ref(['system'])
 
 // 按权限过滤菜单：无 perm 的项始终显示；有 perm 的项需有对应权限
@@ -190,7 +222,7 @@ const menu = [
   { path: '/files', title: '文件管理', icon: 'FolderOpened', perm: 'file' },
   { path: '/process', title: '进程管理', icon: 'Cpu', perm: 'process' },
   { path: '/backup', title: '备份中心', icon: 'Files', perm: 'backup' },
-  { path: '/mail/domains', title: '域名邮箱', icon: 'Message', perm: 'mail' },
+  { path: '/mail', title: '域名邮箱', icon: 'Message', perm: 'mail' },
   { path: '/users', title: '用户管理', icon: 'User', perm: 'settings' },
   { path: '/settings', title: '设置', icon: 'Setting', perm: 'settings' }
 ]
@@ -435,6 +467,22 @@ function startUpgradeProgress() {
   text-overflow: ellipsis;
 }
 
+/* 邮件未读红点角标 */
+.lp-nav-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 700;
+  box-sizing: border-box;
+}
+
 .lp-nav-caret {
   flex-shrink: 0;
   color: #94a3b8;
@@ -472,7 +520,8 @@ function startUpgradeProgress() {
 /* 折叠态：只显示图标 */
 .lp-sidebar.is-collapsed .lp-nav-label,
 .lp-sidebar.is-collapsed .lp-nav-caret,
-.lp-sidebar.is-collapsed .lp-nav-dot {
+.lp-sidebar.is-collapsed .lp-nav-dot,
+.lp-sidebar.is-collapsed .lp-nav-badge {
   display: none;
 }
 .lp-sidebar.is-collapsed .lp-nav-item {

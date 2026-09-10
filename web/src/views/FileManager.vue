@@ -2780,6 +2780,17 @@ watch(currentPath, (p) => {
   .el-table__header-wrapper .el-table__cell:nth-child(4),
   .el-table__header-wrapper .el-table__cell:nth-child(5) { display: none !important; }
 }
+/* 选择列表头复选框左右居中（与上方批量栏一致） */
+.el-table :deep(.el-table-column--selection) {
+  padding-left: 12px;
+  padding-right: 12px;
+  text-align: center;
+}
+.el-table :deep(.el-table-column--selection) .cell {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
 /* 桌面宽屏：一行排开（默认 wrap 已够，无需额外约束） */
 /* 统一按钮字号/内边距；显式归零所有外边距，避免 el-button + el-button 自带 10px 间距 */
 .row-actions > * {
