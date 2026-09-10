@@ -412,13 +412,12 @@
               <el-button :icon="FolderOpened" @click="pickerVisible = true" />
             </div>
           </el-form-item>
-          <el-form-item label="源码">
+          <el-form-item label="项目文件">
             <div class="src-picker">
-              <el-button :icon="Upload" @click="sourceInputRef.click()">选择源码</el-button>
+              <el-button :icon="Upload" @click="sourceInputRef.click()">选择文件</el-button>
               <span v-if="sourceFile" class="src-name" :title="sourceFile.name">{{ sourceFile.name }}</span>
-              <span v-else class="tip">支持 .zip 压缩包（Go 源码或含二进制的包）或单个二进制文件</span>
             </div>
-            <span class="tip">上传 Go 源码（含 go.mod）时将按服务器系统自动编译成二进制；压缩包会自动解压</span>
+            <span class="tip">可上传 zip 压缩包和二进制文件（压缩包支持源码，会自动编译）</span>
           </el-form-item>
           <el-form-item label="启动命令" prop="start_command">
             <el-input v-model="form.start_command" placeholder="选填，留空自动推断（如 ./站点名）" />
@@ -1434,7 +1433,7 @@ async function submit() {
     if (!form.proxy_port) { ElMessage.warning('请填写项目端口'); return }
     if (!form.runtime_version) { ElMessage.warning('请选择 Go 版本（需先在应用商店安装 Golang）'); return }
     if (!sourceFile.value) {
-      ElMessage.warning('请选择源码（.zip 压缩包或单个二进制文件）')
+      ElMessage.warning('请选择项目文件（zip 压缩包或二进制文件）')
       return
     }
     // 启动命令选填：留空时由后端按上传内容自动推断
