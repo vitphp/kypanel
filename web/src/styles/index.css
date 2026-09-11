@@ -141,7 +141,7 @@ h1, h2, h3, h4 { color: #0f172a; font-weight: 600; }
 
 /* 覆盖 Element Plus 表格单元格内 div 的默认 padding，让「操作」列更紧凑贴边 */
 .el-table td.el-table__cell div {
-  padding: 0;
+  padding: 0 8px;
 }
 
 /* el-descriptions 边框色 */
@@ -258,6 +258,7 @@ h1, h2, h3, h4 { color: #0f172a; font-weight: 600; }
     justify-content: flex-start;
     align-items: center;
     gap: 0;
+    width: 160px;
   }
   .ops-cell .el-button {
     font-size: 14px;

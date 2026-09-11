@@ -1,15 +1,13 @@
 <template>
   <div class="users-page">
+    <el-card shadow="never" class="users-card">
     <el-tabs v-model="activeTab">
       <!-- 用户列表 -->
       <el-tab-pane label="用户列表" name="users">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span>子账号管理</span>
-              <el-button type="primary" size="small" @click="createVisible = true">新建子账号</el-button>
-            </div>
-          </template>
+        <div class="card-head">
+          <span>子账号管理</span>
+          <el-button type="primary" size="small" @click="createVisible = true">新建子账号</el-button>
+        </div>
           <Skeleton v-if="usersLoading" type="table" :rows="6" :columns="[{width:'60px'},{width:'160px'},{width:'140px'},{width:'80px'},{flex:1}]" />
           <el-table v-else :data="users" size="small">
             <el-table-column prop="id" label="ID" width="60" />
@@ -41,18 +39,14 @@
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
       </el-tab-pane>
 
       <!-- 角色管理 -->
       <el-tab-pane label="角色管理" name="roles">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span>角色管理</span>
-              <el-button type="primary" size="small" @click="addRole">新建角色</el-button>
-            </div>
-          </template>
+        <div class="card-head">
+          <span>角色管理</span>
+          <el-button type="primary" size="small" @click="addRole">新建角色</el-button>
+        </div>
           <Skeleton v-if="rolesLoading" type="table" :rows="5" :columns="[{width:'60px'},{width:'140px'},{flex:1},{flex:1},{width:'120px'}]" />
           <el-table v-else :data="roles" size="small">
             <el-table-column prop="id" label="ID" width="60" />
@@ -74,9 +68,9 @@
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
       </el-tab-pane>
     </el-tabs>
+    </el-card>
 
     <!-- 新建子账号对话框 -->
     <el-dialog v-model="createVisible" title="新建子账号" width="420px">
@@ -295,7 +289,8 @@ onMounted(load)
 </script>
 
 <style scoped>
-.card-head { display: flex; justify-content: space-between; align-items: center; }
+.users-card { margin-bottom: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 0 10px; }
 
 .super-tip { color: #c0c4cc; font-size: 12px; }
 .perm-list { width: 100%; }

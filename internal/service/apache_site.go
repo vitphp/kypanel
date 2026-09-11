@@ -191,9 +191,21 @@ func genApacheVHost(s *model.Site, port int, names string, ssl bool) string {
 		}
 
 	default: // node / python / go / proxy 反向代理
+		// 去掉尾部斜杠再拼接，避免出现 http://host// 这类重复斜杠
+		pp := strings.TrimRight(s.ProxyPass, "/")
 		sb.WriteString("    ProxyPreserveHost On\n")
-		fmt.Fprintf(&sb, "    ProxyPass / %s/\n", s.ProxyPass)
-		fmt.Fprintf(&sb, "    ProxyPassReverse / %s/\n", s.ProxyPass)
+		// WebSocket 升级：把 Upgrade=websocket 的请求交给 mod_proxy_wstunnel（普通 HTTP 仍走 ProxyPass）
+		if strings.HasPrefix(pp, "http://") || strings.HasPrefix(pp, "https://") {
+			wsTarget := "ws://" + strings.TrimPrefix(pp, "http://")
+			if strings.HasPrefix(pp, "https://") {
+				wsTarget = "wss://" + strings.TrimPrefix(pp, "https://")
+			}
+			sb.WriteString("    RewriteEngine On\n")
+			sb.WriteString("    RewriteCond %{HTTP:Upgrade} =websocket [NC]\n")
+			fmt.Fprintf(&sb, "    RewriteRule ^/(.*)$ %s/$1 [P,L]\n", wsTarget)
+		}
+		fmt.Fprintf(&sb, "    ProxyPass / %s/\n", pp)
+		fmt.Fprintf(&sb, "    ProxyPassReverse / %s/\n", pp)
 	}
 
 	// 防盗链

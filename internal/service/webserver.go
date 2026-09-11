@@ -222,7 +222,8 @@ func ensureApacheModules(s *model.Site) error {
 		mods = append(mods, "proxy", "proxy_fcgi")
 	default: // node / python / go / proxy 反向代理
 		if s.ProxyPass != "" {
-			mods = append(mods, "proxy", "proxy_http")
+			// proxy_wstunnel：处理 WebSocket 升级请求（配合站点配置里的 RewriteRule）
+			mods = append(mods, "proxy", "proxy_http", "proxy_wstunnel")
 		}
 	}
 	if s.SslEnabled {

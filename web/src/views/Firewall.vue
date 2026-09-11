@@ -1,5 +1,6 @@
 <template>
   <div class="security-page">
+    <el-card shadow="never" class="sec-card">
     <el-tabs v-model="activeTab" class="sec-tabs">
       <!-- 端口规则 -->
       <el-tab-pane label="端口规则" name="ports">
@@ -170,6 +171,7 @@
         </el-table>
       </el-tab-pane>
     </el-tabs>
+    </el-card>
 
     <!-- 添加/编辑端口规则 -->
     <el-dialog v-model="portDialog.visible" :title="portDialog.isEdit ? '编辑端口规则' : '添加端口规则'" width="480" :close-on-click-modal="false">
@@ -494,11 +496,9 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.sec-card { margin-bottom: 16px; }
 .sec-tabs {
-  background: #fff;
-  border-radius: 6px;
-  padding: 4px 16px 16px;
-  box-shadow: 0 1px 3px rgba(0, 21, 41, 0.08);
+  padding: 0;
 }
 .toolbar {
   display: flex;

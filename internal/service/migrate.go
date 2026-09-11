@@ -56,6 +56,7 @@ type MigrateSite struct {
 	StartCommand   string   `json:"start_command,omitempty"`
 	EnvVars        string   `json:"env_vars,omitempty"`
 	Framework      string   `json:"framework,omitempty"`
+	InstallCommand string   `json:"install_command,omitempty"`
 	DefaultIndex   string   `json:"default_index,omitempty"`
 	Rewrite        string   `json:"rewrite,omitempty"`
 	RedirectURL    string   `json:"redirect_url,omitempty"`
@@ -285,6 +286,7 @@ func snapshotSite(s *model.Site) (MigrateSite, error) {
 		StartCommand:   s.StartCommand,
 		EnvVars:        s.EnvVars,
 		Framework:      s.Framework,
+		InstallCommand: s.InstallCommand,
 		DefaultIndex:   s.DefaultIndex,
 		Rewrite:        s.Rewrite,
 		RedirectURL:    s.RedirectURL,
@@ -1116,6 +1118,7 @@ func restoreSite(t *ImportTask, workDir string, ms *MigrateSite, req ImportRunRe
 		ProxyPort:      ms.ProxyPort,
 		ProxyPass:      ms.ProxyPass,
 		Framework:      ms.Framework,
+		InstallCommand: ms.InstallCommand,
 		Remark:         ms.Remark,
 		Rewrite:        ms.Rewrite,
 	}

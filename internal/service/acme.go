@@ -239,10 +239,39 @@ func solveHTTP01Challenges(ctx context.Context, client *acme.Client, order *acme
 	// 等待全部域名验证完成。验证文件不在此处删除，理由见函数注释。
 	for _, p := range pendings {
 		if _, err := client.WaitAuthorization(ctx, p.az.URI); err != nil {
-			return errors.New("域名验证失败: " + err.Error())
+			return errors.New("域名验证失败: " + friendlyACMEError(err))
 		}
 	}
 	return nil
+}
+
+// friendlyACMEError 把 ACME 的英文原始错误归纳成中文可读提示（并保留原始错误便于排查）。
+func friendlyACMEError(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := err.Error()
+	low := strings.ToLower(raw)
+	switch {
+	case strings.Contains(low, "dns problem") || strings.Contains(low, "dns:"):
+		return "域名 DNS 解析异常：请确认域名已解析到本服务器，且解析在境外/多地区可查询（CA 会从多个节点校验）。原始错误：" + trimACME(raw)
+	case strings.Contains(low, "connection") || strings.Contains(low, "timeout") || strings.Contains(low, "refused"):
+		return "验证服务器无法访问本站点：请确认 80/443 端口对公网开放、防火墙与安全组均已放行。原始错误：" + trimACME(raw)
+	case strings.Contains(low, "unauthorized") || strings.Contains(low, "invalid"):
+		return "域名校验未通过：请确认域名解析与站点绑定一致。原始错误：" + trimACME(raw)
+	case strings.Contains(low, "rate") || strings.Contains(low, "too many"):
+		return "申请过于频繁，已触发 CA 速率限制，请稍后再试。原始错误：" + trimACME(raw)
+	}
+	return trimACME(raw)
+}
+
+// trimACME 压缩 ACME 错误长度，避免提示过长
+func trimACME(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
 }
 
 // cleanupChallengeDir 清理 acme-challenge 目录下遗留的旧验证文件

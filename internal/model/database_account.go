@@ -7,9 +7,9 @@ import "gorm.io/gorm"
 type DatabaseAccount struct {
 	gorm.Model
 	Type     string `gorm:"index"` // mysql / pgsql
-	DbName   string `gorm:"index"` // 数据库名
-	Username string // 用户名
+	DbName   string `gorm:"index"`
+	Username string
 	Password string // 密码（明文）
-	Comment  string // 备注
+	Comment  string
 	Hosts    string // 允许访问主机，逗号分隔，空表示仅 localhost
 }

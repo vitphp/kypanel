@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,6 +116,8 @@ type CreateSiteReq struct {
 	EnvVars    string `json:"env_vars"`   // 环境变量，KEY=VALUE 每行一个
 	ProxyPort  int    `json:"proxy_port"` // 应用运行端口（nginx 反代目标）
 	Framework  string `json:"framework"`  // python 框架：flask / django / generic
+	// 依赖安装 / 构建命令（node：npm install && npm run build；python：pip install -r requirements.txt）
+	InstallCommand string `json:"install_command"`
 
 	// PHP 可选：创建数据库
 	CreateDB   bool   `json:"create_db"`
@@ -351,14 +354,23 @@ func siteConfPath(name string) string {
 	return filepath.Join(nginxConfDir, "lp_"+name+".conf")
 }
 
-// siteServerNames 返回 server_name 列表（主域名 + 附加域名，排除带端口的绑定）
+// siteServerNames 返回 server_name 列表（主域名 + 附加域名）。
+// 带端口的绑定（如 zz-py2.n.05v.cn:18083）也将其 host 部分纳入 server_name，
+// 避免「仅绑定带端口域名」时主 server 块 server_name 为空导致 nginx -t 失败；
+// 其独立监听端口的 server 块由 sitePortBindings 另行生成（同一 host 不同端口不冲突）。
 func siteServerNames(s *model.Site) []string {
 	var names []string
+	seen := map[string]bool{}
 	for _, d := range siteAllBindings(s) {
-		if _, _, hasPort := splitHostPort(d); hasPort {
-			continue // 带端口的绑定单独生成 server 块，不进 server_name
+		host, _, hasPort := splitHostPort(d)
+		name := d
+		if hasPort {
+			name = host
 		}
-		names = append(names, d)
+		if !seen[name] {
+			names = append(names, name)
+			seen[name] = true
+		}
 	}
 	return names
 }
@@ -618,6 +630,12 @@ func genSiteServerBlock(s *model.Site, port int, ssl bool, defaultSrv bool) stri
 		sb.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
 		sb.WriteString("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
 		sb.WriteString("        proxy_set_header X-Forwarded-Proto $scheme;\n")
+		// WebSocket：HTTP/1.1 + 升级头透传（$lp_connection_upgrade 由全局片段 lp-global.conf 定义 map）
+		sb.WriteString("        proxy_http_version 1.1;\n")
+		sb.WriteString("        proxy_set_header Upgrade $http_upgrade;\n")
+		sb.WriteString("        proxy_set_header Connection $lp_connection_upgrade;\n")
+		// 放宽上传体积：nginx 默认 1m，反代后端的上传接口会 413
+		sb.WriteString("        client_max_body_size 100m;\n")
 		sb.WriteString("        proxy_connect_timeout 60s;\n")
 		sb.WriteString("        proxy_read_timeout 300s;\n")
 		sb.WriteString("    }\n\n")
@@ -923,11 +941,13 @@ func findRuntimeBinDir(t, v string) string {
 		return ""
 	}
 	mainVer := strings.SplitN(v, ".", 2)[0]
-	homes := make([]string, 0, 2)
+	homes := make([]string, 0, 3)
 	if h := os.Getenv("HOME"); h != "" {
 		homes = append(homes, h)
 	}
-	homes = append(homes, "/root")
+	// /root 与 / 兜底：面板以 systemd 运行时可能未注入 HOME，此时 pyenv/nvm 会装到
+	// /.pyenv、/.nvm（与应用商店的探测逻辑保持一致），否则按版本注入 PATH 会失败。
+	homes = append(homes, "/root", "/")
 	switch t {
 	case model.SiteTypeNode:
 		for _, h := range homes {
@@ -963,14 +983,11 @@ func siteServicePath(name string) string {
 
 func siteRunnerPath(name string) string { return "/www/.lp-run/" + name + ".sh" }
 
-// writeSiteService 为 python/node/go 站点生成 systemd 服务 + 启动脚本并启动
-func writeSiteService(s *model.Site) error {
-	runnerDir := "/www/.lp-run"
-	if err := os.MkdirAll(runnerDir, 0o755); err != nil {
-		return err
-	}
+// siteRuntimePrelude 生成站点进程 / 命令运行所需的环境前置：
+// 运行时 PATH（含 Node/Python/Go 指定版本）、GOROOT、应用端口与用户自定义环境变量。
+// 供启动脚本与依赖安装命令共用，保证两者环境一致。
+func siteRuntimePrelude(s *model.Site) string {
 	var sb strings.Builder
-	sb.WriteString("#!/bin/bash\n")
 	// 根据 RuntimeVersion 设置对应版本的环境变量（版本统一归一化为主.次格式，路径 glob 模糊匹配）
 	if s.RuntimeVersion != "" {
 		switch s.Type {
@@ -990,6 +1007,10 @@ func writeSiteService(s *model.Site) error {
 			}
 		}
 	}
+	// 应用运行端口：多数 Node/Python 框架读取 PORT 环境变量；放在用户变量之前，允许被用户变量覆盖
+	if isRuntimeSite(s.Type) && s.ProxyPort > 0 {
+		fmt.Fprintf(&sb, "export PORT=%d\n", s.ProxyPort)
+	}
 	for _, line := range strings.Split(s.EnvVars, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -999,19 +1020,42 @@ func writeSiteService(s *model.Site) error {
 			fmt.Fprintf(&sb, "export %s\n", line)
 		}
 	}
-	if s.Root != "" {
-		fmt.Fprintf(&sb, "cd %s\n", s.Root)
+	return sb.String()
+}
+
+// writeSiteService 为 python/node/go 站点生成 systemd 服务 + 启动脚本。
+// autoStart=false 时只生成并 enable（不启动）：用于「启动命令尚未就绪/不可用」的场景，
+// 避免空目录或错误命令导致 Restart=always 无限重启刷日志。
+func writeSiteService(s *model.Site, autoStart bool) error {
+	runnerDir := "/www/.lp-run"
+	if err := os.MkdirAll(runnerDir, 0o755); err != nil {
+		return err
+	}
+	var sb strings.Builder
+	sb.WriteString("#!/bin/bash\n")
+	sb.WriteString(siteRuntimePrelude(s))
+	if strings.TrimSpace(s.Root) != "" {
+		fmt.Fprintf(&sb, "cd %s\n", shellQuote(s.Root))
 	}
 	if strings.TrimSpace(s.StartCommand) == "" {
 		sb.WriteString("echo 'start command not set, waiting for entry selection'\n")
 		sb.WriteString("exit 0\n")
 	} else {
-		fmt.Fprintf(&sb, "exec %s\n", s.StartCommand)
+		// 用 bash -c 执行：支持 && / 变量赋值 / 重定向等 shell 语法
+		// （exec 是内建，无法直接解析这些语法，会导致复杂启动命令失败）
+		fmt.Fprintf(&sb, "exec bash -c %s\n", shellQuote(s.StartCommand))
 	}
 	if err := os.WriteFile(siteRunnerPath(s.Name), []byte(sb.String()), 0o755); err != nil {
 		return err
 	}
 
+	// 注意：systemd 的 WorkingDirectory / ExecStart 不做 shell 分词，给值加引号会被
+	// 当作路径的一部分（WorkingDirectory="/x" 会报 "path is not absolute"），因此必须写裸值。
+	// 站点名受 siteNameRe 白名单约束（字母数字点下划线中划线），runner 文件名同样安全。
+	wd := strings.TrimSpace(s.Root)
+	if wd == "" {
+		wd = "/"
+	}
 	unit := fmt.Sprintf(`[Unit]
 Description=kypanel site %s
 After=network.target
@@ -1028,18 +1072,45 @@ StandardError=append:/var/log/nginx/%s.service.log
 
 [Install]
 WantedBy=multi-user.target
-`, s.Name, s.Root, siteRunnerPath(s.Name), s.Name, s.Name)
+`, s.Name, wd, siteRunnerPath(s.Name), s.Name, s.Name)
 	if err := os.WriteFile(siteServicePath(s.Name), []byte(unit), 0o644); err != nil {
 		return err
 	}
-	res, err := ExecCommand(fmt.Sprintf("systemctl daemon-reload && systemctl enable --now %s", siteServiceName(s.Name)), 30*time.Second)
+	cmd := fmt.Sprintf("systemctl daemon-reload && systemctl enable %s", siteServiceName(s.Name))
+	if autoStart {
+		// 用 restart 兼容「首次创建」与「配置变更后重启」两种场景
+		cmd += fmt.Sprintf(" && systemctl restart %s", siteServiceName(s.Name))
+	}
+	res, err := ExecCommand(cmd, 30*time.Second)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return errors.New(strings.TrimSpace(res.Stderr))
+		return errors.New(pickSystemctlError(res.Stderr))
 	}
 	return nil
+}
+
+// pickSystemctlError 过滤 systemctl 输出中的噪音（如 enable 生成的 symlink 提示），
+// 只保留真正的失败原因，避免告警文案冗长。
+func pickSystemctlError(stderr string) string {
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	keep := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "Created symlink") || strings.HasPrefix(l, "Removed ") {
+			continue
+		}
+		keep = append(keep, l)
+	}
+	msg := strings.Join(keep, " ")
+	if len(msg) > 240 {
+		msg = msg[:240] + "…"
+	}
+	if msg == "" {
+		msg = "systemctl 返回非零退出码"
+	}
+	return msg
 }
 
 // removeSiteService 停止并删除 python/node/go 站点的 systemd 服务
@@ -1052,6 +1123,49 @@ func removeSiteService(name string) {
 func siteServiceActive(name string) bool {
 	res, err := ExecCommand(fmt.Sprintf("systemctl is-active %s", siteServiceName(name)), 10*time.Second)
 	return err == nil && res != nil && res.ExitCode == 0 && strings.TrimSpace(res.Stdout) == "active"
+}
+
+// ============================ nginx 全局公共片段 ============================
+// 反代站点需要 WebSocket 升级映射。map 只能定义在 http 上下文，无法写在站点 server 块内
+// （多站点重复定义同名 map 会报 duplicate map），因此统一落到 conf.d 下的全局片段。
+// 注意：这里刻意不写 client_max_body_size——它是 http 上下文指令，若宿主机 nginx 已在 http 级
+// 定义过会直接报 duplicate directive、拖垮整个 nginx 校验；上传体积改在反代站点的 location
+// 内单独设置（location 上下文覆盖 http 级，不会冲突）。
+
+// nginxGlobalSnippetPath 全局片段路径（00- 前缀保证先于站点配置加载）
+const nginxGlobalSnippetPath = "/etc/nginx/conf.d/00-kypanel-global.conf"
+
+const nginxGlobalSnippet = `# kypanel 全局公共配置（自动生成，请勿手动修改）
+# WebSocket 升级映射：普通请求 Connection=close，升级请求 Connection=upgrade
+map $http_upgrade $lp_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+`
+
+// ensureNginxGlobalSnippet 幂等写入全局公共片段（内容变化时才落盘）。
+// 写入后立即校验：若新片段与本机已有配置冲突（如同名 map），回滚为旧内容并返回错误，
+// 避免残留一个坏文件导致后续所有站点配置写入全部失败。
+func ensureNginxGlobalSnippet() error {
+	old, readErr := os.ReadFile(nginxGlobalSnippetPath)
+	if readErr == nil && string(old) == nginxGlobalSnippet {
+		return nil
+	}
+	if err := os.MkdirAll(nginxConfDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(nginxGlobalSnippetPath, []byte(nginxGlobalSnippet), 0o644); err != nil {
+		return err
+	}
+	if err := nginxTest(); err != nil {
+		if readErr == nil {
+			_ = os.WriteFile(nginxGlobalSnippetPath, old, 0o644)
+		} else {
+			_ = os.Remove(nginxGlobalSnippetPath)
+		}
+		return err
+	}
+	return nil
 }
 
 // writeSiteConf 写入站点配置并校验 Web 服务器，成功返回 nil
@@ -1130,6 +1244,13 @@ func writeSiteConf(s *model.Site) error {
 	// 自动生成自签证书兜底，避免 nginx 全局配置校验失败拖垮所有网站
 	if s.SslEnabled {
 		_ = ensureSiteSSLCert(s)
+	}
+	// nginx：确保全局片段（WebSocket 升级 map + 上传体积限制）已就位，
+	// 否则反代站点配置引用的 $lp_connection_upgrade 未定义会导致 nginx -t 失败
+	if ws := WebServerType(); ws != webApache {
+		if err := ensureNginxGlobalSnippet(); err != nil {
+			return err
+		}
 	}
 	conf := genSiteConf(s)
 	// 注入拖拽验证码 include 行（覆盖站点存在 config_override 时 genSiteConf 直接返回 override 的情况）
@@ -1272,6 +1393,200 @@ func domainPrefixOf(domain, fallback string) string {
 	return cleaned
 }
 
+// normalizeProxyPass 校验并补全反向代理目标：缺少协议时自动补 http://。
+// 避免用户填 "127.0.0.1:3000"（漏协议）导致 nginx -t 报 invalid URL prefix、创建失败。
+func normalizeProxyPass(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "", errors.New("反向代理类型需要填写代理目标，如 http://127.0.0.1:8080")
+	}
+	if !strings.Contains(p, "://") {
+		p = "http://" + p
+	}
+	u, err := url.Parse(p)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", errors.New("代理目标格式不合法，应为 http://主机:端口，如 http://127.0.0.1:8080")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("代理目标仅支持 http:// 或 https:// 协议")
+	}
+	return p, nil
+}
+
+// checkProxyPortConflict 校验进程型站点的应用端口是否与其它站点（监听端口/应用端口）冲突。
+// 只比较「进程型站点」的 ProxyPort：静态/PHP/反向代理站点的 ProxyPort 无实际意义
+// （历史数据可能残留表单默认值 3000），不应参与冲突判定。
+func checkProxyPortConflict(selfName string, proxyPort int) error {
+	sites, err := model.ListSites()
+	if err != nil {
+		return nil
+	}
+	for _, o := range sites {
+		if o.Name == selfName {
+			continue
+		}
+		if o.Port == proxyPort {
+			return fmt.Errorf("应用运行端口 %d 已被站点 %s 的监听端口占用，请更换", proxyPort, o.Name)
+		}
+		if isRuntimeSite(o.Type) && o.ProxyPort == proxyPort {
+			return fmt.Errorf("应用运行端口 %d 已被站点 %s 使用，请更换", proxyPort, o.Name)
+		}
+	}
+	return nil
+}
+
+// defaultPythonStartCommand 按所选 Python 框架生成推荐启动命令。
+// 仅 flask 能确定默认入口（app:app）；django 的 wsgi 模块名依项目而异，返回空由用户填写。
+func defaultPythonStartCommand(framework string, port int) string {
+	if framework == "flask" {
+		return fmt.Sprintf("gunicorn -w 2 -b 127.0.0.1:%d app:app", port)
+	}
+	return ""
+}
+
+// appendWarning 拼接多条非致命告警。
+func appendWarning(cur, add string) string {
+	if add == "" {
+		return cur
+	}
+	if cur == "" {
+		return add
+	}
+	return cur + "；" + add
+}
+
+// startCmdBuiltins 启动命令首词命中这些 shell 内建/包装器时跳过存在性检查。
+var startCmdBuiltins = map[string]bool{
+	"source": true, ".": true, "export": true, "cd": true, "exec": true,
+	"set": true, "unset": true, "bash": true, "sh": true, "env": true,
+	"nohup": true, "time": true, "timeout": true,
+}
+
+// isShellName 判断字符串是否为合法的 shell 变量名（用于识别 KEY=VALUE 前缀）。
+func isShellName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// firstCommandWord 取命令行首个可执行词（跳过 KEY=VALUE 环境变量前缀与常见包装器）。
+func firstCommandWord(cmd string) string {
+	fields := strings.Fields(strings.TrimSpace(cmd))
+	for _, f := range fields {
+		if i := strings.Index(f, "="); i > 0 && !strings.ContainsAny(f[:i], `/\`) && isShellName(f[:i]) {
+			continue // 环境变量前缀，如 PORT=3000
+		}
+		return f
+	}
+	return ""
+}
+
+// checkStartCommandAvailable 用站点运行环境检查启动命令首词是否存在，
+// 提前发现"填了 gunicorn/npm 但运行环境里没装"的情况（避免 systemd 无限重启）。
+// 返回非致命告警（调用方只记 warning，不阻断创建）。
+func checkStartCommandAvailable(s *model.Site) error {
+	first := firstCommandWord(s.StartCommand)
+	if first == "" || startCmdBuiltins[first] {
+		return nil
+	}
+	if strings.HasPrefix(first, "./") || strings.HasPrefix(first, "/") {
+		p := first
+		if strings.HasPrefix(first, "./") {
+			p = filepath.Join(s.Root, strings.TrimPrefix(first, "./"))
+		}
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("启动命令 %q 指向的文件不存在或不可执行", first)
+		}
+		return nil
+	}
+	script := siteRuntimePrelude(s) + "command -v " + shellQuote(first)
+	res, err := ExecCommand("bash -c "+shellQuote(script), 15*time.Second)
+	if err != nil || res == nil || res.ExitCode != 0 {
+		return fmt.Errorf("启动命令中的 %q 未在当前运行环境中找到，请先安装依赖或改用完整路径", first)
+	}
+	return nil
+}
+
+// runSiteInstallCommand 在项目目录下、以站点运行环境执行一次依赖安装/构建命令。
+func runSiteInstallCommand(s *model.Site, cmd string) error {
+	script := siteRuntimePrelude(s)
+	if strings.TrimSpace(s.Root) != "" {
+		script += "cd " + shellQuote(s.Root) + "\n"
+	}
+	script += cmd
+	res, err := ExecCommand("bash -c "+shellQuote(script), 15*time.Minute)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return errors.New(pickCommandError(res.Stderr, res.Stdout, res.ExitCode))
+	}
+	return nil
+}
+
+// pickCommandError 从命令输出中挑出可读的错误摘要：
+// 过滤包管理器噪音（pip notice、npm warn、版本升级提示等），
+// 优先取含错误关键字的行，最多 2 行、总长 200 字符，避免把整段原始输出塞进告警。
+func pickCommandError(stderr, stdout string, exitCode int) string {
+	raw := strings.TrimSpace(stderr)
+	if raw == "" {
+		raw = strings.TrimSpace(stdout)
+	}
+	cleaned := make([]string, 0, 8)
+	for _, line := range strings.Split(raw, "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		low := strings.ToLower(l)
+		if strings.HasPrefix(low, "[notice]") ||
+			strings.Contains(low, "a new release of") ||
+			strings.Contains(low, "to update, run:") ||
+			strings.HasPrefix(low, "npm warn") {
+			continue
+		}
+		cleaned = append(cleaned, l)
+	}
+	picked := make([]string, 0, 2)
+	for _, l := range cleaned {
+		low := strings.ToLower(l)
+		if strings.Contains(low, "error") || strings.Contains(low, "failed") ||
+			strings.Contains(low, "cannot") || strings.Contains(low, "no such") ||
+			strings.Contains(low, "not found") || strings.Contains(low, "fatal") {
+			picked = append(picked, l)
+			if len(picked) >= 2 {
+				break
+			}
+		}
+	}
+	if len(picked) == 0 {
+		// 无明确错误关键字：取末尾 2 行（通常是真正的失败原因）
+		if len(cleaned) > 2 {
+			cleaned = cleaned[len(cleaned)-2:]
+		}
+		picked = cleaned
+	}
+	msg := strings.Join(picked, " ")
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	if msg == "" {
+		msg = "退出码 " + strconv.Itoa(exitCode)
+	}
+	return msg
+}
+
 // CreateSite 创建网站（按类型动态校验参数）
 func CreateSite(req CreateSiteReq) (*model.Site, error) {
 	if err := webServerAvailable(); err != nil {
@@ -1282,11 +1597,18 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 	if domain == "" {
 		return nil, errors.New("请填写域名（必填）")
 	}
+	// 校验每个绑定（支持 域名:端口 / IP:端口），如 zz-py2.n.05v.cn:18083
+	for _, raw := range strings.Split(domain, ",") {
+		b := strings.TrimSpace(raw)
+		if b == "" {
+			return nil, errors.New("域名包含空项，请检查逗号分隔")
+		}
+		if !isValidBinding(b) {
+			return nil, errors.New("域名格式不合法: " + b)
+		}
+	}
 	mainDomain := strings.Split(domain, ",")[0]
 	mainDomain = strings.TrimSpace(mainDomain)
-	if !siteDomainRe.MatchString(mainDomain) {
-		return nil, errors.New("域名格式不合法: " + mainDomain)
-	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		// 通配符域名用于文件命名时去掉 *. 前缀
@@ -1325,8 +1647,14 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		EnvVars:         strings.TrimSpace(req.EnvVars),
 		ProxyPort:       req.ProxyPort,
 		Framework:       req.Framework,
+		InstallCommand:  strings.TrimSpace(req.InstallCommand),
 		Status:          model.SiteRunning,
 		SecurityHeaders: true, // 默认开启安全响应头（防跨站/防嗅探）
+	}
+	// 项目端口仅进程型站点（node/python/go）有意义：其它类型一律清零，
+	// 避免表单默认值（3000）被无意义落库，导致后续进程型站点被误判端口冲突
+	if !isRuntimeSite(s.Type) {
+		s.ProxyPort = 0
 	}
 
 	switch {
@@ -1342,10 +1670,21 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
 			return nil, errors.New("请填写应用运行端口（1-65535）")
 		}
-		// 启动命令选填：不填时按上传内容自动推断（见下方 Go 分支）。
-		// 非 Go 的进程型站点（python/node）仍要求填写。
+		if s.ProxyPort == s.Port {
+			return nil, fmt.Errorf("应用运行端口不能与站点监听端口相同（%d），请更换", s.Port)
+		}
+		if err := checkProxyPortConflict(s.Name, s.ProxyPort); err != nil {
+			return nil, err
+		}
+		// 启动命令选填：Go 不填时按上传内容自动推断（见下方 Go 分支）；
+		// Python 选择框架后可自动生成推荐命令；其余情况仍要求填写。
 		if s.Type != model.SiteTypeGo && s.StartCommand == "" {
-			return nil, errors.New("请填写启动命令，如 python app.py / npm run start")
+			if s.Type == model.SiteTypePython {
+				s.StartCommand = defaultPythonStartCommand(s.Framework, s.ProxyPort)
+			}
+			if s.StartCommand == "" {
+				return nil, errors.New("请填写启动命令，如 python app.py / npm run start")
+			}
 		}
 		if err := os.MkdirAll(s.Root, 0o755); err != nil {
 			return nil, errors.New("创建项目目录失败: " + err.Error())
@@ -1436,10 +1775,11 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		}
 
 	default: // proxy 反向代理
-		if strings.TrimSpace(req.ProxyPass) == "" {
-			return nil, errors.New("反向代理类型需要填写代理目标，如 http://127.0.0.1:8080")
+		pp, err := normalizeProxyPass(req.ProxyPass)
+		if err != nil {
+			return nil, err
 		}
-		s.ProxyPass = strings.TrimRight(strings.TrimSpace(req.ProxyPass), "/")
+		s.ProxyPass = pp
 		// 反代站点同样需要站点根目录：Let's Encrypt 的 HTTP-01 验证目录
 		// （/.well-known/）落在站点 root 下，Root 为空会让生成的 nginx 配置
 		// 出现 "root ;" 空参数指令，nginx -t 校验失败导致站点根本创建不出来。
@@ -1465,17 +1805,42 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 	// 更新 default_server 兜底（无默认站点时写入不存在页兜底块）
 	_ = applyDefaultServerConf()
 
-	// 进程型站点：启动 systemd 守护
+	// 进程型站点：先按需执行依赖安装/构建命令，再启动 systemd 守护。
+	// 安装失败或服务启动失败不阻断创建（站点配置与项目目录已生成），改为记录告警返回前端，
+	// 用户修正后可手动重启，避免"创建到一半整体回滚"、留下半成品。
 	if isRuntimeSite(s.Type) {
-		if err := writeSiteService(s); err != nil {
-			_ = os.Remove(siteConfPathFor(s.Name, WebServerType()))
-			_ = webReload()
-			return nil, errors.New("启动进程服务失败: " + err.Error())
+		// 依赖安装命令仅对 node/python 生效（Go 为编译型语言，依赖由编译器处理）
+		isNodePy := s.Type == model.SiteTypeNode || s.Type == model.SiteTypePython
+		if cmd := strings.TrimSpace(s.InstallCommand); cmd != "" && isNodePy {
+			if err := runSiteInstallCommand(s, cmd); err != nil {
+				s.DeployWarning = appendWarning(s.DeployWarning, "依赖安装命令执行失败："+err.Error())
+			}
+		}
+		// 启动命令为空（如 Go 多入口等待选择）或首词不可用时，只 enable 不启动，
+		// 避免空目录 / 错误命令触发 Restart=always 无限重启；用户修正后手动启动即可。
+		autoStart := strings.TrimSpace(s.StartCommand) != ""
+		if err := checkStartCommandAvailable(s); err != nil {
+			s.DeployWarning = appendWarning(s.DeployWarning, err.Error())
+			autoStart = false
+		}
+		if err := writeSiteService(s, autoStart); err != nil {
+			s.DeployWarning = appendWarning(s.DeployWarning, "进程服务启动失败："+err.Error())
+			autoStart = false
+		}
+		if !autoStart {
+			s.Status = model.SiteStopped
 		}
 	}
 
 	if err := model.CreateSite(s); err != nil {
 		return nil, err
+	}
+	// 域名中带端口的绑定（如 zz-py2.n.05v.cn:18083），自动放行对应防火墙端口，确保外网可访问。
+	// 失败不阻断创建，仅记录告警（防火墙未安装/规则写入失败时由用户手动处理）。
+	for _, b := range sitePortBindings(s) {
+		if err := AllowPortWithSource(b.Port, "tcp", "站点域名端口放行 "+b.Host, "site:"+s.Name); err != nil {
+			s.DeployWarning = appendWarning(s.DeployWarning, "端口 "+b.Port+" 防火墙自动放行失败："+err.Error())
+		}
 	}
 	// 启动该站点访问日志 importer
 	StartSiteStatImport(s.ID)
@@ -1571,18 +1936,13 @@ func SiteAction(req SiteActionReq) error {
 
 	switch req.Action {
 	case "start", "restart":
-		// 进程型站点：先拉起 systemd 服务
+		// 进程型站点：重新生成 systemd 单元与启动脚本后再启动。
+		// 这里用 writeSiteService 而不是裸 systemctl：既保证单元文件与当前配置一致，
+		// 也能自愈历史遗留/损坏的单元文件（如 "bad unit file setting" 导致的无法启动）。
 		if isRuntimeSite(s.Type) {
-			action := "start"
-			if req.Action == "restart" {
-				action = "restart"
-			}
-			res, err := ExecCommand(fmt.Sprintf("systemctl %s %s", action, siteServiceName(s.Name)), 30*time.Second)
-			if err != nil {
+			s.Status = model.SiteRunning
+			if err := writeSiteService(s, true); err != nil {
 				return errors.New("启动进程服务失败: " + err.Error())
-			}
-			if res.ExitCode != 0 {
-				return errors.New("启动进程服务失败: " + strings.TrimSpace(res.Stderr))
 			}
 		}
 		if err := writeSiteConfAndReload(s); err != nil {
@@ -1765,6 +2125,12 @@ func SetSiteStartCommand(id uint, cmd string) error {
 	s.StartCommand = cmd
 	if err := model.UpdateSiteField(s.ID, "start_command", cmd); err != nil {
 		return err
+	}
+	// 选好入口即视为启用：创建时若因「启动命令未就绪」只 enable 未启动（status=stopped），
+	// 这里恢复为 running，保证 rewriteSiteService 会真正拉起服务。
+	if s.Status != model.SiteRunning {
+		s.Status = model.SiteRunning
+		_ = model.UpdateSiteField(s.ID, "status", model.SiteRunning)
 	}
 	return rewriteSiteService(s)
 }

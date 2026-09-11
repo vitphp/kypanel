@@ -552,6 +552,22 @@ func setupSiteRoutes(g *gin.RouterGroup) {
 		utils.Ok(c, result)
 	})
 
+	// 进程型站点（python/node/go）运行日志（启动报错排查）
+	g.GET("/site/runtime-log", func(c *gin.Context) {
+		id, err := strconv.ParseUint(c.Query("id"), 10, 32)
+		if err != nil {
+			utils.Fail(c, 400, "参数错误")
+			return
+		}
+		maxLines, _ := strconv.Atoi(c.Query("lines"))
+		result, err := service.SiteRuntimeLog(uint(id), maxLines)
+		if err != nil {
+			utils.Fail(c, 500, err.Error())
+			return
+		}
+		utils.Ok(c, result)
+	})
+
 	// 更新站点备注
 	g.POST("/site/remark", func(c *gin.Context) {
 		var req service.UpdateSiteRemarkReq

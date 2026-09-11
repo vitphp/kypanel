@@ -8,38 +8,9 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 
 	"kypanel/internal/utils"
 )
-
-// wsUpgrader WebSocket 升级器。
-// 浏览器 WebSocket 无法自定义 Header，鉴权通过 query token 完成。
-// CheckOrigin 校验 Origin 与请求 Host 同源，防止跨站 WebSocket 劫持（CSWSH）：
-// 恶意站点在浏览器里携带已泄露的 token 发起 WebSocket 连接时，其 Origin 会是
-// 恶意站点的源（与面板 Host 不同源），此处直接拒绝。
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		// 无 Origin 头：非浏览器客户端（curl/wscat/CLI 等）直接放行，
-		// 它们无法被跨站诱导，安全风险低。
-		if origin == "" {
-			return true
-		}
-		// 解析 Origin 的 host[:port]，与请求 Host 比对，必须同源。
-		originHost := origin
-		if idx := strings.Index(origin, "://"); idx >= 0 {
-			originHost = origin[idx+3:]
-		}
-		// 去掉路径部分
-		if idx := strings.Index(originHost, "/"); idx >= 0 {
-			originHost = originHost[:idx]
-		}
-		return strings.EqualFold(originHost, r.Host)
-	},
-}
 
 // HandleTerminalWS Web 终端 WebSocket 处理器：
 // 浏览器输入 -> PTY -> /bin/bash；PTY 输出 -> WebSocket -> 浏览器。
@@ -67,17 +38,42 @@ func HandleTerminalWS(c *gin.Context) {
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		slog.Error("升级 WebSocket 失败", "err", err)
+	// Origin 同源校验，防跨站 WebSocket 劫持（CSWSH）
+	if !wsSameOrigin(c.Request) {
+		utils.FailWithStatus(c, http.StatusForbidden, 403, "Origin 校验失败")
 		return
 	}
-	defer conn.Close()
+
+	// 检查是否为 WebSocket 升级请求
+	if !strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		utils.FailWithStatus(c, http.StatusBadRequest, 400, "仅支持 WebSocket")
+		return
+	}
+
+	// 劫持 HTTP 连接，自行完成 WebSocket 握手
+	hj, ok := c.Writer.(http.Hijacker)
+	if !ok {
+		utils.FailWithStatus(c, http.StatusInternalServerError, 500, "连接不支持升级")
+		return
+	}
+	conn, brw, err := hj.Hijack()
+	if err != nil {
+		slog.Error("劫持连接失败", "err", err)
+		return
+	}
+
+	ws, err := wsUpgrade(conn, brw.Reader, c.Request)
+	if err != nil {
+		slog.Error("WebSocket 握手失败", "err", err)
+		_ = conn.Close()
+		return
+	}
+	defer ws.Close()
 
 	// 启动 PTY 运行默认 shell；支持 cwd 参数进入指定目录
 	term, err := startPty(120, 30, defaultShell(), c.Query("cwd"))
 	if err != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31m[kypanel] 无法启动终端: "+err.Error()+"\x1b[0m\r\n"))
+		_ = ws.WriteMessage(1, []byte("\r\n\x1b[31m[kypanel] 无法启动终端: "+err.Error()+"\x1b[0m\r\n"))
 		return
 	}
 	defer term.Close()
@@ -88,7 +84,7 @@ func HandleTerminalWS(c *gin.Context) {
 		for {
 			n, rerr := term.Read(buf)
 			if n > 0 {
-				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
+				if werr := ws.WriteMessage(2, buf[:n]); werr != nil {
 					return
 				}
 			}
@@ -103,11 +99,11 @@ func HandleTerminalWS(c *gin.Context) {
 
 	// WebSocket -> PTY（文本消息按 resize 指令解析，其余直接写入）
 	for {
-		mt, data, rerr := conn.ReadMessage()
+		mt, data, rerr := ws.ReadMessage()
 		if rerr != nil {
 			break
 		}
-		if mt == websocket.TextMessage {
+		if mt == 1 { // 文本消息
 			var op struct {
 				Type string `json:"type"`
 				Cols int    `json:"cols"`

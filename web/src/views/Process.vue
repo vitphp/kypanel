@@ -1,155 +1,146 @@
 <template>
   <div class="process-page">
-    <el-row :gutter="12" class="status-row">
-      <el-col :xs="24" :sm="8">
-        <el-card shadow="never" class="status-card">
-          <div class="status-item">
-            <div class="status-label">进程总数</div>
-            <div class="status-value">
-              <span class="big-num">{{ summary.total }}</span>
-            </div>
+    <el-card shadow="never" class="process-card">
+      <!-- 状态概览行：内嵌在卡片顶部，不再单独成卡（用自定义 flex 排版，避开 el-col 全局复写冲突） -->
+      <div class="status-row">
+        <div class="status-item status-item--start">
+          <div class="status-label">进程总数</div>
+          <div class="status-value"><span class="big-num">{{ summary.total }}</span></div>
+        </div>
+        <div class="status-item status-item--center">
+          <div class="status-label">显示 / 上限</div>
+          <div class="status-value"><span class="big-num">{{ procs.length }} / {{ effectiveLimit }}</span></div>
+        </div>
+        <div class="status-item status-item--end">
+          <div class="status-label">自动刷新</div>
+          <div class="status-value">
+            <el-switch v-model="autoRefresh" inline-prompt active-text="开" inactive-text="关" />
+            <el-select v-if="autoRefresh" v-model="intervalSec" size="small" style="width: 90px; margin-left: 8px">
+              <el-option v-for="s in [3, 5, 10, 30]" :key="s" :label="s + 's'" :value="s" />
+            </el-select>
           </div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="8">
-        <el-card shadow="never" class="status-card">
-          <div class="status-item">
-            <div class="status-label">显示 / 上限</div>
-            <div class="status-value">
-              <span class="big-num">{{ procs.length }} / {{ effectiveLimit }}</span>
-            </div>
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="8">
-        <el-card shadow="never" class="status-card">
-          <div class="status-item">
-            <div class="status-label">自动刷新</div>
-            <div class="status-value">
-              <el-switch v-model="autoRefresh" inline-prompt active-text="开" inactive-text="关" />
-              <el-select v-if="autoRefresh" v-model="intervalSec" size="small" style="width: 90px; margin-left: 8px">
-                <el-option v-for="s in [3, 5, 10, 30]" :key="s" :label="s + 's'" :value="s" />
-              </el-select>
-            </div>
-          </div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <div class="toolbar">
-      <div class="toolbar-left">
-        <el-input
-          v-model="keyword"
-          placeholder="按 PID / 用户 / 命令过滤"
-          clearable
-          style="width: 240px"
-          @keyup.enter="reload"
-          @clear="reload"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-select v-model="sortKey" style="width: 140px" @change="reload">
-          <el-option label="按 CPU 占用" value="cpu" />
-          <el-option label="按内存占比" value="mem" />
-          <el-option label="按内存大小" value="rss" />
-          <el-option label="按 PID" value="pid" />
-          <el-option label="按用户" value="user" />
-          <el-option label="按命令名" value="command" />
-        </el-select>
-        <el-select v-model.number="effectiveLimit" style="width: 110px" @change="reload">
-          <el-option v-for="n in limitOptions" :key="n" :label="limitLabel(n)" :value="n" />
-        </el-select>
+        </div>
       </div>
-      <div class="toolbar-right">
-        <el-button :icon="Refresh" @click="reload">刷新</el-button>
-        <el-button
-          type="danger"
-          :icon="Delete"
-          :disabled="selected.length === 0"
-          @click="batchKill"
-        >
-          结束选中 ({{ selected.length }})
-        </el-button>
-      </div>
-    </div>
 
-    <Skeleton v-if="loading" type="table" :rows="12" :columns="[{width:'40px'},{width:'80px'},{flex:1},{width:'140px'},{width:'80px'},{width:'80px'},{width:'80px'},{width:'160px'}]" />
-    <el-table
-      v-else
-      :data="procs"
-      size="small"
-      height="calc(100vh - 320px)"
-      stripe
-      @selection-change="(rows) => (selected = rows)"
-      :row-class-name="rowClass"
-    >
-      <el-table-column type="selection" width="40" :selectable="canSelect" />
-      <el-table-column prop="pid" label="PID" width="80" sortable>
-        <template #default="{ row }">
-          <span class="mono">{{ row.pid }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="user" label="用户" width="100">
-        <template #default="{ row }">
-          <el-tag size="small" :type="row.user === 'root' ? 'danger' : 'info'">{{ row.user }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="cpu" label="CPU %" width="110" sortable>
-        <template #default="{ row }">
-          <div class="bar-cell">
-            <el-progress
-              :percentage="Math.min(100, parseFloat(row.cpu) * 2)"
-              :stroke-width="8"
-              :show-text="false"
-              :status="cpuStatus(row.cpu)"
-              class="bar"
-            />
-            <span class="mono" :class="cpuTextClass(row.cpu)">{{ row.cpu }}%</span>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="mem" label="内存 %" width="110" sortable>
-        <template #default="{ row }">
-          <div class="bar-cell">
-            <el-progress
-              :percentage="Math.min(100, parseFloat(row.mem) * 2)"
-              :stroke-width="8"
-              :show-text="false"
-              :status="memStatus(row.mem)"
-              class="bar"
-            />
-            <span class="mono">{{ row.mem }}%</span>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="rss_kb" label="内存占用" width="120">
-        <template #default="{ row }">
-          <span class="mono">{{ formatBytes(row.rss_kb * 1024) }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="command" label="命令" min-width="280">
-        <template #default="{ row }">
-          <el-tooltip :content="row.command" placement="top">
-            <span class="mono cmd-cell">{{ shortCmd(row.command) }}</span>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
-        <template #default="{ row }">
-          <div class="ops-cell">
-            <el-button
-              size="small"
-              type="danger"
-              text
-              :disabled="!canKill(row)"
-              @click="kill(row)"
-            >
-              结束
-            </el-button>
-          </div>
-        </template>
-      </el-table-column>
-    </el-table>
+      <el-divider style="margin: 16px 0" />
+
+      <!-- 工具栏 -->
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <el-input
+            v-model="keyword"
+            placeholder="按 PID / 用户 / 命令过滤"
+            clearable
+            style="width: 240px"
+            @keyup.enter="reload"
+            @clear="reload"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="sortKey" style="width: 140px" @change="reload">
+            <el-option label="按 CPU 占用" value="cpu" />
+            <el-option label="按内存占比" value="mem" />
+            <el-option label="按内存大小" value="rss" />
+            <el-option label="按 PID" value="pid" />
+            <el-option label="按用户" value="user" />
+            <el-option label="按命令名" value="command" />
+          </el-select>
+          <el-select v-model.number="effectiveLimit" style="width: 110px" @change="reload">
+            <el-option v-for="n in limitOptions" :key="n" :label="limitLabel(n)" :value="n" />
+          </el-select>
+        </div>
+        <div class="toolbar-right">
+          <el-button :icon="Refresh" @click="reload">刷新</el-button>
+          <el-button
+            type="danger"
+            :icon="Delete"
+            :disabled="selected.length === 0"
+            @click="batchKill"
+          >
+            结束选中 ({{ selected.length }})
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 表格 -->
+      <Skeleton v-if="loading" type="table" :rows="12" :columns="[{width:'40px'},{width:'80px'},{flex:1},{width:'140px'},{width:'80px'},{width:'80px'},{width:'80px'},{width:'160px'}]" />
+      <el-table
+        v-else
+        :data="procs"
+        size="small"
+        height="calc(100vh - 280px)"
+        stripe
+        @selection-change="(rows) => (selected = rows)"
+        :row-class-name="rowClass"
+      >
+        <el-table-column type="selection" width="40" :selectable="canSelect" />
+        <el-table-column prop="pid" label="PID" width="80" sortable>
+          <template #default="{ row }">
+            <span class="mono">{{ row.pid }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="user" label="用户" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.user === 'root' ? 'danger' : 'info'">{{ row.user }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="cpu" label="CPU %" width="110" sortable>
+          <template #default="{ row }">
+            <div class="bar-cell">
+              <el-progress
+                :percentage="Math.min(100, parseFloat(row.cpu) * 2)"
+                :stroke-width="8"
+                :show-text="false"
+                :status="cpuStatus(row.cpu)"
+                class="bar"
+              />
+              <span class="mono" :class="cpuTextClass(row.cpu)">{{ row.cpu }}%</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="mem" label="内存 %" width="110" sortable>
+          <template #default="{ row }">
+            <div class="bar-cell">
+              <el-progress
+                :percentage="Math.min(100, parseFloat(row.mem) * 2)"
+                :stroke-width="8"
+                :show-text="false"
+                :status="memStatus(row.mem)"
+                class="bar"
+              />
+              <span class="mono">{{ row.mem }}%</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="rss_kb" label="内存占用" width="120">
+          <template #default="{ row }">
+            <span class="mono">{{ formatBytes(row.rss_kb * 1024) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="command" label="命令" min-width="280">
+          <template #default="{ row }">
+            <el-tooltip :content="row.command" placement="top">
+              <span class="mono cmd-cell">{{ shortCmd(row.command) }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" :width="isMobile ? 'auto' : 70" align="right" fixed="right" class-name="ops-col">
+          <template #default="{ row }">
+            <div class="ops-cell">
+              <el-button
+                size="small"
+                type="danger"
+                text
+                :disabled="!canKill(row)"
+                @click="kill(row)"
+              >
+                结束
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
   </div>
 </template>
 
@@ -314,26 +305,40 @@ onBeforeUnmount(stopTimer)
 </script>
 
 <style scoped>
-.process-page {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+.process-card { margin-bottom: 16px; }
+/* 状态概览行：内嵌在卡片顶部（自定义 flex，避开 el-col 全局复写） */
 .status-row {
   margin-bottom: 0;
-}
-.status-card {
-  margin-bottom: 0;
-}
-.status-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
+}
+.status-item {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;
+}
+/* 第一个靠左、中间居中、第三个靠右 */
+.status-item--start { justify-content: flex-start; }
+.status-item--center { justify-content: center; }
+.status-item--end { justify-content: flex-end; }
+/* 窄屏紧凑两列网格：让"进程总数 / 显示上限 / 自动刷新"更紧凑 */
+@media (max-width: 767px) {
+  .status-row {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .status-item { flex: 0 0 calc(50% - 6px); justify-content: flex-start; padding: 4px; }
+  .big-num { font-size: 18px; }
+  .status-label { font-size: 12px; }
 }
 .status-label {
   color: #909399;
   font-size: 13px;
+  white-space: nowrap;
 }
 .status-value {
   display: flex;
@@ -345,16 +350,13 @@ onBeforeUnmount(stopTimer)
   font-weight: 600;
   color: #303133;
 }
+/* 工具栏：在卡片内部，不再自绘背景/阴影 */
 .toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
-  background: #fff;
-  padding: 12px 16px;
-  border-radius: 6px;
-  box-shadow: 0 1px 3px rgba(0, 21, 41, 0.08);
 }
 .toolbar-left,
 .toolbar-right {

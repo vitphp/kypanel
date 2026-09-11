@@ -1,16 +1,13 @@
 <template>
   <div class="settings-page">
+    <el-card shadow="never" class="settings-card">
     <el-tabs v-model="activeTab" class="settings-tabs">
       <!-- 面板账号 -->
       <el-tab-pane label="面板账号" name="account">
         <el-row :gutter="16">
           <el-col :xs="24" :md="12">
-            <el-card shadow="never" class="setting-card">
-              <template #header>
-                <div class="card-head">
-                  <span><el-icon><User /></el-icon>账号与登录</span>
-                </div>
-              </template>
+            <div class="setting-section">
+              <div class="section-head"><span><el-icon><User /></el-icon>账号与登录</span></div>
               <ul class="setting-list">
                 <li class="setting-item">
                   <div class="setting-info">
@@ -27,16 +24,12 @@
                   <el-button link type="primary" @click="pwdDialog.show = true">修改</el-button>
                 </li>
               </ul>
-            </el-card>
+            </div>
           </el-col>
 
           <el-col :xs="24" :md="12">
-            <el-card shadow="never" class="setting-card">
-              <template #header>
-                <div class="card-head">
-                  <span><el-icon><Connection /></el-icon>面板网络</span>
-                </div>
-              </template>
+            <div class="setting-section">
+              <div class="section-head"><span><el-icon><Connection /></el-icon>面板网络</span></div>
               <ul class="setting-list">
                 <li class="setting-item">
                   <div class="setting-info">
@@ -78,7 +71,7 @@
                   <el-switch v-model="info.report_errors" @change="toggleReportErrors" />
                 </li>
               </ul>
-            </el-card>
+            </div>
           </el-col>
 
           </el-row>
@@ -88,12 +81,8 @@
       <el-tab-pane label="安全" name="security">
         <el-row :gutter="16">
           <el-col :xs="24" :md="12">
-            <el-card shadow="never" class="setting-card">
-              <template #header>
-                <div class="card-head">
-                  <span><el-icon><Shield /></el-icon>登录安全</span>
-                </div>
-              </template>
+            <div class="setting-section">
+              <div class="section-head"><span><el-icon><Shield /></el-icon>登录安全</span></div>
               <ul class="setting-list">
                 <li class="setting-item">
                   <div class="setting-info">
@@ -112,17 +101,15 @@
                   <el-button link type="primary" @click="allowlistDialog.show = true">修改</el-button>
                 </li>
               </ul>
-            </el-card>
+            </div>
           </el-col>
 
           <el-col :xs="24" :md="12">
-            <el-card shadow="never" class="setting-card">
-              <template #header>
-                <div class="card-head">
-                  <span><el-icon><UserFilled /></el-icon>在线会话</span>
-                  <el-button link type="danger" size="small" :disabled="!sessions.length" @click="kickAll">踢下线全部</el-button>
-                </div>
-              </template>
+            <div class="setting-section">
+              <div class="section-head">
+                <span><el-icon><UserFilled /></el-icon>在线会话</span>
+                <el-button link type="danger" size="small" :disabled="!sessions.length" @click="kickAll">踢下线全部</el-button>
+              </div>
               <div style="padding: 4px 0 8px; color: #94a3b8; font-size: 13px">
                 当前在线 {{ sessions.length }} 个会话（已下线/被踢的会话会自动从列表移除）
               </div>
@@ -159,7 +146,7 @@
                 </el-table-column>
               </el-table>
               <div v-else style="text-align: center; color: #c0c4cc; padding: 32px 0; font-size: 13px">暂无会话</div>
-            </el-card>
+            </div>
           </el-col>
         </el-row>
       </el-tab-pane>
@@ -167,12 +154,8 @@
       <!-- 令牌中心（API 令牌 + AI 助手 MCP 合并） -->
       <el-tab-pane label="令牌中心" name="token">
         <!-- 顶部：两个不同的请求地址（API + MCP） -->
-        <el-card shadow="never" class="setting-card" style="margin-bottom: 16px">
-          <template #header>
-            <div class="card-head">
-              <span><el-icon><Position /></el-icon>请求地址</span>
-            </div>
-          </template>
+        <div class="setting-section" style="margin-bottom: 16px">
+          <div class="section-head"><span><el-icon><Position /></el-icon>请求地址</span></div>
           <el-row :gutter="16">
             <el-col :xs="24" :md="12">
               <div class="endpoint-label">API 接口（外部脚本）</div>
@@ -187,14 +170,13 @@
               </el-input>
             </el-col>
           </el-row>
-        </el-card>
+        </div>
 
         <!-- 令牌列表 -->
-        <el-card shadow="never" class="setting-card" style="margin-bottom: 16px">
-          <template #header>
-            <div class="card-head">
-              <span><el-icon><Key /></el-icon>令牌列表</span>
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div class="setting-section" style="margin-bottom: 16px">
+          <div class="section-head">
+            <span><el-icon><Key /></el-icon>令牌列表</span>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <el-radio-group v-model="tokenFilter" size="small">
                   <el-radio-button value="">全部</el-radio-button>
                   <el-radio-button value="api">API</el-radio-button>
@@ -203,7 +185,6 @@
                 <el-button size="small" type="primary" @click="openCreateToken">+ 创建令牌</el-button>
               </div>
             </div>
-          </template>
           <el-alert type="info" :closable="false" style="margin-bottom: 12px"
             title="创建令牌控制面板的外部访问权限。可选三种类型：API（外部脚本调用）/ MCP（AI 工具连接）/ 全部（两种都能用）。每个令牌可独立设置权限范围、IP 白名单与过期时间。所有令牌为 36 位字母数字组合，仅创建时返回一次明文。" />
           <Skeleton v-if="tokensLoading" type="table" :rows="5" :columns="[{flex:1},{width:'100px'},{flex:2},{width:'140px'},{width:'140px'},{width:'140px'},{width:'70px'}]" />
@@ -250,15 +231,11 @@
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
+        </div>
 
         <!-- AI 工具配置示例（折叠面板） -->
-        <el-card shadow="never" class="setting-card">
-          <template #header>
-            <div class="card-head">
-              <span><el-icon><ChatDotRound /></el-icon>AI 工具配置示例</span>
-            </div>
-          </template>
+        <div class="setting-section">
+          <div class="section-head"><span><el-icon><ChatDotRound /></el-icon>AI 工具配置示例</span></div>
           <el-alert type="info" :closable="false" style="margin-bottom: 16px"
             title="通过 MCP 协议，Claude Code / Codex / Cursor 等 AI 工具可直接连接面板，调用面板能力完成服务器管理、网站部署、故障排查等运维操作。所有 AI 操作均记录在「日志 → API 日志 / MCP 日志」里。"
             description="请先在上方创建一个 MCP 或「全部」类型的令牌，然后填入下方示例。" />
@@ -279,18 +256,16 @@ Headers: Authorization: Bearer &lt;你的 MCP 令牌&gt;</pre>
               <pre class="mcp-pre">{{ codexToml }}</pre>
             </el-collapse-item>
           </el-collapse>
-        </el-card>
+        </div>
       </el-tab-pane>
 
       <!-- 临时访问 -->
       <el-tab-pane label="临时访问" name="temp">
-        <el-card shadow="never" class="setting-card">
-          <template #header>
-            <div class="card-head">
-              <span><el-icon><Timer /></el-icon>临时登录链接</span>
-              <el-button size="small" type="primary" @click="openCreateTemp">+ 创建临时链接</el-button>
-            </div>
-          </template>
+        <div class="setting-section">
+          <div class="section-head">
+            <span><el-icon><Timer /></el-icon>临时登录链接</span>
+            <el-button size="small" type="primary" @click="openCreateTemp">+ 创建临时链接</el-button>
+          </div>
           <el-alert type="info" :closable="false" style="margin-bottom: 12px"
             title="创建临时登录链接，访客打开后免密码直接进入面板后台。可设置有效期（到期自动失效并踢下线）。在有效期内链接可被多次使用，使用情况（IP + 归属地）会记录在「记录」弹窗里。"
             description="注意：临时链接等同于超管权限，请谨慎分享。" />
@@ -340,18 +315,14 @@ Headers: Authorization: Bearer &lt;你的 MCP 令牌&gt;</pre>
           <div v-if="!tempList.length && !tempLoading" style="text-align: center; color: #c0c4cc; padding: 32px 0; font-size: 13px">
             暂无临时链接，点右上角「+ 创建临时链接」开始
           </div>
-        </el-card>
+        </div>
 
       </el-tab-pane>
 
       <!-- 高级 -->
       <el-tab-pane label="高级" name="advanced">
-        <el-card shadow="never" class="setting-card">
-          <template #header>
-            <div class="card-head">
-              <span><el-icon><MagicStick /></el-icon>SSL 证书</span>
-            </div>
-          </template>
+        <div class="setting-section">
+          <div class="section-head"><span><el-icon><MagicStick /></el-icon>SSL 证书</span></div>
           <ul class="setting-list">
             <li class="setting-item">
               <div class="setting-info">
@@ -362,9 +333,10 @@ Headers: Authorization: Bearer &lt;你的 MCP 令牌&gt;</pre>
               <el-button link type="primary" @click="openLiteSSL">配置</el-button>
             </li>
           </ul>
-        </el-card>
+        </div>
       </el-tab-pane>
     </el-tabs>
+    </el-card>
 
     <!-- ===== 通用弹窗（账号、密码、端口、域名、MySQL、白名单、LiteSSL） ===== -->
     <el-dialog v-model="usernameDialog.show" title="修改管理员账号" width="420px">
@@ -1120,23 +1092,25 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.settings-page { padding: 0 8px; }
+.settings-card { margin-bottom: 16px; }
 .settings-tabs :deep(.el-tabs__nav-wrap::after) { height: 1px; }
 
-/* 卡片风格（与 Dashboard 保持一致） */
-.setting-card {
+/* 内嵌区域（替代原来的独立 el-card） */
+.setting-section {
   background: #ffffff;
   border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  transition: box-shadow 0.2s;
+  border-radius: 8px;
+  padding: 6px 18px 16px;
 }
-.setting-card:hover { box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06); }
-.setting-card :deep(.el-card__header) {
-  padding: 14px 18px;
-  border-bottom: 1px solid #f1f5f9;
+.section-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  padding: 14px 0 8px;
 }
-.setting-card :deep(.el-card__body) { padding: 6px 18px 16px; }
+.section-head > span:first-child {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 600; color: #1f2937;
+}
+.section-head > span:first-child .el-icon { color: #6366f1; font-size: 16px; }
 
 /* 卡片头部：图标 + 标题 + 可选右侧操作 */
 .card-head {

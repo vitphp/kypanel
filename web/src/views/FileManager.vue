@@ -2735,7 +2735,15 @@ watch(currentPath, (p) => {
 }
 /* 移动端行内操作按钮：紧凑小图标按钮，隐藏文字 */
 @media (max-width: 767px) {
-  .row-actions { flex-wrap: wrap; row-gap: 2px; column-gap: 0; }
+  .row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 0;
+    width: 160px;
+    padding: 0 8px;
+  }
   .row-actions .el-button {
     font-size: 14px;
     padding: 2px 6px;

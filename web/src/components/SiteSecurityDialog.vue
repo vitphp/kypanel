@@ -523,7 +523,13 @@ async function saveConfig() {
   saving.value = true
   try {
     await request.post('/site/security/config', { ...cfg.value }, { params: secParams() })
-    ElMessage.success('配置已保存')
+    // 未启用总开关时规则不会写入 nginx 片段，需明确提示，避免用户误以为已生效
+    const ruleCount = (ipRules.value?.length || 0) + (uaRules.value?.length || 0) + (refRules.value?.length || 0) + (customRules.value?.length || 0)
+    if (!cfg.value.enabled && ruleCount > 0) {
+      ElMessage.warning('配置已保存，但「启用安全防护」未打开，规则暂不会生效')
+    } else {
+      ElMessage.success('配置已保存')
+    }
   } catch (e) { /* interceptor handles */ } finally {
     saving.value = false
   }

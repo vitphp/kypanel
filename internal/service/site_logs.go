@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -251,6 +252,54 @@ func SiteLogs(id uint, maxLines int) (*SiteLogsResult, error) {
 		Truncated:  total > maxLines,
 		HasFile:    total > 0,
 	}, nil
+}
+
+// SiteRuntimeLog 读取进程型站点（python/node/go）的运行日志（stdout/stderr）。
+// systemd 服务将输出重定向到 /var/log/nginx/<name>.service.log；文件缺失或为空时回退到 journalctl -u lp-<name>。
+// 该日志直接包含进程启动报错（如依赖缺失、端口占用、语法错误），便于排查「站点启动不起来」。
+func SiteRuntimeLog(id uint, maxLines int) (map[string]interface{}, error) {
+	if maxLines <= 0 {
+		maxLines = 200
+	}
+	if maxLines > 2000 {
+		maxLines = 2000
+	}
+	var s model.Site
+	if err := model.DB.First(&s, id).Error; err != nil {
+		return nil, errors.New("站点不存在")
+	}
+	result := map[string]interface{}{
+		"id": id, "name": s.Name, "type": s.Type,
+		"log": "", "source": "", "has_log": false, "path": "",
+	}
+	// 仅进程型站点有独立运行日志（static/php/proxy 走 nginx，无此日志）
+	if !isRuntimeSite(s.Type) {
+		result["hint"] = "该站点类型（" + s.Type + "）无独立进程运行日志"
+		return result, nil
+	}
+	path := fmt.Sprintf("/var/log/nginx/%s.service.log", s.Name)
+	if b, err := os.ReadFile(path); err == nil {
+		content := string(b)
+		if strings.TrimSpace(content) != "" {
+			result["log"] = tailLines(content, maxLines)
+			result["source"] = "file"
+			result["has_log"] = true
+			result["path"] = path
+		}
+	}
+	if !result["has_log"].(bool) || strings.TrimSpace(result["log"].(string)) == "" {
+		// 回退：systemd journal（服务名 = lp-<name>）
+		out := execOut(fmt.Sprintf("journalctl -u %s --no-pager -n %d 2>/dev/null", shellQuote(siteServiceName(s.Name)), maxLines))
+		if strings.TrimSpace(out) != "" {
+			result["log"] = out
+			result["source"] = "journal"
+			result["has_log"] = true
+		}
+	}
+	if !result["has_log"].(bool) {
+		result["hint"] = "尚未产生运行日志，请先启动站点；若已启动仍无日志，请检查 systemd 服务状态"
+	}
+	return result, nil
 }
 
 // ---------- 日志分析 ----------

@@ -1,20 +1,29 @@
 <template>
   <el-drawer v-model="visible" :title="`网站设置 - ${site.name || ''}`" size="780px" destroy-on-close>
     <el-tabs v-model="activeTab">
-      <!-- 域名（排序、批量添加） -->
+      <!-- 域名（拖拽排序、批量添加） -->
       <el-tab-pane label="域名" name="domains">
         <div class="domain-tab">
           <div class="domain-list-wrap">
             <div class="domain-list-header">
-              <span class="domain-order-header">排序</span>
+              <span class="domain-drag-header"></span>
               <span class="domain-name-cell header">域名</span>
               <span class="domain-port header">端口</span>
               <span class="domain-actions-header">操作</span>
             </div>
-            <div v-for="(d, index) in form.domains" :key="index" class="domain-row">
+            <div
+              v-for="(d, index) in form.domains"
+              :key="'d-'+index"
+              class="domain-row"
+              :class="{ 'domain-drag-over': domainDragOverIdx === index }"
+              draggable="true"
+              @dragstart="onDomainDragStart($event, index)"
+              @dragover.prevent="onDomainDragOver($event, index)"
+              @dragleave="onDomainDragLeave"
+              @drop="onDomainDrop($event, index)"
+            >
               <div class="domain-col-handle">
-                <el-button link size="small" :icon="ArrowUp" :disabled="index === 0" title="上移" @click="moveDomain(index, -1)" />
-                <el-button link size="small" :icon="ArrowDown" :disabled="index === form.domains.length - 1" title="下移" @click="moveDomain(index, 1)" />
+                <el-icon class="drag-hint"><Rank /></el-icon>
               </div>
               <div class="domain-col-name">
                 <el-input
@@ -61,14 +70,14 @@
           <el-form-item label="网站名称">
             <el-input v-model="form.name" maxlength="255" show-word-limit placeholder="网站名称（可随意填写，支持汉字等任意字符）" />
           </el-form-item>
-          <el-form-item :label="site.type === 'static' || site.type === 'php' ? '网站目录' : '项目路径'">
+          <el-form-item :label="site.type === 'node' || site.type === 'python' || site.type === 'go' ? '项目路径' : '网站目录'">
             <div style="display: flex; gap: 8px;">
               <el-input v-model="form.root" :disabled="site.type === 'proxy'" />
               <el-button :disabled="site.type === 'proxy'" @click="openDirPicker">
                 <el-icon><FolderOpened /></el-icon>
               </el-button>
             </div>
-            <span class="tip">留空使用 /www/wwwroot/站点名</span>
+            <span class="tip">{{ site.type === 'proxy' ? '用于存放 SSL 证书验证文件（/.well-known），由面板自动管理' : '留空使用 /www/wwwroot/站点名' }}</span>
           </el-form-item>
 
           <template v-if="site.type === 'static' || site.type === 'php'">
@@ -150,6 +159,11 @@
             </el-form-item>
             <el-form-item label="启动命令">
               <el-input v-model="form.start_command" placeholder="如 python app.py / npm run start" />
+              <span class="tip">支持 && / 变量赋值等 shell 语法</span>
+            </el-form-item>
+            <el-form-item v-if="site.type === 'node' || site.type === 'python'" label="安装命令">
+              <el-input v-model="form.install_command" placeholder="选填，如 npm install && npm run build / pip install -r requirements.txt" />
+              <span class="tip">创建站点时在项目目录执行一次；在此仅保存，不会立即执行</span>
             </el-form-item>
             <el-form-item label="环境变量">
               <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个" />
@@ -337,6 +351,23 @@
           </el-form-item>
         </el-form>
       </el-tab-pane>
+
+      <!-- 运行日志（进程型站点 python/node/go） -->
+      <el-tab-pane v-if="isRuntimeSite" label="运行日志" name="runtimelog">
+        <div class="runtime-log-tab">
+          <div class="log-toolbar">
+            <el-button :icon="Refresh" :loading="logLoading" @click="loadRuntimeLog">刷新</el-button>
+            <span v-if="runtimeLog" class="log-meta">
+              <template v-if="runtimeLog.has_log">
+                来源：{{ runtimeLog.source === 'journal' ? 'systemd journal' : '服务输出文件（' + runtimeLog.path + '）' }}
+              </template>
+              <template v-else>尚未产生运行日志</template>
+            </span>
+          </div>
+          <pre v-if="runtimeLog && runtimeLog.has_log" class="runtime-log-pre">{{ runtimeLog.log }}</pre>
+          <el-empty v-else description="暂无运行日志" :description="runtimeLog && runtimeLog.hint ? runtimeLog.hint : '请先启动站点，启动失败时的报错会显示在这里'" />
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </el-drawer>
 
@@ -379,7 +410,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
-import { FolderOpened, ArrowUp, ArrowDown, Folder } from '@element-plus/icons-vue'
+import { FolderOpened, ArrowUp, Folder, Refresh, Rank } from '@element-plus/icons-vue'
 import CodeEditor from '../components/CodeEditor.vue'
 
 const visible = ref(false)
@@ -400,6 +431,23 @@ const runtimeVersionMissing = computed(() => {
   if (!form.runtime_version) return false
   return !(runtimeEnvVersions.value[t] || []).some(o => o.value === form.runtime_version)
 })
+
+// 进程型站点（python/node/go）才有独立运行日志
+const isRuntimeSite = computed(() => ['python', 'node', 'go'].includes(site.value.type))
+const runtimeLog = ref(null)
+const logLoading = ref(false)
+async function loadRuntimeLog() {
+  if (!site.value.id) return
+  logLoading.value = true
+  try {
+    const res = await request.get('/site/runtime-log', { params: { id: site.value.id, lines: 300 } })
+    runtimeLog.value = res.data || null
+  } catch (e) {
+    ElMessage.error('读取运行日志失败：' + (e?.message || e))
+  } finally {
+    logLoading.value = false
+  }
+}
 
 // 目录选择器
 const dirPickerVisible = ref(false)
@@ -428,7 +476,8 @@ const form = reactive({
   start_command: '',
   env_vars: '',
   proxy_port: 3000,
-  runtime_version: ''
+  runtime_version: '',
+  install_command: ''
 })
 
 // 重定向规则列表（多条）
@@ -574,7 +623,8 @@ function loadDetail(id) {
       start_command: d.start_command || '',
       env_vars: d.env_vars || '',
       proxy_port: d.proxy_port || 3000,
-      runtime_version: d.runtime_version || ''
+      runtime_version: d.runtime_version || '',
+      install_command: d.install_command || ''
     })
     let indexes = (d.default_index || '').split(/\s+/).map(x => x.trim()).filter(Boolean)
     // PHP / 静态站点若服务端未返回默认文档，填充系统默认值
@@ -828,12 +878,39 @@ function onDomainListChange() {
   saveSettings({ silent: true })
 }
 
-// 上移 / 下移某一行域名（-1 上移，1 下移）
-function moveDomain(index, delta) {
-  const to = index + delta
-  if (to < 0 || to >= form.domains.length) return
-  const [item] = form.domains.splice(index, 1)
-  form.domains.splice(to, 0, item)
+// ---- 域名行拖拽排序 ----
+const domainDragIdx = ref(-1)
+const domainDragOverIdx = ref(-1)
+
+function onDomainDragStart(e, index) {
+  domainDragIdx.value = index
+  e.dataTransfer.effectAllowed = 'move'
+  // Firefox 必须设置 dataTransfer 数据才能触发 drag 事件
+  e.dataTransfer.setData('text/plain', String(index))
+}
+
+function onDomainDragOver(e, index) {
+  if (domainDragIdx.value === -1 || domainDragIdx.value === index) return
+  domainDragOverIdx.value = index
+}
+
+function onDomainDragLeave() {
+  domainDragOverIdx.value = -1
+}
+
+function onDomainDrop(e, index) {
+  e.preventDefault()
+  const from = domainDragIdx.value
+  if (from === -1 || from === index) {
+    domainDragIdx.value = -1
+    domainDragOverIdx.value = -1
+    return
+  }
+  // 拖拽移动：从 from 位置取出，插入到 index 位置
+  const [item] = form.domains.splice(from, 1)
+  form.domains.splice(index, 0, item)
+  domainDragIdx.value = -1
+  domainDragOverIdx.value = -1
   onDomainListChange()
 }
 
@@ -1004,7 +1081,8 @@ function buildSettingsPayload() {
         start_command: form.start_command,
         env_vars: form.env_vars,
         proxy_port: form.proxy_port,
-        runtime_version: form.runtime_version
+        runtime_version: form.runtime_version,
+        install_command: form.install_command
       }
   }
 }
@@ -1066,6 +1144,7 @@ async function saveConfig() {
 
 watch(activeTab, (t) => {
   if (t === 'config') loadConfig()
+  if (t === 'runtimelog' && isRuntimeSite.value) loadRuntimeLog()
 })
 
 watch(() => form.root, () => {
@@ -1086,24 +1165,46 @@ defineExpose({ open })
 .drag-tag { cursor: move; }
 .rewrite-preset { margin-bottom: 12px; }
 .domain-tab { padding: 0 4px; }
+/* 运行日志 Tab */
+.runtime-log-tab { display: flex; flex-direction: column; gap: 10px; }
+.log-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.log-meta { color: #909399; font-size: 12px; word-break: break-all; }
+.runtime-log-pre {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 /* 域名列表（排序按钮 + 固定列宽） */
 .domain-list-wrap { border: 1px solid #ebeef5; border-radius: 6px; padding: 6px; min-height: 80px; }
 /* 标题行 + 内容行都用同一套 grid 列宽（handle / name / port / actions） */
 .domain-list-header,
 .domain-row {
   display: grid;
-  grid-template-columns: 52px 1fr 64px 130px;
+  grid-template-columns: 36px 1fr 64px 130px;
   align-items: center;
   gap: 8px;
 }
 .domain-list-header { padding: 6px 8px; font-size: 13px; color: #909399; font-weight: 600; border-bottom: 1px solid #ebeef5; margin-bottom: 4px; background: #fafbfc; border-radius: 4px; }
-.domain-list-header .domain-order-header { text-align: center; }
+.domain-list-header .domain-drag-header { text-align: center; font-size: 12px; }
 .domain-list-header .domain-name-cell.header { padding-left: 0; }
 .domain-list-header .domain-port.header { text-align: center; }
 .domain-list-header .domain-actions-header { text-align: right; padding-right: 8px; }
-.domain-row { padding: 6px 8px; background: #fff; border-radius: 4px; margin-bottom: 4px; }
+.domain-row { padding: 6px 8px; background: #fff; border-radius: 4px; margin-bottom: 4px; cursor: grab; transition: background 0.15s; }
+.domain-row:active { cursor: grabbing; }
+.domain-row.domain-drag-over { background: #ecf5ff; outline: 1px dashed #409eff; }
 .domain-row.is-primary { background: #ecf5ff; }
-.domain-row .domain-col-handle { display: flex; align-items: center; justify-content: center; gap: 2px; }
+.domain-row .domain-col-handle { display: flex; align-items: center; justify-content: center; color: #c0c4cc; user-select: none; }
+.domain-row:hover .domain-col-handle { color: #409eff; }
+.domain-row .domain-col-handle .drag-hint { font-size: 18px; }
 .domain-row .domain-col-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-row .domain-col-port { text-align: center; font-size: 13px; color: #909399; }
 .domain-row .domain-col-actions { text-align: right; padding-right: 0; }

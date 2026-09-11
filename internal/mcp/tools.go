@@ -54,6 +54,7 @@ func allTools() []*Tool {
 				"env_vars":        stringSchema("环境变量，KEY=VALUE 每行一个"),
 				"proxy_port":      intSchema("node/python/go 应用运行端口，nginx 反代目标"),
 				"framework":       stringSchema("python 框架：flask / django / generic"),
+				"install_command": stringSchema("node/python 依赖安装/构建命令，如 npm install && npm run build"),
 				"create_db":       boolSchema("是否同时创建数据库（PHP 站点）"),
 				"db_name":         stringSchema("数据库名，留空自动生成"),
 			}, []string{"domain", "type"}),
@@ -134,6 +135,7 @@ func handleCreateSite(ctx *ToolContext, args map[string]any) (any, error) {
 		EnvVars:        getString(args, "env_vars"),
 		ProxyPort:      getInt(args, "proxy_port", 0),
 		Framework:      getString(args, "framework"),
+		InstallCommand: getString(args, "install_command"),
 		CreateDB:       getBool(args, "create_db"),
 		DBName:         getString(args, "db_name"),
 	}

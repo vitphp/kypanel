@@ -7,9 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shirou/gopsutil/v4/disk"
-	"github.com/shirou/gopsutil/v4/net"
-
 	"kypanel/internal/model"
 )
 
@@ -162,11 +159,7 @@ func GetDashboardSummary() *DashboardSummary {
 // sampleNetRate 采样网络总流量速率（KB/s）
 func sampleNetRate() (inRate, outRate float64) {
 	now := time.Now()
-	var totalRx, totalTx uint64
-	if counters, err := net.IOCounters(false); err == nil && len(counters) > 0 {
-		totalRx = counters[0].BytesRecv
-		totalTx = counters[0].BytesSent
-	}
+	totalRx, totalTx := netDevTotals()
 
 	if !netRateLastTime.IsZero() {
 		elapsed := now.Sub(netRateLastTime).Seconds()
@@ -184,22 +177,13 @@ func sampleNetRate() (inRate, outRate float64) {
 
 // netTotalBytes 返回网卡累计入/出字节数
 func netTotalBytes() (rx, tx uint64) {
-	if counters, err := net.IOCounters(false); err == nil && len(counters) > 0 {
-		return counters[0].BytesRecv, counters[0].BytesSent
-	}
-	return 0, 0
+	return netDevTotals()
 }
 
 // sampleDiskIO 采样磁盘总读写速率（KB/s）
 func sampleDiskIO() (readRate, writeRate float64) {
 	now := time.Now()
-	var totalRead, totalWrite uint64
-	if counters, err := disk.IOCounters(); err == nil {
-		for _, c := range counters {
-			totalRead += c.ReadBytes
-			totalWrite += c.WriteBytes
-		}
-	}
+	totalRead, totalWrite := diskIOTotals()
 
 	if !diskIOLastTime.IsZero() {
 		elapsed := now.Sub(diskIOLastTime).Seconds()

@@ -1,5 +1,6 @@
 <template>
   <div class="logs-page">
+    <el-card shadow="never" class="logs-card">
     <el-tabs v-model="activeTab">
       <!-- 操作日志：前端会话（JWT）触发的操作 -->
       <el-tab-pane label="操作日志" name="oplog">
@@ -10,7 +11,7 @@
         </div>
         <Skeleton v-if="loadingO" type="table" :rows="8" :columns="[{width:'180px'},{width:'130px'},{flex:1},{width:'140px'},{width:'90px'}]" />
         <el-table v-else :data="oplogs" stripe>
-          <el-table-column label="时间" width="180">
+          <el-table-column label="时间" width="180" class-name="time-col">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
           </el-table-column>
           <el-table-column label="模块" width="130">
@@ -54,7 +55,7 @@
           <span class="hint">通过 API 令牌（开放 API）调用的全部操作</span>
         </div>
         <el-table :data="apiLogs" v-loading="loadingApi" stripe>
-          <el-table-column label="时间" width="180">
+          <el-table-column label="时间" width="180" class-name="time-col">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
           </el-table-column>
           <el-table-column label="模块" width="140">
@@ -98,7 +99,7 @@
           <span class="hint">通过 MCP 令牌（AI 工具调用面板）触发的全部操作</span>
         </div>
         <el-table :data="mcpLogs" v-loading="loadingMcp" stripe>
-          <el-table-column label="时间" width="180">
+          <el-table-column label="时间" width="180" class-name="time-col">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
           </el-table-column>
           <el-table-column label="工具/模块" width="160">
@@ -157,7 +158,7 @@
           <span class="hint">共 {{ systemTotal }} 条，{{ systemFiltered.length }} 条匹配</span>
         </div>
         <el-table :data="systemFiltered" v-loading="loadingSys" stripe max-height="560" empty-text="暂无日志">
-          <el-table-column label="时间" width="170">
+          <el-table-column label="时间" width="170" class-name="time-col">
             <template #default="{ row }">{{ row.time || '-' }}</template>
           </el-table-column>
           <el-table-column label="级别" width="90" align="center">
@@ -204,6 +205,7 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+    </el-card>
   </div>
 </template>
 
@@ -437,7 +439,12 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.logs-page { padding: 0 8px; }
+/* 日志页卡片：对齐其它页面的 el-card 容器风格 */
+.logs-card { margin-bottom: 16px; }
+/* 时间列左侧留白：避免时间紧贴卡片左缘，视觉更透气 */
+.logs-card :deep(.el-table .time-col .cell) {
+  padding-left: 16px;
+}
 /* 操作列：只显示中文动作名（无映射时兜底显示 detail） */
 .op-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .op-verb { flex: none; }

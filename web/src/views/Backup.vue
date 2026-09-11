@@ -1,18 +1,16 @@
 <template>
   <div class="backup-page">
+    <el-card shadow="never" class="backup-card">
     <el-tabs v-model="activeTab">
       <!-- 备份记录 -->
       <el-tab-pane label="备份记录" name="list">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span>备份记录</span>
-              <div class="head-actions">
-                <el-button type="primary" size="small" @click="createBackup">立即备份</el-button>
-                <el-button size="small" @click="loadTasks">刷新</el-button>
-              </div>
-            </div>
-          </template>
+        <div class="card-head">
+          <span>备份记录</span>
+          <div class="head-actions">
+            <el-button type="primary" size="small" @click="createBackup">立即备份</el-button>
+            <el-button size="small" @click="loadTasks">刷新</el-button>
+          </div>
+        </div>
           <Skeleton v-if="tasksLoading" type="table" :rows="6" :columns="[{width:'60px'},{width:'90px'},{width:'160px'},{flex:1},{width:'100px'},{width:'80px'},{width:'80px'},{width:'160px'},{flex:1}]" />
           <el-table v-else :data="tasks" size="small">
             <el-table-column prop="id" label="ID" width="60" />
@@ -48,18 +46,14 @@
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
       </el-tab-pane>
 
       <!-- 远程存储 -->
       <el-tab-pane label="远程存储" name="storage">
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span>远程存储配置</span>
-              <el-button type="primary" size="small" @click="addStorage">添加存储</el-button>
-            </div>
-          </template>
+        <div class="card-head">
+          <span>远程存储配置</span>
+          <el-button type="primary" size="small" @click="addStorage">添加存储</el-button>
+        </div>
           <el-alert type="info" :closable="false" style="margin-bottom: 12px"
             title="支持云存储：腾讯云 COS、阿里云 OSS、七牛云 Kodo、Amazon S3、通用 S3 兼容、FTP/SFTP。"
             description="选择厂商与地域后，请自行填写域名（Endpoint）；可填内网域名或 S3 兼容端点。" />
@@ -92,9 +86,9 @@
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
       </el-tab-pane>
     </el-tabs>
+    </el-card>
 
     <!-- 创建备份对话框 -->
     <el-dialog v-model="createVisible" title="创建备份" width="480px">
@@ -516,7 +510,8 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.card-head { display: flex; justify-content: space-between; align-items: center; }
+.backup-card { margin-bottom: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 0 10px; }
 .head-actions { display: flex; gap: 8px; }
 .storage-item { padding: 12px 0; border-bottom: 1px solid #f0f0f0; }
 .storage-item:last-child { border-bottom: none; }

@@ -1,6 +1,7 @@
 <template>
   <div class="app-store">
     <!-- 分类 Tab + 搜索框：同行布局（左 tab，右搜索） -->
+    <el-card shadow="never" class="store-toolbar-card">
     <div class="app-store-toolbar">
       <el-tabs v-model="activeCat" class="cat-tabs">
         <el-tab-pane label="全部" name="all" />
@@ -25,6 +26,7 @@
         class="app-search-input"
       />
     </div>
+    </el-card>
 
     <!-- 运行时环境的语言二级分类 -->
     <div v-if="activeCat === 'runtime' && currentCat?.sub_categories?.length" class="sub-tabs">
@@ -734,14 +736,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.store-toolbar-card { margin-bottom: 14px; }
 .app-store-toolbar {
   display: flex;
   align-items: center;
   gap: 16px;
-  background: #fff;
-  border-radius: 6px;
-  padding: 0 16px;
-  margin-bottom: 12px;
   min-height: 48px;
 }
 .cat-tabs {
@@ -869,6 +868,15 @@ onUnmounted(() => {
 }
 .app-actions .el-button { padding: 4px 10px; font-size: 12px; }  /* 紧凑按钮 */
 .status-tag { margin-right: 0; }
+/* 移动端：grid item 内容撑大列宽，需 min-width:0；按钮组强制占满宽度自动换行，
+   避免「运行中/停止/重启/卸载」挤一行被卡片右边裁切 */
+@media (max-width: 767px) {
+  .app-col { min-width: 0; }
+  .app-grid { gap: 10px; }
+  .app-actions { width: 100%; }
+  .app-actions .el-button,
+  .app-actions .status-tag { flex: 0 1 auto; }
+}
 /* 备注：固定 1 行（≈18px），紧凑卡片只用 1 行 */
 .app-remarks {
   display: flex; align-items: flex-start; gap: 4px;

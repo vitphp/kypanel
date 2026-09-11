@@ -9,12 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
-	"github.com/shirou/gopsutil/v4/load"
-	"github.com/shirou/gopsutil/v4/mem"
-	"github.com/shirou/gopsutil/v4/net"
-
 	"kypanel/internal/config"
 	"kypanel/internal/model"
 )
@@ -191,41 +185,37 @@ func monitorLoop() {
 func collectOnce() {
 	p := MonitorPoint{Time: time.Now().Unix()}
 
-	if c, err := cpu.Percent(0, false); err == nil && len(c) > 0 {
-		p.Cpu = round1(c[0])
+	p.Cpu = round1(cpuPercent(0))
+	mi := memInfo()
+	if total := mi["MemTotal"]; total > 0 {
+		free := mi["MemAvailable"]
+		if free == 0 {
+			free = mi["MemFree"]
+		}
+		p.Mem = round1(float64(total-free) / float64(total) * 100)
 	}
-	if m, err := mem.VirtualMemory(); err == nil {
-		p.Mem = round1(m.UsedPercent)
+	if total, used, _, ok := diskUsage("/"); ok && total > 0 {
+		p.Disk = round1(float64(used) / float64(total) * 100)
 	}
-	if d, err := disk.Usage("/"); err == nil {
-		p.Disk = round1(d.UsedPercent)
-	}
-	if la, err := load.Avg(); err == nil {
-		p.Load1 = round2(la.Load1)
-		p.Load5 = round2(la.Load5)
-		p.Load15 = round2(la.Load15)
-	}
+	p.Load1, p.Load5, p.Load15 = loadAvg()
+	p.Load1 = round2(p.Load1)
+	p.Load5 = round2(p.Load5)
+	p.Load15 = round2(p.Load15)
 
-	// 网络速率：用两次 IOCounters 差值估算
+	// 网络速率：两次 /proc/net/dev 差值估算
 	now := time.Now()
-	if counters, err := net.IOCounters(false); err == nil && len(counters) > 0 {
-		var rx, tx uint64
-		for _, c := range counters {
-			rx += c.BytesRecv
-			tx += c.BytesSent
+	rx, tx := netDevTotals()
+	if monitorReady && !lastNetTime.IsZero() {
+		dt := now.Sub(lastNetTime).Seconds()
+		if dt > 0 {
+			p.NetIn = round2(float64(rx-lastNetRx) / 1024 / dt)  // KB/s
+			p.NetOut = round2(float64(tx-lastNetTx) / 1024 / dt) // KB/s
 		}
-		if monitorReady && !lastNetTime.IsZero() {
-			dt := now.Sub(lastNetTime).Seconds()
-			if dt > 0 {
-				p.NetIn = round2(float64(rx-lastNetRx) / 1024 / dt)  // KB/s
-				p.NetOut = round2(float64(tx-lastNetTx) / 1024 / dt) // KB/s
-			}
-		}
-		lastNetRx = rx
-		lastNetTx = tx
-		lastNetTime = now
-		monitorReady = true
 	}
+	lastNetRx = rx
+	lastNetTx = tx
+	lastNetTime = now
+	monitorReady = true
 
 	monitorMu.Lock()
 	monitorPts = append(monitorPts, p)

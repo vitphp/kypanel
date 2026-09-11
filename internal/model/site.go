@@ -63,6 +63,7 @@ type Site struct {
 	EnvVars          string         `gorm:"size:1024" json:"env_vars"`         // 环境变量，KEY=VALUE 每行一个
 	ProxyPort        int            `json:"proxy_port"`                        // python/node/go 应用运行端口
 	Framework        string         `gorm:"size:32" json:"framework"`          // python 框架：flask / django / generic
+	InstallCommand   string         `gorm:"size:512" json:"install_command"`   // node/python 依赖安装/构建命令（创建后可选执行）
 	Status           string         `gorm:"size:16" json:"status"`             // running / stopped
 	Remark           string         `gorm:"size:255" json:"remark"`
 	CreatedAt        time.Time      `json:"created_at"`
@@ -70,6 +71,8 @@ type Site struct {
 
 	// 仅创建 Go 站点时用于返回项目目录中的可执行文件列表（不落库）
 	ExecFiles []ExecFile `gorm:"-" json:"exec_files,omitempty"`
+	// 创建时的非致命告警（如进程服务启动失败、依赖命令执行失败），仅供接口返回展示（不落库）
+	DeployWarning string `gorm:"-" json:"deploy_warning,omitempty"`
 }
 
 // ExecFile 项目目录中的可执行文件

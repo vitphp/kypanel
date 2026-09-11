@@ -177,7 +177,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0;
+  padding: 10px;
 }
 
 .lp-footer {

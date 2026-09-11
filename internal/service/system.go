@@ -1,16 +1,18 @@
 package service
 
 import (
+	"net"
+	"os"
 	"runtime"
+	"strings"
 	"time"
-
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
-	"github.com/shirou/gopsutil/v4/host"
-	"github.com/shirou/gopsutil/v4/load"
-	"github.com/shirou/gopsutil/v4/mem"
-	"github.com/shirou/gopsutil/v4/net"
 )
+
+// mountEntry 挂载点条目（sysinfo_linux 通过 /proc/mounts 解析）
+type mountEntry struct {
+	Mount  string
+	FsType string
+}
 
 // DiskPart 磁盘分区信息
 type DiskPart struct {
@@ -33,28 +35,28 @@ type NetIf struct {
 
 // SystemInfo 系统信息聚合
 type SystemInfo struct {
-	Hostname    string  `json:"hostname"`
-	OS          string  `json:"os"`           // 发行版名，如 Ubuntu 22.04
-	Platform    string  `json:"platform"`     // 发行版家族
-	Kernel      string  `json:"kernel"`       // 内核版本
-	Arch        string  `json:"arch"`         // 架构
-	Uptime      uint64  `json:"uptime"`       // 开机时长（秒）
-	CpuModel    string  `json:"cpu_model"`
-	CpuCores    int     `json:"cpu_cores"`
-	CpuPercent  float64 `json:"cpu_percent"`
-	Load1       float64 `json:"load1"`
-	Load5       float64 `json:"load5"`
-	Load15      float64 `json:"load15"`
-	MemTotal    uint64  `json:"mem_total"`
-	MemUsed     uint64  `json:"mem_used"`
-	MemFree     uint64  `json:"mem_free"`
-	MemPercent  float64 `json:"mem_percent"`
-	SwapTotal   uint64  `json:"swap_total"`
-	SwapUsed    uint64  `json:"swap_used"`
-	Disks       []DiskPart `json:"disks"`
-	Nets        []NetIf    `json:"nets"`
-	GoVersion   string  `json:"go_version"`
-	PanelVer    string  `json:"panel_version"`
+	Hostname   string     `json:"hostname"`
+	OS         string     `json:"os"`       // 发行版名，如 Ubuntu 22.04
+	Platform   string     `json:"platform"` // 发行版家族
+	Kernel     string     `json:"kernel"`   // 内核版本
+	Arch       string     `json:"arch"`     // 架构
+	Uptime     uint64     `json:"uptime"`   // 开机时长（秒）
+	CpuModel   string     `json:"cpu_model"`
+	CpuCores   int        `json:"cpu_cores"`
+	CpuPercent float64    `json:"cpu_percent"`
+	Load1      float64    `json:"load1"`
+	Load5      float64    `json:"load5"`
+	Load15     float64    `json:"load15"`
+	MemTotal   uint64     `json:"mem_total"`
+	MemUsed    uint64     `json:"mem_used"`
+	MemFree    uint64     `json:"mem_free"`
+	MemPercent float64    `json:"mem_percent"`
+	SwapTotal  uint64     `json:"swap_total"`
+	SwapUsed   uint64     `json:"swap_used"`
+	Disks      []DiskPart `json:"disks"`
+	Nets       []NetIf    `json:"nets"`
+	GoVersion  string     `json:"go_version"`
+	PanelVer   string     `json:"panel_version"`
 }
 
 // GetSystemInfo 采集系统信息
@@ -65,92 +67,133 @@ func GetSystemInfo() (*SystemInfo, error) {
 	}
 
 	// 主机信息
-	if hi, err := host.Info(); err == nil {
-		info.Hostname = hi.Hostname
-		info.OS = hi.Platform + " " + hi.PlatformVersion
-		info.Platform = hi.Platform
-		info.Kernel = hi.KernelVersion
-		info.Arch = hi.KernelArch
-		info.Uptime = hi.Uptime
+	if hn, err := os.Hostname(); err == nil {
+		info.Hostname = hn
 	}
+	info.Platform = osRelease("ID")
+	if info.Platform != "" {
+		info.OS = info.Platform + " " + osRelease("VERSION_ID")
+	}
+	info.Kernel = kernelVersion()
+	info.Arch = runtime.GOARCH
+	info.Uptime = uptimeSeconds()
 
 	// CPU
-	if ci, err := cpu.Info(); err == nil && len(ci) > 0 {
-		info.CpuModel = ci[0].ModelName
-	}
-	info.CpuCores, _ = cpu.Counts(true)
-	if p, err := cpu.Percent(500*time.Millisecond, false); err == nil && len(p) > 0 {
-		info.CpuPercent = p[0]
-	}
+	info.CpuModel = cpuModelName()
+	info.CpuCores = cpuCoreCount()
+	info.CpuPercent = round1(cpuPercent(500 * time.Millisecond))
 
-	// 负载（仅 Unix 有）
-	if la, err := load.Avg(); err == nil {
-		info.Load1 = la.Load1
-		info.Load5 = la.Load5
-		info.Load15 = la.Load15
-	}
+	// 负载
+	info.Load1, info.Load5, info.Load15 = loadAvg()
 
-	// 内存
-	if mi, err := mem.VirtualMemory(); err == nil {
-		info.MemTotal = mi.Total
-		info.MemUsed = mi.Used
-		info.MemFree = mi.Free
-		info.MemPercent = mi.UsedPercent
+	// 内存（/proc/meminfo，单位 KB -> 字节）
+	mi := memInfo()
+	info.MemTotal = mi["MemTotal"] * 1024
+	info.MemFree = mi["MemAvailable"] * 1024
+	if info.MemFree == 0 {
+		info.MemFree = mi["MemFree"] * 1024
 	}
-	if si, err := mem.SwapMemory(); err == nil {
-		info.SwapTotal = si.Total
-		info.SwapUsed = si.Used
+	info.MemUsed = info.MemTotal - info.MemFree
+	if info.MemTotal > 0 {
+		info.MemPercent = round1(float64(info.MemUsed) / float64(info.MemTotal) * 100)
 	}
+	info.SwapTotal = mi["SwapTotal"] * 1024
+	info.SwapUsed = (mi["SwapTotal"] - mi["SwapFree"]) * 1024
 
 	// 磁盘分区
-	if parts, err := disk.Partitions(false); err == nil {
-		for _, p := range parts {
-			// 跳过伪文件系统
-			if skipFs(p.Fstype) {
-				continue
-			}
-			du, err := disk.Usage(p.Mountpoint)
-			if err != nil || du.Total == 0 {
-				continue
-			}
-			info.Disks = append(info.Disks, DiskPart{
-				Mount:   p.Mountpoint,
-				FsType:  p.Fstype,
-				Total:   du.Total,
-				Used:    du.Used,
-				Free:    du.Free,
-				Percent: du.UsedPercent,
-			})
+	for _, p := range diskPartitions() {
+		total, used, free, ok := diskUsage(p.Mount)
+		if !ok || total == 0 {
+			continue
 		}
+		info.Disks = append(info.Disks, DiskPart{
+			Mount:   p.Mount,
+			FsType:  p.FsType,
+			Total:   total,
+			Used:    used,
+			Free:    free,
+			Percent: round1(float64(used) / float64(total) * 100),
+		})
 	}
 
-	// 网卡
-	if nics, err := net.Interfaces(); err == nil {
-		for _, n := range nics {
-			if n.HardwareAddr == "" || n.HardwareAddr == "00:00:00:00:00:00" {
-				continue
-			}
-			ip := ""
-			for _, a := range n.Addrs {
-				if a.Addr != "" {
-					ip = a.Addr
-					break
-				}
-			}
-			ni := NetIf{Name: n.Name, IP: ip, Mac: n.HardwareAddr}
-			if io, err := net.IOCounters(false); err == nil {
-				for _, c := range io {
-					if c.Name == n.Name {
-						ni.RxBytes = c.BytesRecv
-						ni.TxBytes = c.BytesSent
-					}
-				}
-			}
-			info.Nets = append(info.Nets, ni)
-		}
-	}
+	// 网卡（Linux 上通过 /sys/class/net 遍历，IP/MAC 读文件）
+	info.Nets = listNetInterfaces()
 
 	return info, nil
+}
+
+// kernelVersion 读取 /proc/sys/kernel/osrelease 获取内核版本
+func kernelVersion() string {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// listNetInterfaces 遍历 /sys/class/net 读取网卡名/IP/MAC 及累计流量
+func listNetInterfaces() []NetIf {
+	rx, tx := netDevTotals()
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil
+	}
+	var out []NetIf
+	for _, e := range entries {
+		name := e.Name()
+		if name == "lo" {
+			continue
+		}
+		mac := readSysFile("/sys/class/net/" + name + "/address")
+		if mac == "" || mac == "00:00:00:00:00:00" {
+			continue
+		}
+		ip := readInterfaceIP(name)
+		out = append(out, NetIf{
+			Name:    name,
+			IP:      ip,
+			Mac:     mac,
+			RxBytes: rx,
+			TxBytes: tx,
+		})
+	}
+	return out
+}
+
+// readSysFile 读取 /sys 下单个文件内容（去换行）
+func readSysFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// readInterfaceIP 通过 net.Interfaces 读取网卡首个 IP（复用标准库）
+func readInterfaceIP(name string) string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Name != name {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return ""
+		}
+		for _, a := range addrs {
+			ip := a.String()
+			if ip != "" && !strings.Contains(ip, ":") { // 取 IPv4
+				if idx := strings.Index(ip, "/"); idx >= 0 {
+					ip = ip[:idx]
+				}
+				return ip
+			}
+		}
+	}
+	return ""
 }
 
 func skipFs(fs string) bool {

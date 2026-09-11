@@ -306,6 +306,20 @@ watch(rangeType, () => {
 .control-label { color: #606266; font-size: 14px; }
 .control-hint { color: #909399; font-size: 12px; margin-left: -4px; }
 .control-actions { margin-left: auto; }
+/* 移动端：每个控件占满一行，按钮组也换行，避免被卡片右边裁切 */
+@media (max-width: 767px) {
+  .control-row { gap: 10px 16px; }
+  .control-item { flex: 1 1 calc(50% - 16px); min-width: 0; }
+  .control-actions { flex: 1 1 100%; margin-left: 0; }
+  .control-actions .el-button { flex: 1; }
+  .control-label { font-size: 13px; }
+  /* 仪表盘卡片移动端 2×2 网格，每行 2 个 */
+  .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .stat-row :deep(.el-col) { width: auto; max-width: 100%; margin-bottom: 0; padding: 0; }
+  .gauge-value { font-size: 18px; }
+  .load-value { font-size: 22px; }
+  .chart-title { font-size: 12px; }
+}
 .stat-row { margin-bottom: 16px; }
 .gauge { display: flex; justify-content: center; padding: 8px 0; }
 .gauge-value { font-size: 22px; font-weight: 700; color: #303133; }

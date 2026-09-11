@@ -115,8 +115,8 @@
       </div>
 
       <el-table v-else :data="filteredSites" empty-text="该分类下暂无网站，点击右上角创建" :cell-style="padCellStyle">
-        <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column v-if="showNameCol" label="名称" :width="isMobile ? 100 : 180">
+
+        <el-table-column label="名称" :width="isMobile ? 100 : 220">
           <template #default="{ row }">
             <div class="remark-text" :class="{ empty: !row.name }" @click="editSiteName(row)">
               <span>{{ row.name }}</span>
@@ -124,7 +124,7 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="域名 / 地址" :width="domainWidth">
+        <el-table-column label="域名 / 地址" :min-width="domainMinWidth" show-overflow-tooltip>
           <template #default="{ row }">
             <template v-if="siteAllDomains(row).length">
               <div
@@ -149,29 +149,20 @@
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="!isMobile" label="端口" width="70">
-          <template #default="{ row }">{{ row.port }}</template>
-        </el-table-column>
-        <el-table-column v-if="!isMobile" label="类型" width="90">
+        <el-table-column label="类型" width="100" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="typeMeta[row.type]?.tag || 'info'">
               {{ typeMeta[row.type]?.label || row.type }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="showRuntimeCol" label="运行版本" width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.runtime_version">{{ row.runtime_version }}</span>
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="!isMobile" label="网站目录" min-width="200" show-overflow-tooltip>
+        <el-table-column label="网站目录" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
             <el-link v-if="siteDir(row)" type="primary" @click="openFiles(siteDir(row))">{{ siteDir(row) }}</el-link>
             <span v-else>—</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="showSslCol" label="SSL证书" width="110" align="center">
+        <el-table-column label="SSL证书" width="110" align="center">
           <template #default="{ row }">
             <el-link type="primary" @click="openSSL(row)">
               <span v-if="row.ssl_days >= 0" :class="{ 'ssl-soon': row.ssl_days <= 14 }">{{ row.ssl_status }}</span>
@@ -179,7 +170,7 @@
             </el-link>
           </template>
         </el-table-column>
-        <el-table-column label="状态" :width="isMobile ? 100 : 130">
+        <el-table-column label="状态" :width="isMobile ? 100 : 130" align="center">
           <template #default="{ row }">
             <el-dropdown
               v-if="row.active === 'running' || row.active === 'stopped'"
@@ -208,9 +199,18 @@
             <div class="ops-cell">
               <el-button size="small" type="primary" link @click="openSettings(row)">设置</el-button>
               <el-button size="small" type="info" link @click="openLogs(row)">日志</el-button>
-              <el-button size="small" type="success" link @click="openStat(row)">统计</el-button>
-              <el-button size="small" type="warning" link @click="openSecurity(row)">安全</el-button>
-              <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
+              <el-dropdown trigger="click" @command="cmd => onMoreCmd(row, cmd)">
+                <el-button size="small" type="info" link>
+                  更多<el-icon class="more-caret"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="stat">统计</el-dropdown-item>
+                    <el-dropdown-item command="security">安全</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </template>
         </el-table-column>
@@ -244,8 +244,8 @@
         </el-form-item>
 
         <el-form-item label="域名 / IP" prop="domain">
-          <el-input v-model="form.domain" placeholder="如 example.com 或 1.2.3.4（必填）" />
-          <span class="tip">支持 *.example.com 通配符；多个域名用逗号分隔，主域名作为网站名称</span>
+          <el-input v-model="form.domain" placeholder="如 example.com 或 1.2.3.4:8080（必填）" />
+          <span class="tip">支持 *.example.com 通配符；可带访问端口（如 domain:18083，创建时自动放行该端口防火墙）；多个域名用逗号分隔，主域名作为网站名称</span>
         </el-form-item>
         <el-form-item label="网站名称" prop="name">
           <el-input v-model="form.name" placeholder="留空自动使用完整域名" maxlength="64" />
@@ -351,19 +351,24 @@
             <el-input v-model="form.root" placeholder="如 /www/wwwroot/站点名（留空自动创建）" />
           </el-form-item>
           <el-form-item label="框架" prop="framework">
-            <el-select v-model="form.framework" style="width: 100%">
+            <el-select v-model="form.framework" style="width: 100%" @change="onPythonFrameworkChange">
               <el-option label="通用（自定义启动命令）" value="generic" />
               <el-option label="Flask" value="flask" />
               <el-option label="Django" value="django" />
             </el-select>
+            <span class="tip">选择框架会自动填入推荐启动命令（可手动修改）</span>
           </el-form-item>
           <el-form-item label="启动命令" prop="start_command">
             <el-input v-model="form.start_command" :placeholder="frameworkHint" />
-            <span class="tip">将由 systemd 守护运行</span>
+            <span class="tip">支持 && / 变量赋值等 shell 语法，由 systemd 守护运行</span>
+          </el-form-item>
+          <el-form-item label="安装命令">
+            <el-input v-model="form.install_command" placeholder="选填，如 pip install -r requirements.txt" />
+            <span class="tip">创建时在项目目录执行一次，用于安装依赖</span>
           </el-form-item>
           <el-form-item label="项目端口" prop="proxy_port">
             <el-input-number v-model="form.proxy_port" :min="1" :max="65535" />
-            <span class="tip">站点将反代到 127.0.0.1:{{ form.proxy_port }}</span>
+            <span class="tip">站点将反代到 127.0.0.1:{{ form.proxy_port }}；同时注入 PORT 环境变量</span>
           </el-form-item>
           <el-form-item label="环境变量">
             <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个，可选" />
@@ -385,11 +390,15 @@
           </el-form-item>
           <el-form-item label="启动命令" prop="start_command">
             <el-input v-model="form.start_command" placeholder="如 npm run start / node app.js" />
-            <span class="tip">将由 systemd 守护运行</span>
+            <span class="tip">支持 && / 变量赋值等 shell 语法，由 systemd 守护运行</span>
+          </el-form-item>
+          <el-form-item label="安装命令">
+            <el-input v-model="form.install_command" placeholder="选填，如 npm install && npm run build" />
+            <span class="tip">创建时在项目目录执行一次，用于安装依赖 / 构建</span>
           </el-form-item>
           <el-form-item label="项目端口" prop="proxy_port">
             <el-input-number v-model="form.proxy_port" :min="1" :max="65535" />
-            <span class="tip">站点将反代到 127.0.0.1:{{ form.proxy_port }}</span>
+            <span class="tip">站点将反代到 127.0.0.1:{{ form.proxy_port }}；同时注入 PORT 环境变量</span>
           </el-form-item>
           <el-form-item label="环境变量">
             <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个，可选" />
@@ -441,6 +450,7 @@
         <template v-else-if="form.type === 'proxy'">
           <el-form-item label="代理目标" prop="proxy_pass">
             <el-input v-model="form.proxy_pass" placeholder="如 http://127.0.0.1:3000 或 https://api.example.com" />
+            <span class="tip">省略 http:// 会自动补全；已支持 WebSocket 与上传大文件</span>
           </el-form-item>
         </template>
       </el-form>
@@ -484,7 +494,7 @@
       </div>
       <div class="del-options">
         <el-checkbox v-model="delOptions.conf" disabled>网站配置（必删：Web 服务器配置/进程服务）</el-checkbox>
-        <el-checkbox v-if="delSite && delSite.type !== 'proxy'" v-model="delOptions.root">站点目录（{{ delSite.root }}）</el-checkbox>
+        <el-checkbox v-if="delSite && delSite.root" v-model="delOptions.root">站点目录（{{ delSite.root }}）</el-checkbox>
         <el-checkbox v-if="delSite && delSite.type === 'php'" v-model="delOptions.db">数据库（{{ delSite.name }}）</el-checkbox>
         <el-checkbox v-if="delSite && delSite.type === 'php'" v-model="delOptions.ftp">FTP 用户（{{ delSite.name }}）</el-checkbox>
       </div>
@@ -677,15 +687,11 @@ const isMobile = ref(false)
 const isCompact = ref(false) // 768–1199：紧凑布局，砍掉次要列避免横向溢出产生空隙
 const dialogWidth = computed(() => isMobile.value ? '92vw' : '620px')
 const labelPosition = computed(() => isMobile.value ? 'top' : 'left')
-// 列显隐：紧凑态隐藏「名称 / 运行版本 / SSL」三个次要列；移动端再额外隐藏更多
-const showNameCol = computed(() => !isMobile.value && !isCompact.value)
-const showRuntimeCol = computed(() => !isMobile.value && !isCompact.value)
-const showSslCol = computed(() => !isMobile.value && !isCompact.value)
-// 域名列宽度：固定收窄到贴合内容（域名文本 + 复制 + 二维码 ≈ 170~200），
-// 不再作为弹性列吸走表格剩余空间，避免列内出现大块空隙
-const domainWidth = computed(() => isMobile.value ? 200 : isCompact.value ? 190 : 210)
-// 操作列宽度：按内容自适应（5 个 link 按钮约需 186px），避免右对齐后左侧留出大块空隙
-const opsWidth = computed(() => isMobile.value ? 190 : isCompact.value ? 196 : 200)
+// 域名列用 min-width 弹性宽度：内容过长时优先拉伸该列以完整显示域名，
+// 仅在空间确实不足时再由 show-overflow-tooltip 折叠（不再用固定 width 硬截断）
+const domainMinWidth = computed(() => isMobile.value ? 150 : 180)
+// 操作列宽度：按内容自适应，避免右对齐后左侧留出大块空隙
+const opsWidth = computed(() => isMobile.value ? 152 : isCompact.value ? 196 : 200)
 // 端口 / 类型 / 运行版本 三列单元格左右各 12px 内边距：用 el-table 的 cell-style 返回内联样式，
 // 优先级最高，必定覆盖 el-table 默认 td 内边距（class-name / 列上 cell-style 在该版本无效）
 function padCellStyle({ column }) {
@@ -934,6 +940,7 @@ const form = reactive({
   proxy_port: 3000,
   proxy_pass: '',
   framework: 'generic',
+  install_command: '',
   create_db: false,
   db_name: '',
   db_user: '',
@@ -959,6 +966,18 @@ const frameworkHint = computed(() => {
     default: return '如 python app.py'
   }
 })
+
+// 切换 Python 框架时自动填入推荐启动命令（用户可手动修改）
+function onPythonFrameworkChange() {
+  const port = form.proxy_port || 3000
+  if (form.framework === 'flask') {
+    form.start_command = `gunicorn -w 2 -b 127.0.0.1:${port} app:app`
+  } else if (form.framework === 'django') {
+    form.start_command = `gunicorn -w 2 -b 127.0.0.1:${port} yourproject.wsgi`
+  } else {
+    form.start_command = 'python app.py'
+  }
+}
 
 // ====== 创建网站辅助：根目录/数据库/FTP 自动填充 & 安装检测 ======
 
@@ -998,10 +1017,9 @@ const rootPreview = computed(() => {
 })
 // root 当前是不是由我们自动推断？用户手动改过则视为"已锁定"，不再覆盖
 const rootAuto = ref(false)
-// root 字段 placeholder：让用户清楚默认推断规则
-const rootPlaceholder = computed(() =>
-  `留空默认 ${rootPreview.value}（按完整域名，或未填域名回退到站点名）`
-)
+// root 字段 placeholder：只保留关键信息（默认路径下方 tip 已有说明），
+// 避免文案过长在移动端窄输入框里被截断
+const rootPlaceholder = computed(() => `留空默认 ${rootPreview.value}`)
 
 // n 位 [a-z0-9] 随机串（用于 db 名 / ftp 用户名后缀）
 function rand(n) {
@@ -1332,10 +1350,14 @@ async function loadSites() {
 // 接收参数：{ id, domain, domains }（由 SiteSettings.vue emit 上传）
 function onSiteSettingsSaved(payload) {
   if (!payload || !payload.id) return
-  const row = sites.value.find(s => s.id === payload.id)
-  if (!row) return
-  row.domain = payload.domain || row.domain || ''
-  row.domains = payload.domains || row.domains || ''
+  const idx = sites.value.findIndex(s => s.id === payload.id)
+  if (idx < 0) return
+  // 用 Object.assign 触发 Vue 响应式更新，确保模板中 siteAllDomains(row) 等计算即时刷新
+  const row = sites.value[idx]
+  Object.assign(row, {
+    domain: payload.domain !== undefined ? payload.domain : row.domain,
+    domains: payload.domains !== undefined ? payload.domains : row.domains,
+  })
   if (payload.name !== undefined) row.name = payload.name
   if (payload.root !== undefined) row.root = payload.root
 }
@@ -1357,7 +1379,7 @@ async function openCreate() {
   Object.assign(form, {
     name: '', domain: '', port: 80, type: defaultType,
     root: '', runtime_version: '', start_command: '', env_vars: '',
-    proxy_port: 3000, proxy_pass: '', framework: 'generic',
+    proxy_port: 3000, proxy_pass: '', framework: 'generic', install_command: '',
     create_db: false, db_name: '', db_user: '', db_password: '',
     create_ftp: false, ftp_username: '', ftp_password: '',
     remark: ''
@@ -1389,7 +1411,28 @@ function buildPayload() {
     if (!p.root) p.root = `/www/wwwroot/${p.name}`
     p.proxy_pass = `http://127.0.0.1:${form.proxy_port}`
   }
+  // 安装命令仅 node/python 使用、框架仅 python 使用，避免切换类型后残留误传
+  if (form.type !== 'node' && form.type !== 'python') p.install_command = ''
+  if (form.type !== 'python') p.framework = ''
+  // 项目端口仅进程型站点（node/python/go）有意义：其余类型清空，
+  // 避免默认值 3000 被无意义落库，导致后续进程型站点被误判端口冲突
+  if (form.type !== 'node' && form.type !== 'python' && form.type !== 'go') p.proxy_port = 0
+  // 反向代理：省略协议时自动补 http://（与后端 normalizeProxyPass 保持一致）
+  if (form.type === 'proxy' && p.proxy_pass) {
+    const v = String(p.proxy_pass).trim()
+    p.proxy_pass = /^https?:\/\//i.test(v) ? v : `http://${v}`
+  }
   return p
+}
+
+// 创建结果提示：后端返回 deploy_warning（如进程服务启动失败）时给出可关闭的告警
+function showCreateResult(site) {
+  const warn = site?.deploy_warning
+  if (warn) {
+    ElMessage.warning({ message: '网站已创建，但存在问题：' + warn, duration: 10000, showClose: true })
+  } else {
+    ElMessage.success('网站创建成功')
+  }
 }
 
 // 复制域名到剪贴板（含降级方案）
@@ -1453,8 +1496,8 @@ async function submit() {
 
   submitting.value = true
   try {
-    await request.post('/site/create', buildPayload())
-    ElMessage.success('网站创建成功')
+    const res = await request.post('/site/create', buildPayload())
+    showCreateResult(res.data)
     createVisible.value = false
     loadSites()
   } catch (e) { /* interceptor handles */ } finally {
@@ -1493,7 +1536,7 @@ async function submitGoSite() {
       pendingCreate.value = { siteId: site.id, siteName: site.name }
       entryVisible.value = true
     } else {
-      ElMessage.success('网站创建成功')
+      showCreateResult(site)
     }
   } catch (e) {
     ElMessage.error(e?.response?.data?.msg || e?.message || '创建失败')
@@ -1673,6 +1716,13 @@ async function openSecurity(row) {
 async function openSSL(row) {
   sslSite.value = row
   sslVisible.value = true
+}
+
+// 操作列「更多」下拉：把 统计 / 安全 / 删除 收进菜单
+function onMoreCmd(row, cmd) {
+  if (cmd === 'stat') openStat(row)
+  else if (cmd === 'security') openSecurity(row)
+  else if (cmd === 'delete') remove(row)
 }
 
 // 默认页面抽屉
@@ -1906,6 +1956,15 @@ onBeforeUnmount(() => {
 }
 ::deep(.ops-cell .el-button.is-link + .el-button.is-link) {
   margin-left: 0;
+}
+/* 移动端「更多」下拉：箭头贴近文字，并去掉 el-dropdown 默认外边距 */
+:deep(.ops-cell .el-dropdown) {
+  margin-left: 0;
+  line-height: 1;
+}
+:deep(.ops-cell .more-caret) {
+  margin-left: 2px;
+  font-size: 12px;
 }
 
 @media (max-width: 767px) {

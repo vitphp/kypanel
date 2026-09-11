@@ -129,6 +129,8 @@ type SiteSettingsReq struct {
 	EnvVars          string             `json:"env_vars"`
 	ProxyPort        int                `json:"proxy_port"`
 	RuntimeVersion   string             `json:"runtime_version"`
+	InstallCommand   string             `json:"install_command"`
+	Framework        string             `json:"framework"`
 }
 
 // RedirectRuleItem 单条重定向规则
@@ -353,21 +355,34 @@ func saveBaseTab(s *model.Site, req SiteSettingsReq) error {
 		s.RuntimeDir = rd
 	}
 
+	// 项目端口仅进程型站点（node/python/go）有意义：其它类型清零，
+	// 避免表单默认值残留，导致后续进程型站点被误判端口冲突
+	if !isRuntimeSite(s.Type) {
+		s.ProxyPort = 0
+	}
+
 	// 反向代理目标
 	switch {
 	case s.Type == model.SiteTypeProxy:
-		pp := strings.TrimSpace(req.ProxyPass)
-		if pp == "" {
-			return errors.New("反向代理目标不能为空")
+		pp, err := normalizeProxyPass(req.ProxyPass)
+		if err != nil {
+			return err
 		}
-		if !strings.HasPrefix(pp, "http://") && !strings.HasPrefix(pp, "https://") {
-			return errors.New("代理目标必须以 http:// 或 https:// 开头")
-		}
-		s.ProxyPass = strings.TrimRight(pp, "/")
+		s.ProxyPass = pp
 	case isRuntimeSite(s.Type):
 		s.StartCommand = strings.TrimSpace(req.StartCommand)
 		s.EnvVars = req.EnvVars
+		s.InstallCommand = strings.TrimSpace(req.InstallCommand)
+		if fw := strings.TrimSpace(req.Framework); fw != "" {
+			s.Framework = fw
+		}
 		if req.ProxyPort > 0 && req.ProxyPort <= 65535 {
+			if req.ProxyPort == s.Port {
+				return errors.New("应用运行端口不能与站点监听端口相同")
+			}
+			if err := checkProxyPortConflict(s.Name, req.ProxyPort); err != nil {
+				return err
+			}
 			s.ProxyPort = req.ProxyPort
 		}
 		if s.StartCommand == "" {
@@ -614,15 +629,24 @@ func rewriteSiteService(s *model.Site) error {
 		return nil
 	}
 	// 复用创建逻辑重新生成 runner，然后重启服务
-	if err := writeSiteService(s); err != nil {
+	if err := writeSiteService(s, true); err != nil {
 		return err
 	}
-	res, err := ExecCommand(fmt.Sprintf("systemctl daemon-reload && systemctl restart %s", siteServiceName(s.Name)), 30*time.Second)
+	name := siteServiceName(s.Name)
+	res, err := ExecCommand(fmt.Sprintf("systemctl daemon-reload && systemctl restart %s", name), 30*time.Second)
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return errors.New(strings.TrimSpace(res.Stderr))
+		out := strings.TrimSpace(res.Stderr)
+		// 服务因失败次数过多被 systemd 锁定（start was attempted too often）时，
+		// 先 reset-failed 解除锁定再重启一次，否则会直接报错导致本次设置失败。
+		if strings.Contains(out, "attempted too often") || strings.Contains(out, "reset-failed") {
+			if _, rerr := ExecCommand(fmt.Sprintf("systemctl reset-failed %s && systemctl restart %s", name, name), 30*time.Second); rerr == nil {
+				return nil
+			}
+		}
+		return errors.New(out)
 	}
 	return nil
 }
