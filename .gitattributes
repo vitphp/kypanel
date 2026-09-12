@@ -1,0 +1,16 @@
+# 缁熶竴鎹㈣绗︿负 LF锛岄伩鍏?Windows 妫€鍑烘椂 LF鈫扖RLF 鍙嶅杞崲浜х敓鍣煶璀﹀憡
+# text 鏂囦欢涓€寰嬩互 LF 瀛樺偍銆丩F 妫€鍑猴紝璺ㄥ钩鍙颁竴鑷?
+* text=auto eol=lf
+
+# 浜岃繘鍒舵枃浠朵笉鍋氭崲琛岀杞崲
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.xdb binary
+*.db binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
