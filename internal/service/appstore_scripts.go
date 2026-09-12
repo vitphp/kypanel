@@ -180,6 +180,19 @@ func init() {
 			Remarks:         "安装后可在「网站管理」中选择该版本；支持与其它 Go 版本共存",
 		})
 	}
+	// Apache Tomcat（Servlet 容器，用于部署传统 war 包 Java 项目）
+	appMetas = append(appMetas, AppMeta{
+		Key: "tomcat", Name: "Tomcat", Category: CatServer, Icon: "Guide",
+		Description: "Apache Tomcat 9 Servlet 容器，用于部署传统 war 包 Java 项目（Spring Boot jar 无需 Tomcat）",
+		// 服务名固定为面板自己创建的 tomcat.service（发行版包名/服务名不一致，故用官方 tarball + 自建 unit）
+		Service: "tomcat",
+		// 从 RELEASE-NOTES 里提取版本号：该文件首行是分隔线（"====="），
+		// 不能用 head -n1（会把分隔线当版本）；version.sh 需启动 JVM 且探测只有 2s，也不可靠。
+		VersionCmd:      `grep -m1 -oE '9\.0\.[0-9]+' /opt/tomcat/RELEASE-NOTES 2>/dev/null || true`,
+		InstallScript:   tomcatInstallScript(),
+		UninstallScript: tomcatUninstallScript(),
+		Remarks:         "安装后可把 war 包上传到 /opt/tomcat/webapps 并重启 Tomcat；对外访问请建「反向代理」站点指向 http://127.0.0.1:8080",
+	})
 	// FTP 服务器（vsftpd），配套「FTP 管理」账号
 	appMetas = append(appMetas, AppMeta{
 		Key: "ftp", Name: "FTP (vsftpd)", Category: CatServer, Icon: "Upload",
@@ -1021,3 +1034,139 @@ fi
 rm -f /usr/local/bin/sqlcmd
 rm -rf /var/opt/mssql /opt/mssql
 echo "SQLServer 已卸载"`
+
+// tomcatInstallScript Apache Tomcat 9 一键安装脚本。
+// 设计取舍：
+//   1. 用官方 tarball 而非发行版包：Debian 只有 tomcat10（Jakarta EE，跑不了 javax 老 war），
+//      RHEL 包名/服务名又与 Debian 不同；tarball + 自建 systemd unit 可保证路径与服务名统一。
+//   2. 版本号靠解析 Apache 目录列表取最新 9.0.x（写死补丁号会因版本下架 404），并保留归档站兜底。
+//   3. 8080 被占用时自动改用 18080，避免安装即失败。
+func tomcatInstallScript() string {
+	return `#!/bin/bash
+set -e
+
+# 1. Tomcat 需要 JVM：未安装 java 时先装一个 JDK
+if ! command -v java >/dev/null 2>&1; then
+    echo "未检测到 java，先安装 JDK..."
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y default-jdk-headless >/dev/null 2>&1 \
+            || DEBIAN_FRONTEND=noninteractive apt-get install -y default-jdk
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        PM=dnf
+        command -v dnf >/dev/null 2>&1 || PM=yum
+        $PM install -y java-17-openjdk-headless || $PM install -y java-1.8.0-openjdk
+    fi
+fi
+command -v java >/dev/null 2>&1 || { echo "未找到 java，请先在应用商店安装 Java (OpenJDK)"; exit 1; }
+
+# 2. 解析最新 Tomcat 9.0.x 版本
+# 国内镜像优先：dlcdn.apache.org 在国内经常超时（实测 20s 连接超时），
+# 排在前面会让安装长时间卡在下载上。
+VER=""; BASE=""
+for b in \
+    https://mirrors.aliyun.com/apache/tomcat/tomcat-9 \
+    https://mirrors.tuna.tsinghua.edu.cn/apache/tomcat/tomcat-9 \
+    https://dlcdn.apache.org/tomcat/tomcat-9; do
+    V=$(curl -fsSL --connect-timeout 8 --max-time 20 "$b/" 2>/dev/null | grep -oE 'v9\.0\.[0-9]+' | sort -t. -k3 -n | tail -n1)
+    if [ -n "$V" ]; then VER="$V"; BASE="$b"; break; fi
+done
+# 兜底：固定版本逐个探测（归档站 + 镜像；避免版本已下架时直接失败）
+if [ -z "$VER" ]; then
+    for v in v9.0.121 v9.0.118 v9.0.113 v9.0.108 v9.0.107 v9.0.106 v9.0.105 v9.0.102 v9.0.98; do
+        for b in https://mirrors.aliyun.com/apache/tomcat/tomcat-9 https://archive.apache.org/dist/tomcat/tomcat-9; do
+            if curl -fsI --connect-timeout 8 --max-time 15 \
+                "$b/$v/bin/apache-tomcat-${v#v}.tar.gz" >/dev/null 2>&1; then
+                VER="$v"; BASE="$b"; break 2
+            fi
+        done
+    done
+fi
+[ -n "$VER" ] || { echo "无法获取 Tomcat 版本号，请检查服务器到镜像站/apache.org 的网络"; exit 1; }
+FULL="${VER#v}"
+echo "准备安装 Apache Tomcat $FULL（源：$BASE）"
+
+# 3. 下载并解压到 /opt/tomcat（镜像优先 + 单源限时，避免整体卡死）
+TMP=$(mktemp -d)
+OK=0
+for u in \
+    "https://mirrors.aliyun.com/apache/tomcat/tomcat-9/$VER/bin/apache-tomcat-$FULL.tar.gz" \
+    "https://mirrors.tuna.tsinghua.edu.cn/apache/tomcat/tomcat-9/$VER/bin/apache-tomcat-$FULL.tar.gz" \
+    "$BASE/$VER/bin/apache-tomcat-$FULL.tar.gz" \
+    "https://archive.apache.org/dist/tomcat/tomcat-9/$VER/bin/apache-tomcat-$FULL.tar.gz" \
+    "https://dlcdn.apache.org/tomcat/tomcat-9/$VER/bin/apache-tomcat-$FULL.tar.gz"; do
+    echo "下载: $u"
+    if curl -fsSL --retry 1 --connect-timeout 10 --max-time 180 -o "$TMP/tomcat.tgz" "$u" && [ -s "$TMP/tomcat.tgz" ]; then
+        OK=1; break
+    fi
+    rm -f "$TMP/tomcat.tgz"
+done
+if [ "$OK" != "1" ]; then
+    echo "Tomcat 安装包下载失败（已尝试国内镜像与官方源）"
+    rm -rf "$TMP"
+    exit 1
+fi
+systemctl stop tomcat >/dev/null 2>&1 || true
+rm -rf /opt/tomcat
+mkdir -p /opt/tomcat
+tar -xzf "$TMP/tomcat.tgz" -C /opt/tomcat --strip-components=1
+rm -rf "$TMP"
+chmod +x /opt/tomcat/bin/*.sh
+
+# 4. 写入 JAVA_HOME 与内存参数（setenv.sh 会被 catalina.sh 自动加载）
+JAVABIN=$(readlink -f "$(command -v java)")
+JAVA_HOME_DIR=$(dirname "$(dirname "$JAVABIN")")
+cat > /opt/tomcat/bin/setenv.sh <<EOF
+export JAVA_HOME="$JAVA_HOME_DIR"
+export CATALINA_OPTS="-Xms256m -Xmx512m -Dfile.encoding=UTF-8"
+EOF
+chmod +x /opt/tomcat/bin/setenv.sh
+echo "JAVA_HOME=$JAVA_HOME_DIR"
+
+# 5. 端口：8080 被占用时自动改用 18080，避免安装即失败
+PORT=8080
+if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -qE ':8080[[:space:]]'; then
+    PORT=18080
+fi
+sed -i "s/port=\"8080\"/port=\"$PORT\"/g" /opt/tomcat/conf/server.xml
+echo "Tomcat HTTP 端口: $PORT"
+
+# 6. systemd 单元（固定服务名 tomcat，便于面板启停）
+cat > /etc/systemd/system/tomcat.service <<'EOF'
+[Unit]
+Description=Apache Tomcat 9 (kypanel)
+After=network.target
+
+[Service]
+Type=forking
+Environment=CATALINA_HOME=/opt/tomcat
+Environment=CATALINA_BASE=/opt/tomcat
+Environment=CATALINA_PID=/opt/tomcat/temp/tomcat.pid
+ExecStart=/opt/tomcat/bin/startup.sh
+ExecStop=/opt/tomcat/bin/shutdown.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable tomcat >/dev/null 2>&1 || true
+systemctl restart tomcat
+sleep 3
+systemctl is-active tomcat >/dev/null 2>&1 || { echo "Tomcat 启动失败，请查看 /opt/tomcat/logs/catalina.out"; exit 1; }
+echo "Tomcat 安装完成：webapps=/opt/tomcat/webapps，端口=$PORT"
+echo "部署 war：把 war 放到 /opt/tomcat/webapps/ 后执行 systemctl restart tomcat"
+`
+}
+
+// tomcatUninstallScript 卸载 Tomcat（停止并删除服务与安装目录）
+func tomcatUninstallScript() string {
+	return `#!/bin/bash
+systemctl stop tomcat 2>/dev/null || true
+systemctl disable tomcat 2>/dev/null || true
+rm -f /etc/systemd/system/tomcat.service
+systemctl daemon-reload 2>/dev/null || true
+rm -rf /opt/tomcat
+echo "Tomcat 已卸载"`
+}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -46,7 +47,7 @@ func ensureMailboxDirs(domain, user string) error {
 	return nil
 }
 
-// DeliverMessage 把一封原始邮件投递到某账号的 maildir 并入库索引。
+// DeliverMessage 把一封原始邮件投递到某真实账号的 maildir 并入库索引。
 // 原子落盘：先写 tmp，再 rename 到 new。domain/user 均已小写规范化。
 func DeliverMessage(domain, user string, raw []byte) (*model.MailMessage, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
@@ -54,13 +55,62 @@ func DeliverMessage(domain, user string, raw []byte) (*model.MailMessage, error)
 	if domain == "" || user == "" {
 		return nil, errors.New("投递地址不完整")
 	}
+	if err := checkMailDomainEnabled(domain); err != nil {
+		return nil, err
+	}
 	box, err := findMailboxByAddress(domain, user)
 	if err != nil || box == nil {
 		return nil, errors.New("收件账号不存在")
 	}
+	return deliverToMailbox(box, raw)
+}
+
+// DeliverInbound 入站投递入口：真实账号优先，其次按别名展开（支持别名为外域地址）。
+// envelopeFrom 为信封发件人（别名转发/退信使用）。
+func DeliverInbound(envelopeFrom, domain, user string, raw []byte) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	user = strings.ToLower(strings.TrimSpace(user))
+	if domain == "" || user == "" {
+		return errors.New("投递地址不完整")
+	}
+	if err := checkMailDomainEnabled(domain); err != nil {
+		return err
+	}
+	if box, err := findMailboxByAddress(domain, user); err == nil && box != nil {
+		if _, err := deliverToMailbox(box, raw); err != nil {
+			return err
+		}
+		return nil
+	}
+	var alias model.MailAlias
+	if err := model.DB.Where("domain = ? AND source = ? AND enabled = ?", domain, user, true).
+		First(&alias).Error; err == nil {
+		return deliverToAlias(&alias, envelopeFrom, raw)
+	}
+	return errors.New("收件账号不存在")
+}
+
+// checkMailDomainEnabled 校验邮箱域名存在且启用（停用后不再收信）。
+func checkMailDomainEnabled(domain string) error {
+	var cnt int64
+	model.DB.Model(&model.MailDomain{}).
+		Where("domain = ? AND enabled = ?", domain, true).Count(&cnt)
+	if cnt == 0 {
+		return errors.New("该域名邮箱未启用")
+	}
+	return nil
+}
+
+// deliverToMailbox 投递到真实账号：容量校验 → 落盘 → 建索引 → 计容量 → 收信后处理。
+func deliverToMailbox(box *model.Mailbox, raw []byte) (*model.MailMessage, error) {
 	if !box.Enabled {
 		return nil, errors.New("收件账号已停用")
 	}
+	if err := CheckMailboxCanReceive(box, int64(len(raw))); err != nil {
+		RecordMailLog("in", box.Domain, box.ID, "", box.Address(), "", int64(len(raw)), "reject", err.Error(), "")
+		return nil, err
+	}
+	domain, user := box.Domain, box.Name
 	if err := ensureMailboxDirs(domain, user); err != nil {
 		return nil, err
 	}
@@ -83,7 +133,55 @@ func DeliverMessage(domain, user string, raw []byte) (*model.MailMessage, error)
 		slog.Warn("邮件已落盘但索引入库失败，文件保留于 maildir", "domain", domain, "user", user, "file", fname)
 		return meta, nil
 	}
+	AddMailboxStorage(box.ID, int64(len(raw)))
+	RecordMailLog("in", box.Domain, box.ID, meta.FromAddr, meta.Address, meta.Subject,
+		int64(len(raw)), "ok", "", "")
+	go postDeliverActions(*box, meta, raw)
 	return meta, nil
+}
+
+// deliverToAlias 按别名展开投递：目标为本地账号则直接投递，外域则入外发队列。
+func deliverToAlias(alias *model.MailAlias, envelopeFrom string, raw []byte) error {
+	targets := splitAddrList(alias.Target)
+	if len(targets) == 0 {
+		return errors.New("别名未配置目标地址")
+	}
+	if envelopeFrom == "" {
+		envelopeFrom = "postmaster@" + alias.Domain
+	}
+	var firstErr error
+	okCount := 0
+	for _, t := range targets {
+		d, n := splitLocalAddress(strings.ToLower(t))
+		if d == "" || n == "" {
+			firstErr = fmt.Errorf("别名目标地址无效: %s", t)
+			continue
+		}
+		if isLocalMailDomain(d) {
+			if box, err := findMailboxByAddress(d, n); err == nil && box != nil {
+				if _, err := deliverToMailbox(box, raw); err != nil {
+					firstErr = err
+					continue
+				}
+				okCount++
+				continue
+			}
+		}
+		if err := EnqueueOutbox(envelopeFrom, alias.DomainID, 0, []string{t}, raw, extractMessageID(raw)); err != nil {
+			firstErr = err
+			continue
+		}
+		okCount++
+	}
+	if okCount == 0 {
+		if firstErr != nil {
+			return firstErr
+		}
+		return errors.New("别名目标地址无效")
+	}
+	RecordMailLog("in", alias.Domain, 0, envelopeFrom, alias.Source+"@"+alias.Domain,
+		"", int64(len(raw)), "ok", "已按别名转发到 "+alias.Target, "")
+	return nil
 }
 
 // findMailboxByAddress 按 domain + user 查账号
@@ -93,6 +191,141 @@ func findMailboxByAddress(domain, user string) (*model.Mailbox, error) {
 		return nil, err
 	}
 	return &box, nil
+}
+
+// mailboxExists 判断某域 + 用户是否为可投递收件人（真实账号或别名）。
+func mailboxExists(domain, user string) bool {
+	var cnt int64
+	model.DB.Model(&model.Mailbox{}).
+		Where("domain = ? AND name = ? AND enabled = ?", domain, user, true).Count(&cnt)
+	if cnt > 0 {
+		return true
+	}
+	model.DB.Model(&model.MailAlias{}).
+		Where("domain = ? AND source = ? AND enabled = ?", domain, user, true).Count(&cnt)
+	return cnt > 0
+}
+
+// isLocalMailDomainAddr 判断地址是否属于本站邮箱域名
+func isLocalMailDomainAddr(addr string) bool {
+	return isLocalMailDomain(domainOf(addr))
+}
+
+// ===== 收信后处理：转发 / 自动回复 =====
+
+// postDeliverActions 收信后异步执行：转发（可按需删除本地副本）+ 自动回复。
+func postDeliverActions(box model.Mailbox, meta *model.MailMessage, raw []byte) {
+	fwd := splitAddrList(box.ForwardTo)
+	if len(fwd) > 0 {
+		if forwardMail(box, meta, fwd, raw) && !box.KeepCopy && meta != nil {
+			_ = deleteMailboxMessage(box.ID, meta.ID)
+		}
+	}
+	if box.AutoReplyOn && strings.TrimSpace(box.AutoReplyText) != "" {
+		autoReplyMail(box, meta)
+	}
+}
+
+// forwardMail 把来信转发到目标地址（本地直接投递，外域入队列）。返回是否全部成功。
+func forwardMail(box model.Mailbox, meta *model.MailMessage, targets []string, raw []byte) bool {
+	allOK := true
+	for _, t := range targets {
+		d, n := splitLocalAddress(strings.ToLower(t))
+		if d == "" || n == "" {
+			allOK = false
+			continue
+		}
+		if isLocalMailDomain(d) {
+			if target, err := findMailboxByAddress(d, n); err == nil && target != nil {
+				if _, err := deliverToMailbox(target, raw); err != nil {
+					slog.Warn("转发到本地账号失败", "to", t, "err", err)
+					allOK = false
+				}
+				continue
+			}
+		}
+		if err := EnqueueOutbox(box.Address(), box.DomainID, box.ID, []string{t}, raw, extractMessageID(raw)); err != nil {
+			slog.Warn("转发入队失败", "to", t, "err", err)
+			allOK = false
+		}
+	}
+	if allOK {
+		RecordMailLog("out", box.Domain, box.ID, box.Address(), strings.Join(targets, ", "),
+			"FWD: "+meta.Subject, int64(len(raw)), "queued", "自动转发", "")
+	}
+	return allOK
+}
+
+// autoReplyGuard 自动回复频率保护：同一 (账号, 发件人) 1 小时内只回一次，防邮件轰炸。
+var (
+	autoReplyMu    sync.Mutex
+	autoReplySeen  = map[string]int64{}
+	autoReplyEvery = int64(3600)
+)
+
+// autoReplyMail 发送自动回复（跳过退信地址、本域地址与频率过高的发件人）。
+func autoReplyMail(box model.Mailbox, meta *model.MailMessage) {
+	from := strings.TrimSpace(meta.FromAddr)
+	if from == "" || !strings.Contains(from, "@") {
+		return
+	}
+	lower := strings.ToLower(from)
+	if strings.HasPrefix(lower, "mailer-daemon") || strings.HasPrefix(lower, "postmaster") ||
+		strings.HasPrefix(lower, "no-reply") || strings.HasPrefix(lower, "noreply") {
+		return
+	}
+	// 不回复本站地址（避免两个自动回复互刷）
+	if isLocalMailDomainAddr(from) {
+		return
+	}
+	// 主题已是回复或自动回复，避免环
+	subj := strings.TrimSpace(meta.Subject)
+	if strings.HasPrefix(strings.ToLower(subj), "re:") || strings.Contains(subj, "自动回复") {
+		return
+	}
+	key := fmt.Sprintf("%d|%s", box.ID, lower)
+	now := time.Now().Unix()
+	autoReplyMu.Lock()
+	if last, ok := autoReplySeen[key]; ok && now-last < autoReplyEvery {
+		autoReplyMu.Unlock()
+		return
+	}
+	autoReplySeen[key] = now
+	autoReplyMu.Unlock()
+
+	replySubject := subj
+	if replySubject == "" {
+		replySubject = "（无主题）"
+	}
+	if _, err := SendMail(SendMailRequest{
+		MailboxID: box.ID,
+		To:        []string{from},
+		Subject:   "自动回复: " + replySubject,
+		TextBody:  box.AutoReplyText,
+	}); err != nil {
+		slog.Warn("自动回复发送失败", "to", from, "err", err)
+		return
+	}
+	RecordMailLog("out", box.Domain, box.ID, box.Address(), from, "自动回复: "+replySubject,
+		0, "queued", "自动回复", "")
+}
+
+// StartMailAutoReplyJanitor 清理自动回复频率表的过期项。
+func StartMailAutoReplyJanitor() {
+	go func() {
+		t := time.NewTicker(30 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			cut := time.Now().Unix() - autoReplyEvery
+			autoReplyMu.Lock()
+			for k, v := range autoReplySeen {
+				if v < cut {
+					delete(autoReplySeen, k)
+				}
+			}
+			autoReplyMu.Unlock()
+		}
+	}()
 }
 
 // parseMessageMeta 解析原始邮件头部，填充索引元数据
@@ -357,7 +590,12 @@ func deleteMailboxMessage(mailboxID, msgID uint) error {
 			_ = os.Remove(filepath.Join(base, sub, rec.Filename))
 		}
 	}
-	return model.DB.Delete(&model.MailMessage{}, rec.ID).Error
+	if err := model.DB.Delete(&model.MailMessage{}, rec.ID).Error; err != nil {
+		return err
+	}
+	// 回收该邮件占用的容量
+	AddMailboxStorage(rec.MailboxID, -rec.RawSize)
+	return nil
 }
 
 // setMailboxMessageSeen 批量标记已读/未读

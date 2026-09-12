@@ -70,7 +70,7 @@
           <el-form-item label="网站名称">
             <el-input v-model="form.name" maxlength="255" show-word-limit placeholder="网站名称（可随意填写，支持汉字等任意字符）" />
           </el-form-item>
-          <el-form-item :label="site.type === 'node' || site.type === 'python' || site.type === 'go' ? '项目路径' : '网站目录'">
+          <el-form-item :label="['node', 'python', 'go', 'java'].includes(site.type) ? '项目路径' : '网站目录'">
             <div style="display: flex; gap: 8px;">
               <el-input v-model="form.root" :disabled="site.type === 'proxy'" />
               <el-button :disabled="site.type === 'proxy'" @click="openDirPicker">
@@ -139,7 +139,7 @@
             </el-form-item>
           </template>
 
-          <template v-if="site.type === 'node' || site.type === 'python' || site.type === 'go'">
+          <template v-if="['node', 'python', 'go', 'java'].includes(site.type)">
             <el-form-item label="运行版本">
               <el-select v-model="form.runtime_version" style="width: 100%" placeholder="选择运行版本">
                 <el-option v-for="o in runtimeEnvVersions[site.type] || []" :key="o.value" :label="o.label" :value="o.value" />
@@ -165,6 +165,16 @@
               <el-input v-model="form.install_command" placeholder="选填，如 npm install && npm run build / pip install -r requirements.txt" />
               <span class="tip">创建站点时在项目目录执行一次；在此仅保存，不会立即执行</span>
             </el-form-item>
+            <template v-if="site.type === 'java'">
+              <el-form-item label="jar 文件名">
+                <el-input v-model="form.jar_file" placeholder="如 app.jar 或 target/app.jar（相对项目路径）" />
+                <span class="tip">项目路径下要运行的 jar；留空则依赖已填的自定义启动命令</span>
+              </el-form-item>
+              <el-form-item label="JVM 参数">
+                <el-input v-model="form.jvm_args" placeholder="选填，如 -Xmx512m -Duser.timezone=GMT+08" />
+                <span class="tip">启动命令留空时，会拼成 java &lt;JVM参数&gt; -jar &lt;jar&gt; --server.port=&lt;端口&gt;</span>
+              </el-form-item>
+            </template>
             <el-form-item label="环境变量">
               <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个" />
             </el-form-item>
@@ -427,13 +437,13 @@ const runtimeDirOptions = ref([{ label: '使用网站目录', value: '' }])
 const runtimeEnvVersions = ref({}) // { python: [{value:'Python 3.13', label:'Python 3.13'}], node: [...], go: [...] }
 const runtimeVersionMissing = computed(() => {
   const t = site.value.type
-  if (!['python', 'node', 'go'].includes(t)) return false
+  if (!['python', 'node', 'go', 'java'].includes(t)) return false
   if (!form.runtime_version) return false
   return !(runtimeEnvVersions.value[t] || []).some(o => o.value === form.runtime_version)
 })
 
-// 进程型站点（python/node/go）才有独立运行日志
-const isRuntimeSite = computed(() => ['python', 'node', 'go'].includes(site.value.type))
+// 进程型站点（python/node/go/java）才有独立运行日志
+const isRuntimeSite = computed(() => ['python', 'node', 'go', 'java'].includes(site.value.type))
 const runtimeLog = ref(null)
 const logLoading = ref(false)
 async function loadRuntimeLog() {
@@ -477,7 +487,9 @@ const form = reactive({
   env_vars: '',
   proxy_port: 3000,
   runtime_version: '',
-  install_command: ''
+  install_command: '',
+  jvm_args: '',
+  jar_file: ''
 })
 
 // 重定向规则列表（多条）
@@ -621,6 +633,8 @@ function loadDetail(id) {
       php_fpm: d.php_fpm || '',
       proxy_pass: d.proxy_pass || '',
       start_command: d.start_command || '',
+      jvm_args: d.jvm_args || '',
+      jar_file: d.jar_file || '',
       env_vars: d.env_vars || '',
       proxy_port: d.proxy_port || 3000,
       runtime_version: d.runtime_version || '',
@@ -693,19 +707,25 @@ function loadPhpFpms() {
   }).catch(() => {})
 }
 
-// 加载已安装的运行时多版本（node / python / go），用于「运行版本」下拉
+// 加载已安装的运行时多版本（node / python / go / java），用于「运行版本」下拉
 function loadRuntimeVersions() {
   request.get('/apps/env-status').then((res) => {
     const data = res.data || {}
-    const map = { python: [], node: [], go: [] }
+    const map = { python: [], node: [], go: [], java: [] }
     for (const [key, meta] of Object.entries(data)) {
       if (!meta || !meta.installed) continue
       let t = ''
       if (key.startsWith('python')) t = 'python'
       else if (key.startsWith('node')) t = 'node'
       else if (key.startsWith('go')) t = 'go'
+      else if (key === 'java') t = 'java'
       else continue
-      const label = meta.name || key
+      let label = meta.name || key
+      if (t === 'java') {
+        // java 应用版本输出形如 openjdk 17.0.11 → 归一化为「Java 17.0」（与后端 runtimeVersionOf 一致）
+        const m = String(meta.version || '').match(/(\d+)(?:\.(\d+))?/)
+        if (m) label = 'Java ' + m[1] + (m[2] ? '.' + m[2] : '')
+      }
       map[t].push({ value: label, label })
     }
     runtimeEnvVersions.value = map
@@ -1082,7 +1102,9 @@ function buildSettingsPayload() {
         env_vars: form.env_vars,
         proxy_port: form.proxy_port,
         runtime_version: form.runtime_version,
-        install_command: form.install_command
+        install_command: form.install_command,
+        jvm_args: form.jvm_args,
+        jar_file: form.jar_file
       }
   }
 }

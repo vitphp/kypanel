@@ -698,6 +698,9 @@ func MailPortalRegister(host, name, password string) (*model.Mailbox, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !dom.Enabled {
+		return nil, errors.New("该域名邮箱已停用")
+	}
 	if !dom.PortalRegister {
 		return nil, errors.New("该站点未开放注册")
 	}
@@ -719,6 +722,9 @@ func MailPortalLogin(host, name, password string) (string, *model.Mailbox, error
 	dom, err := MailPortalDomainByHost(host)
 	if err != nil {
 		return "", nil, err
+	}
+	if !dom.Enabled {
+		return "", nil, errors.New("该域名邮箱已停用")
 	}
 	name = strings.TrimSpace(name)
 	if at := strings.IndexByte(name, '@'); at >= 0 {

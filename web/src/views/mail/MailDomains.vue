@@ -64,6 +64,7 @@
             <el-tab-pane label="已发送" name="sent" />
             <el-tab-pane label="草稿" name="drafts" />
             <el-tab-pane label="账号管理" name="accounts" />
+            <el-tab-pane label="高级运维" name="ops" />
           </el-tabs>
         </div>
 
@@ -289,6 +290,11 @@
               </el-table>
             </template>
           </div>
+
+          <!-- 高级运维：别名 / 账号策略 / 外发队列 / 收发信日志 / API 令牌 / 服务状态 -->
+          <div v-else-if="rightTab === 'ops'" class="mail-ops-pane">
+            <MailOpsPanel v-if="currentDomain" :domain="currentDomain" :domain-id="currentDomainId" />
+          </div>
         </div>
       </template>
     </section>
@@ -363,6 +369,27 @@
           <div v-if="dnsGuideData" class="md-dnsguide-body">
             <div v-for="(f, j) in dnsGuideData" :key="j" class="md-rec-field"><span class="md-rec-label">{{ f.label }}</span><span class="md-rec-val">{{ f.value }}</span><el-button v-if="f.copiable" link type="primary" size="small" @click="copy(f.value)">复制</el-button></div>
           </div>
+          <div class="md-dkim-box">
+            <div class="md-dkim-head">
+              <b>DKIM 签名</b>
+              <span class="md-dkim-status" :class="{ ok: dkimInfo.generated }">
+                {{ dkimInfo.generated ? '已生成（外发邮件自动签名，可防伪造/进垃圾箱）' : '未生成，建议立即生成（否则外发邮件易被判垃圾）' }}
+              </span>
+              <el-button size="small" type="primary" :loading="dkimLoading" @click="genDkim">
+                {{ dkimInfo.generated ? '重新生成' : '生成 DKIM 密钥' }}
+              </el-button>
+            </div>
+            <div v-if="dkimInfo.host" class="md-rec-field">
+              <span class="md-rec-label">主机记录</span>
+              <span class="md-rec-val">{{ dkimInfo.host }}</span>
+              <el-button link type="primary" size="small" @click="copy(dkimInfo.host)">复制</el-button>
+            </div>
+            <div v-if="dkimInfo.value" class="md-rec-field">
+              <span class="md-rec-label">记录值</span>
+              <span class="md-rec-val md-rec-break">{{ dkimInfo.value }}</span>
+              <el-button link type="primary" size="small" @click="copy(dkimInfo.value)">复制</el-button>
+            </div>
+          </div>
           <div class="md-dnsguide-foot">
             <el-button :loading="checking" @click="checkOne(currentRow)">再检测一次</el-button>
             <span v-if="currentRow && statusMap[currentRow.id]?.ready" class="md-status-ok" style="font-size:13px">✓ 已对接</span>
@@ -425,6 +452,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Loading, CircleCheckFilled, WarningFilled, Message, Promotion, EditPen, Refresh, Share, Paperclip, Document } from '@element-plus/icons-vue'
 import MailCompose from './MailCompose.vue'
 import MailPortalPanel from './MailPortalPanel.vue'
+import MailOpsPanel from './MailOpsPanel.vue'
 import { useIsMobile } from '../../composables/useIsMobile'
 import {
   listMailDomains, addMailDomain, updateMailDomain, deleteMailDomain,
@@ -432,7 +460,8 @@ import {
   listMailAccounts, addMailAccount, addMailAccountsBatch, randomMailAccounts,
   deleteMailAccount, setMailAccountEnabled,
   listMailMessages, getMailMessage, deleteMailMessage, setMailMessagesSeen,
-  markMailAllSeen, downloadMailAttachment, saveMailDraft
+  markMailAllSeen, downloadMailAttachment, saveMailDraft,
+  getMailDomainDkim, generateMailDomainDkim
 } from '../../api/mail'
 
 const list = ref([])
@@ -481,6 +510,10 @@ const dnsGuideData = ref([])
 const currentRow = ref(null)
 const portalPanelRef = ref(null)
 
+// DKIM（域名解析页签里可一键生成密钥，公钥用于 DNS TXT 记录）
+const dkimInfo = ref({ selector: '', generated: false, host: '', value: '' })
+const dkimLoading = ref(false)
+
 // 切到「门户网站」页签时再读取一次最新配置，避免沿用上一次打开的旧数据
 watch([configVisible, configTab], ([vis, tab]) => {
   if (vis && tab === 'portal') nextTick(() => portalPanelRef.value?.load())
@@ -490,7 +523,7 @@ watch([configVisible, configTab], ([vis, tab]) => {
 const currentDomain = ref(null)     // 当前选中的域名行对象
 // 右侧顶部 tab：inbox/sent/drafts/accounts，浏览器持久化（localStorage），下次进入沿用上次选择
 const MAIL_TAB_KEY = 'mail_right_tab'
-const VALID_TABS = ['inbox', 'sent', 'drafts', 'accounts']
+const VALID_TABS = ['inbox', 'sent', 'drafts', 'accounts', 'ops']
 const savedTab = (() => {
   try { const t = localStorage.getItem(MAIL_TAB_KEY); return VALID_TABS.includes(t) ? t : 'accounts' } catch { return 'accounts' }
 })()
@@ -1049,8 +1082,45 @@ async function openDnsGuide(row) {
   dnsGuideData.value = [
     { label: 'A 记录 · 记录值', value: srv, copiable: true },
     { label: 'MX 记录 · 记录值', value: 'mail.' + row.domain, copiable: true },
-    { label: 'TXT(SPF) · 记录值', value: 'v=spf1 ip4:' + srv + ' ~all', copiable: true }
+    { label: 'TXT(SPF) · 记录值', value: 'v=spf1 ip4:' + srv + ' ~all', copiable: true },
+    { label: 'TXT(DMARC) · 主机 _dmarc', value: 'v=DMARC1; p=quarantine; rua=mailto:postmaster@' + row.domain, copiable: true }
   ]
+  loadDkim(row)
+}
+
+// 读取该域名的 DKIM 公钥信息
+async function loadDkim(row) {
+  dkimInfo.value = { selector: '', generated: false, host: '', value: '' }
+  if (!row) return
+  try {
+    const { data } = await getMailDomainDkim(row.id)
+    dkimInfo.value = {
+      selector: data?.selector || '',
+      generated: !!data?.generated,
+      host: data?.host || '',
+      value: data?.generated ? (data?.value || '') : ''
+    }
+  } catch { /* ignore */ }
+}
+
+// 生成（或重新生成）DKIM 密钥
+async function genDkim() {
+  if (!currentRow.value) return
+  dkimLoading.value = true
+  try {
+    const { data } = await generateMailDomainDkim(currentRow.value.id)
+    dkimInfo.value = {
+      selector: data?.selector || 'default',
+      generated: true,
+      host: data?.host || '',
+      value: data?.value || ''
+    }
+    ElMessage.success('DKIM 密钥已生成，请把下面的记录添加到 DNS')
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || e?.message || '生成失败')
+  } finally {
+    dkimLoading.value = false
+  }
 }
 
 // ===== 添加向导 =====
@@ -1299,6 +1369,12 @@ onBeforeUnmount(() => { if (addCheckTimer) clearTimeout(addCheckTimer); stopInbo
 .md-check-sub { font-size: 12.5px; color: #94a3b8; margin-top: 10px; }
 .md-dnsguide-body .md-rec-field { border-bottom: 1px dashed #e2e8f0; padding: 8px 0; }
 .md-dnsguide-foot { margin-top: 14px; display: flex; align-items: center; gap: 12px; }
+.md-dkim-box { margin-top: 16px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; }
+.md-dkim-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.md-dkim-status { flex: 1 1 220px; font-size: 12.5px; color: #b45309; }
+.md-dkim-status.ok { color: #15803d; }
+.md-rec-break { word-break: break-all; }
+.mail-ops-pane { padding: 2px 2px 10px; }
 .acc-form { display: flex; flex-direction: column; gap: 12px; max-width: 520px; }
 .acc-row { display: flex; align-items: center; gap: 10px; }
 .acc-label { flex: 0 0 90px; color: #475569; font-size: 13.5px; }

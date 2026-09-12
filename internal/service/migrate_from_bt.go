@@ -327,6 +327,8 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 	if port <= 0 || port > 65535 {
 		port = 80
 	}
+	pcfg := parseBTProjectConfig(btSite)
+
 	createReq := CreateSiteReq{
 		Name:   name,
 		Domain: primary,
@@ -345,37 +347,106 @@ func restoreBTSite(t *ImportTask, client *BTClient, btSite map[string]any, workD
 		// 源面板版本号是两位简写（74），本机 RuntimeVersion 需带点格式（PHP 7.4），
 		// 否则 ensureRuntime 会在 PATH 里找 php74 而实际二进制名是 php7.4
 		createReq.RuntimeVersion = "PHP " + btPhpVersionDotted(v)
+		createReq.Root = toStr(btSite["path"]) // PHP 站点 path 即网站根目录
+	} else if isRuntimeSite(typ) {
+		// 进程型站点：项目目录取 project_config.project_path，缺失时回退 path 的目录部分
+		root := pcfg.ProjectPath
+		if root == "" {
+			root = toStr(btSite["path"])
+			if root != "" && !strings.HasSuffix(root, "/") {
+				if ext := filepath.Ext(root); ext != "" {
+					root = filepath.Dir(root)
+				}
+			}
+		}
+		if root == "" {
+			root = filepath.Join("/www/wwwroot", name)
+		}
+		createReq.Root = root
+		createReq.StartCommand = pcfg.ProjectCmd
+		createReq.JvmArgs = pcfg.JvmArgs
+		createReq.JarFile = pcfg.JarFile
+		// 源端无启动命令时按类型给默认值兜底
+		if strings.TrimSpace(createReq.StartCommand) == "" {
+			switch typ {
+			case model.SiteTypeNode:
+				createReq.StartCommand = "npm run start"
+			case model.SiteTypePython:
+				createReq.StartCommand = "python app.py"
+			case model.SiteTypeGo:
+				createReq.StartCommand = "./" + name
+			case model.SiteTypeJava:
+				createReq.StartCommand = ""
+			}
+			if createReq.StartCommand != "" {
+				t.logf("网站 %s 源端无启动命令，已使用默认值 %q", name, createReq.StartCommand)
+			}
+		}
+		// 端口缺失或冲突时自动分配
+		port := pcfg.Port
+		if port <= 0 || checkProxyPortConflict(name, port) != nil {
+			if port > 0 {
+				t.logf("网站 %s 源端口 %d 与本机冲突，自动重新分配", name, port)
+			}
+			port = AllocateSitePort()
+			if port <= 0 {
+				return errors.New("自动分配应用端口失败")
+			}
+			t.logf("网站 %s 已自动分配应用端口 %d", name, port)
+		}
+		createReq.ProxyPort = port
 	}
+
+	// Java 站点源端无 jar 名时，先下载解压扫描 jar 再创建
+	if typ == model.SiteTypeJava && strings.TrimSpace(createReq.JarFile) == "" {
+		pkgFile := filepath.Join(workDir, name+".tar.gz")
+		t.logf("下载网站 %s 文件中（扫描 jar）...", name)
+		if err := downloadBTSitePackage(t, client, btSite, pkgFile); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(createReq.Root, 0o755); err != nil {
+			return err
+		}
+		if err := ungzTar(pkgFile, createReq.Root); err != nil {
+			return fmt.Errorf("解压网站文件失败: %w", err)
+		}
+		_ = flattenBTSiteRoot(createReq.Root, name)
+		jars := ScanJarFiles(createReq.Root)
+		if len(jars) > 0 {
+			createReq.JarFile = jars[0]
+			t.logf("网站 %s 扫描到 jar 文件 %s", name, jars[0])
+		}
+	}
+
 	s, err := CreateSite(createReq)
 	if err != nil {
 		return err
 	}
 
 	pkgFile := filepath.Join(workDir, name+".tar.gz")
-	t.logf("下载网站 %s 文件中...", name)
-	if err := downloadBTSitePackage(t, client, btSite, pkgFile); err != nil {
-		return err
+	if !fileExists(pkgFile) {
+		t.logf("下载网站 %s 文件中...", name)
+		if err := downloadBTSitePackage(t, client, btSite, pkgFile); err != nil {
+			return err
+		}
 	}
 
 	if s.Root != "" {
 		if err := os.MkdirAll(s.Root, 0o755); err != nil {
 			return err
 		}
-		if err := ungzTar(pkgFile, s.Root); err != nil {
-			return fmt.Errorf("解压网站文件失败: %w", err)
+		if typ != model.SiteTypeJava {
+			if err := ungzTar(pkgFile, s.Root); err != nil {
+				return fmt.Errorf("解压网站文件失败: %w", err)
+			}
 		}
-		// 源面板压缩包通常会把站点目录本身包一层（如解压后出现 /root/api.vitphp.cn/），
-		// 需要把这一层子目录里的文件上移到网站根目录，避免访问路径多套一层。
 		if err := flattenBTSiteRoot(s.Root, name); err != nil {
 			return fmt.Errorf("整理网站目录层级失败: %w", err)
 		}
-		// 解压后的文件带的是源面板源端属主/权限（常为 root），统一改为本机 Web 运行用户
-		// （www-data 等），避免属主为 root 导致权限过高、被入侵后波及整台服务器的风险。
 		if err := ChownToWebUser(s.Root, true); err != nil {
 			t.logf("网站 %s 文件归属调整失败（可忽略）: %v", name, err)
 		}
-		// 清理源面板残留的 .user.ini（源面板等会带，且常带 immutable 位），
-		// 避免其 open_basedir 干扰本面板生成的配置，也防止 immutable 位导致文件无法在管理器内删除
+		// 清理源面板残留的 .user.ini（含 immutable 位，需先 chattr）
 		_, _ = ExecCommand("chattr -i "+shellQuote(filepath.Join(s.Root, ".user.ini")), 5*time.Second)
 		_ = os.Remove(filepath.Join(s.Root, ".user.ini"))
 	}
@@ -669,6 +740,49 @@ func btPhpVersionDotted(v string) string {
 	return v
 }
 
+// btProjectConfig 宝塔项目 project_config 解析结果。
+type btProjectConfig struct {
+	ProjectPath string
+	Port        int
+	ProjectCmd  string
+	RunUser     string
+	Domains     []string
+	JvmArgs     string
+	JarFile     string
+}
+
+// parseBTProjectConfig 解析宝塔站点的 project_config 字段。
+func parseBTProjectConfig(btSite map[string]any) btProjectConfig {
+	var cfg btProjectConfig
+	raw := strFromAny(btSite["project_config"])
+	if raw == "" || raw == "{}" {
+		return cfg
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return cfg
+	}
+	cfg.ProjectPath = toStr(m["project_path"])
+	cfg.ProjectCmd = toStr(m["project_cmd"])
+	if cfg.ProjectCmd == "" {
+		cfg.ProjectCmd = toStr(m["project_exe"])
+	}
+	cfg.RunUser = toStr(m["run_user"])
+	cfg.JvmArgs = toStr(m["jvm_args"])
+	cfg.JarFile = toStr(m["jar_file"])
+	if v := m["port"]; v != nil {
+		cfg.Port = toInt(v)
+	}
+	if ds, ok := m["domains"].([]any); ok {
+		for _, d := range ds {
+			if s := strFromAny(d); s != "" {
+				cfg.Domains = append(cfg.Domains, s)
+			}
+		}
+	}
+	return cfg
+}
+
 func mapBTProjectType(t string) string {
 	switch strings.ToLower(t) {
 	case "php", "1":
@@ -679,6 +793,8 @@ func mapBTProjectType(t string) string {
 		return model.SiteTypePython
 	case "go", "golang":
 		return model.SiteTypeGo
+	case "java", "springboot", "spring-boot":
+		return model.SiteTypeJava
 	case "static":
 		return model.SiteTypeStatic
 	case "proxy":

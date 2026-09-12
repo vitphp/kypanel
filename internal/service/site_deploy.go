@@ -60,6 +60,94 @@ func IsArchive(filename string) bool {
 	return strings.HasSuffix(strings.ToLower(filename), ".zip")
 }
 
+// DeployJavaArtifact 把上传的 Java 构建产物部署到项目目录，返回要运行的 jar 文件名（相对项目目录）。
+// 支持两种上传方式：
+//  1. 直接上传 .jar（Spring Boot fat jar 最常见）；
+//  2. 上传 .zip（内含 jar，常见于「jar + 配置文件/依赖目录」一起打包的场景）。
+//
+// war 包不在此处理：war 需要 Servlet 容器（Tomcat），应使用「反向代理」站点指向 Tomcat。
+func DeployJavaArtifact(tmpPath, filename, destDir string) (string, error) {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", errors.New("创建项目目录失败: " + err.Error())
+	}
+	cleanDest, err := SanitizePath(destDir)
+	if err != nil {
+		return "", err
+	}
+	lower := strings.ToLower(strings.TrimSpace(filename))
+	switch {
+	case strings.HasSuffix(lower, ".war"):
+		return "", errors.New("Java 站点运行的是可执行 jar（如 Spring Boot fat jar）；war 包请改用「反向代理」站点指向 Tomcat")
+	case strings.HasSuffix(lower, ".jar"):
+		name := sanitizeUploadName(filename)
+		if name == "" {
+			name = "app.jar"
+		}
+		if err := copyFile(tmpPath, filepath.Join(cleanDest, name)); err != nil {
+			return "", errors.New("保存 jar 失败: " + err.Error())
+		}
+		return name, nil
+	case IsArchive(filename):
+		if err := UnzipFile(tmpPath, cleanDest); err != nil {
+			return "", errors.New("解压失败: " + err.Error())
+		}
+		jars := ScanJarFiles(cleanDest)
+		if len(jars) == 0 {
+			return "", errors.New("压缩包中没有找到 .jar 文件")
+		}
+		if len(jars) == 1 {
+			return jars[0], nil
+		}
+		// 多个 jar：排除 sources/javadoc，取体积最大的（通常就是主程序包）
+		best := ""
+		var bestSize int64 = -1
+		for _, rel := range jars {
+			base := strings.ToLower(filepath.Base(rel))
+			if strings.Contains(base, "sources") || strings.Contains(base, "javadoc") {
+				continue
+			}
+			if fi, statErr := os.Stat(filepath.Join(cleanDest, rel)); statErr == nil && fi.Size() > bestSize {
+				bestSize = fi.Size()
+				best = rel
+			}
+		}
+		if best == "" {
+			return "", errors.New("压缩包中的 jar 均为 sources/javadoc，未找到可运行的主程序 jar")
+		}
+		return best, nil
+	}
+	return "", errors.New("仅支持上传 .jar，或内含 jar 的 .zip 文件")
+}
+
+// ScanJarFiles 扫描目录（根 + 一层子目录）中的 .jar 文件，返回相对路径（排序后）。
+func ScanJarFiles(dir string) []string {
+	var out []string
+	scanOne := func(d, prefix string) {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if strings.HasSuffix(strings.ToLower(e.Name()), ".jar") {
+				out = append(out, filepath.Join(prefix, e.Name()))
+			}
+		}
+	}
+	scanOne(dir, "")
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				scanOne(filepath.Join(dir, e.Name()), e.Name())
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ScanExecutables 扫描目录（根 + 一层子目录）中的可执行文件。
 func ScanExecutables(dir string) []model.ExecFile {
 	out := []model.ExecFile{}

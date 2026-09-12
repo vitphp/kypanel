@@ -9,6 +9,7 @@ const (
 	SiteTypeNode   = "node"   // Node.js 站点（反代本地端口）
 	SiteTypePython = "python" // Python 站点（反代本地端口）
 	SiteTypeGo     = "go"     // Go 站点（反代本地端口）
+	SiteTypeJava   = "java"   // Java 站点（java -jar 运行 fat jar，反代本地端口）
 	SiteTypeProxy  = "proxy"  // 反向代理（任意 URL）
 
 	SiteRunning = "running"
@@ -22,6 +23,7 @@ var SiteRuntimeTypes = []string{
 	SiteTypePython,
 	SiteTypeGo,
 	SiteTypeNode,
+	SiteTypeJava,
 	SiteTypeProxy,
 }
 
@@ -64,7 +66,10 @@ type Site struct {
 	ProxyPort        int            `json:"proxy_port"`                        // python/node/go 应用运行端口
 	Framework        string         `gorm:"size:32" json:"framework"`          // python 框架：flask / django / generic
 	InstallCommand   string         `gorm:"size:512" json:"install_command"`   // node/python 依赖安装/构建命令（创建后可选执行）
-	Status           string         `gorm:"size:16" json:"status"`             // running / stopped
+	// Java 站点专用（jar 形态，等价于宝塔/1Panel 的 Spring Boot 项目）
+	JvmArgs string `gorm:"size:512" json:"jvm_args"` // JVM 参数，如 -Xmx512m -Duser.timezone=GMT+08
+	JarFile string `gorm:"size:255" json:"jar_file"` // 运行的 jar 文件名（相对项目目录），启动命令留空时自动拼装
+	Status  string `gorm:"size:16" json:"status"`    // running / stopped
 	Remark           string         `gorm:"size:255" json:"remark"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`

@@ -33,6 +33,7 @@ type SendMailResult struct {
 	MessageID string   `json:"message_id"`
 	Local     []string `json:"local"`
 	Remote    []string `json:"remote"`
+	Queued    []string `json:"queued"`
 	Failed    []string `json:"failed"`
 }
 
@@ -46,6 +47,9 @@ func SendMail(req SendMailRequest) (*SendMailResult, error) {
 	}
 	if !box.Enabled {
 		return nil, errors.New("发件账号已停用")
+	}
+	if err := checkMailDomainEnabled(box.Domain); err != nil {
+		return nil, err
 	}
 	rcpts := normalizeAddresses(append(append([]string{}, req.To...), req.Cc...))
 	if len(rcpts) == 0 {
@@ -63,6 +67,8 @@ func SendMail(req SendMailRequest) (*SendMailResult, error) {
 		Attach:   req.Attach,
 	}
 	raw := buildMimeMessage(content)
+	// DKIM 签名（发件域已配置密钥时生效）
+	raw = SignOutboundMail(raw, from)
 	messageID := extractMessageID(raw)
 
 	result := &SendMailResult{MessageID: messageID}
@@ -84,7 +90,8 @@ func SendMail(req SendMailRequest) (*SendMailResult, error) {
 
 	for domain, users := range localByUser {
 		for _, user := range users {
-			if _, err := DeliverMessage(domain, user, raw); err != nil {
+			// 走入站投递入口：同域收件人若为别名也能正确展开
+			if err := DeliverInbound(from, domain, user, raw); err != nil {
 				result.Failed = append(result.Failed, user+"@"+domain+"（"+err.Error()+"）")
 				continue
 			}
@@ -92,28 +99,29 @@ func SendMail(req SendMailRequest) (*SendMailResult, error) {
 		}
 	}
 
-	// 外部投递：按目标域分组，逐域查 MX 直发
+	// 外部投递：写入外发队列，由后台 worker 直发 MX 并重试（不再阻塞当前请求）
 	if len(external) > 0 {
-		byDomain := map[string][]string{}
-		for _, rc := range external {
-			byDomain[domainOf(rc)] = append(byDomain[domainOf(rc)], rc)
-		}
-		for d, addrs := range byDomain {
-			if err := deliverExternalDomain(d, from, addrs, raw); err != nil {
-				for _, a := range addrs {
-					result.Failed = append(result.Failed, a+"（"+err.Error()+"）")
-				}
-				continue
+		if err := EnqueueOutbox(from, box.DomainID, box.ID, external, raw, messageID); err != nil {
+			for _, a := range external {
+				result.Failed = append(result.Failed, a+"（加入外发队列失败："+err.Error()+"）")
 			}
-			result.Remote = append(result.Remote, addrs...)
+		} else {
+			result.Queued = append(result.Queued, external...)
+			RecordMailLog("out", box.Domain, box.ID, from, strings.Join(external, ", "),
+				req.Subject, int64(len(raw)), "queued", "已加入外发队列", "")
 		}
+	}
+
+	if len(result.Local) > 0 {
+		RecordMailLog("out", box.Domain, box.ID, from, strings.Join(result.Local, ", "),
+			req.Subject, int64(len(raw)), "ok", "站内投递成功", "")
 	}
 
 	if err := saveSentCopy(box, rcpts, raw, messageID, len(req.Attach) > 0); err != nil {
 		slog.Warn("保存已发送副本失败", "err", err)
 	}
 
-	if len(result.Local) == 0 && len(result.Remote) == 0 {
+	if len(result.Local) == 0 && len(result.Remote) == 0 && len(result.Queued) == 0 {
 		if len(result.Failed) == 0 {
 			return nil, errors.New("没有可投递的收件人")
 		}
@@ -182,7 +190,11 @@ func saveSentCopy(box model.Mailbox, rcpts []string, raw []byte, messageID strin
 		RawSize:   int64(len(raw)),
 		MessageID: messageID,
 	}
-	return model.DB.Create(rec).Error
+	if err := model.DB.Create(rec).Error; err != nil {
+		return err
+	}
+	AddMailboxStorage(box.ID, int64(len(raw)))
+	return nil
 }
 
 // parseSubject 从原始报文中解析主题（用于已发送列表展示）。
@@ -317,5 +329,6 @@ func SaveDraft(req SaveDraftRequest) (*model.MailMessage, error) {
 	if err := model.DB.Create(rec).Error; err != nil {
 		return nil, err
 	}
+	AddMailboxStorage(box.ID, int64(len(raw)))
 	return rec, nil
 }

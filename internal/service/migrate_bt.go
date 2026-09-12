@@ -49,7 +49,8 @@ func StartExportToBT(req BTExportRequest) (string, error) {
 	if len(req.Sites) == 0 && len(req.Databases) == 0 && len(req.FTPs) == 0 {
 		return "", errors.New("请至少选择一个迁移对象")
 	}
-	id := "btexport-" + time.Now().Format("20060102150405")
+	// 秒级时间戳 + 随机后缀：仅用时间戳时，同一秒内发起两个迁出任务会拿到相同 ID 而互相覆盖
+	id := "btexport-" + time.Now().Format("20060102150405") + "-" + randHex(4)
 	task := newImportTask(id, TaskKindExport)
 	go runExportToBT(task, req)
 	return id, nil
@@ -77,6 +78,9 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 	defer os.Remove(pkgPath)
 	t.logf("打包完成：网站 %d 个、数据库 %d 个、FTP %d 个",
 		len(exp.Manifest.Sites), len(exp.Manifest.Databases), len(exp.Manifest.FTPs))
+	for _, w := range exp.Warnings {
+		t.logf("提示：%s", w)
+	}
 
 	// 解压迁移包到工作目录
 	workDir := filepath.Join(migrateRoot(), "bt-work-"+exp.ID)
@@ -95,21 +99,71 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		t.fail("连接对端面板失败: " + err.Error())
 		return
 	}
-	// name → {id, webname}，用于覆盖时删除
-	type btSiteEntry struct{ id, webname string }
+	// name → {id, name, webname}，用于冲突判断与覆盖时删除；
+	// btDomainMap：对端已绑定的域名 → 站点名（本机站点可能在对端被换了名字绑同一个域名）
+	type btSiteEntry struct{ id, name, webname string }
 	btSiteMap := map[string]btSiteEntry{}
+	btDomainMap := bt.SiteDomainIndex(existing)
 	for _, s := range existing {
 		n, _ := s["name"].(string)
 		if n == "" {
 			continue
 		}
 		id := fmt.Sprintf("%v", s["id"])
-		btSiteMap[n] = btSiteEntry{id: id, webname: btParseWebname(s)}
+		btSiteMap[n] = btSiteEntry{id: id, name: n, webname: btParseWebname(s)}
 	}
 
 	t.logf("对端面板连接成功")
 
-	// 3. 创建网站 + 上传文件 + 应用站点级配置
+	// 2.1 迁移前硬校验对端环境（前端预检可能被跳过，直连 API 调用更会跳过）：
+	// 缺 PHP 版本 / JDK（含版本不匹配）/ Node / Python 环境 / MySQL 时直接中止，
+	// 避免把站点建出来、文件传上去，最后发现根本跑不起来。
+	if cmp, cerr := BTEnvCompare(req.BTURL, req.BTSK, req.Sites, req.Databases); cerr == nil {
+		var miss []string
+		var tips []string
+		if l, ok := cmp["php_missing"].([]string); ok {
+			for _, v := range l {
+				miss = append(miss, "PHP "+btPhpVersionDotted(v))
+			}
+			if len(l) > 0 {
+				tips = append(tips, strFromAny(cmp["php_hint"]))
+			}
+		}
+		if l, ok := cmp["runtime_missing"].([]string); ok {
+			miss = append(miss, l...)
+			if hints, ok := cmp["runtime_hints"].(map[string]string); ok {
+				for _, item := range l {
+					switch {
+					case strings.HasPrefix(item, "Java"):
+						tips = append(tips, hints["java"])
+					case strings.HasPrefix(item, "Node"):
+						tips = append(tips, hints["node"])
+					case strings.HasPrefix(item, "Python"):
+						tips = append(tips, hints["python"])
+					}
+				}
+			}
+		}
+		if need, _ := cmp["mysql_required"].(bool); need {
+			if installed, _ := cmp["mysql_installed"].(bool); !installed {
+				miss = append(miss, "MySQL")
+				tips = append(tips, "对端面板未安装 MySQL，请先安装后再迁移")
+			}
+		}
+		if len(miss) > 0 {
+			var validTips []string
+			for _, s := range tips {
+				if strings.TrimSpace(s) != "" {
+					validTips = append(validTips, s)
+				}
+			}
+			msg := fmt.Sprintf("对端面板环境不满足，缺少 %s。%s", strings.Join(miss, "、"), strings.Join(validTips, " "))
+			t.fail(msg)
+			return
+		}
+	}
+
+	// 3. 创建网站/项目 + 上传文件 + 应用站点级配置
 	// 注：单个网站失败不中断整体，让所有失败都能在前端展示，
 	//     整体 Status 在末尾根据 Items 是否有 failed 决定。
 	for _, ms := range exp.Manifest.Sites {
@@ -120,37 +174,110 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 		if ms.Domains != "" {
 			domains += "," + ms.Domains
 		}
+		domainList := btSplitDomains(domains)
 		phpVer := ms.PhpVersion
 		if phpVer == "" {
 			phpVer = "74"
 		}
-		// 目标建站目录沿用源站根目录，保证迁移前后网站文件夹路径一致
-		path := ms.Root
-		if path == "" {
-			path = filepath.Join("/www/wwwroot", ms.Name)
+		// 目标目录尽量沿用源站目录；但源站目录若被设成了 /www/wwwroot 这类系统关键目录
+		// （用户在文件选择器里选中了根目录），对端面板会直接拒绝创建——
+		// 报「不能以系统关键目录作为站点目录」，统一回退到 /www/wwwroot/<站点名>。
+		origRoot := strings.TrimSpace(ms.Root)
+		path := btSafeSitePath(origRoot, ms.Name)
+		if path != origRoot {
+			if origRoot == "" {
+				t.logf("网站 %s 未记录项目目录，对端面板使用 %s", ms.Name, path)
+			} else {
+				t.logf("网站 %s 源目录 %s 是对端面板不允许的系统关键目录，改用 %s", ms.Name, origRoot, path)
+			}
 		}
+		ms.Root = path
 
-		// 3.1 处理对端已存在的同名网站（按用户选择：跳过 / 覆盖删除）
-		if info, exists := btSiteMap[ms.Name]; exists {
-			if !req.SiteOverwrite[ms.Name] {
+		// 3.1 处理对端已存在的同名网站/项目（按用户选择：跳过 / 覆盖删除）
+		// 项目在对端面板按「去点去横线的项目名」登记，因此同名判断也要用这个名字查；
+		// 另外用户可能在对端用别的名字绑了同一个域名，域名命中同样算冲突。
+		lookup := ms.Name
+		if btIsProjectType(ms.Type) {
+			lookup = btProjectName(ms.Name)
+		}
+		info, exists := btSiteMap[lookup]
+		if !exists {
+			for _, d := range domainList {
+				if n, ok := btDomainMap[strings.ToLower(d)]; ok {
+					info, exists = btSiteMap[n], true
+					break
+				}
+			}
+		}
+		if exists {
+			// 没拿到覆盖/跳过决策时绝不能静默跳过：那会让用户看到「迁移成功」但什么都没迁。
+			// 正常流程前端会先弹窗收集决策，这里兜住预检漏检 / 直接调 API 的情况。
+			overwrite, decided := req.SiteOverwrite[ms.Name]
+			if !decided {
+				t.logf("网站 %s 在对端面板已存在（%s），但未提供覆盖/跳过选择", ms.Name, info.name)
+				t.addItem("site", ms.Name, "failed", "对端面板已存在同名站点，请重新预检并在弹窗中选择「覆盖」或「跳过」")
+				continue
+			}
+			if !overwrite {
 				t.logf("网站 %s 在对端面板已存在，按选择跳过", ms.Name)
 				t.addItem("site", ms.Name, "skipped", "对端面板已存在，按选择跳过")
 				continue
 			}
 			t.logf("网站 %s 在对端面板已存在，先删除后重建（覆盖）...", ms.Name)
-			if _, err := bt.DeleteSite(info.id, info.webname); err != nil {
-				t.logf("覆盖网站 %s 失败（请到对端面板手动删除该网站后重试）: %v", ms.Name, err)
-				t.addItem("site", ms.Name, "failed", "删除对端旧网站失败："+err.Error())
-				continue
+			removed := false
+			if btIsProjectType(ms.Type) {
+				// 项目必须走项目删除接口：只删站点记录会留下仍在运行的守护进程与 project_config
+				if err := btRemoveProject(bt, ms.Type, info.name); err == nil {
+					removed = true
+				} else {
+					t.logf("调用对端项目删除接口失败（改用站点删除接口）: %v", err)
+				}
+			}
+			if !removed {
+				if _, err := bt.DeleteSite(info.id, info.webname); err != nil {
+					t.logf("覆盖网站 %s 失败（请到对端面板手动删除该网站后重试）: %v", ms.Name, err)
+					t.addItem("site", ms.Name, "failed", "删除对端旧网站失败："+err.Error())
+					continue
+				}
 			}
 		}
 
-		// 3.2 在对端面板创建网站
-		t.logf("在对端面板创建网站 %s（域名 %s，PHP %s，目录 %s）...", ms.Name, domains, phpVer, path)
-		addRes, err := bt.AddSite(ms.Name, domains, path, phpVer)
+		pkgFile := filepath.Join(workDir, "sites", ms.Name, "wwwroot.tar.gz")
+
+		// 3.2 进程型站点（Java / Node / Go / Python）：走对端面板的项目接口创建。
+		// 注意不能用 site?action=AddSite —— 那只会建出一条 PHP 站点记录：没有 project_config、
+		// 没有守护进程、也不会把域名反代到应用端口，表现就是「迁过去的 Java 站点变成了 PHP 网站」。
+		if btIsProjectType(ms.Type) {
+			t.logf("在对端面板创建 %s 项目 %s（目录 %s，端口 %d）...", strings.ToUpper(ms.Type), ms.Name, path, ms.ProxyPort)
+			// 对端面板创建项目时会校验项目目录 / jar / 可执行文件已存在，因此先把文件传过去解压
+			if err := btUploadSiteFiles(t, bt, ms, path, pkgFile); err != nil {
+				t.addItem("site-file", ms.Name, "failed", err.Error())
+				continue
+			}
+			if err := createBtProject(t, bt, &ms, path, domainList, ms.ProxyPort); err != nil {
+				t.logf("创建项目 %s 失败: %v", ms.Name, err)
+				t.addItem("site", ms.Name, "failed", "创建项目失败："+err.Error())
+				continue
+			}
+			t.addItem("site", ms.Name, "success", "创建成功（"+strings.ToUpper(ms.Type)+" 项目）")
+			continue
+		}
+
+		// 3.3 常规网站（PHP / 静态 / 反向代理）
+		siteKind, siteType, sitePhpVer := "网站", "PHP", phpVer
+		switch ms.Type {
+		case model.SiteTypeStatic:
+			// 静态站点：type 留空 + version=00，避免在对端面板建出一个 PHP 站点
+			siteKind, siteType, sitePhpVer = "静态网站", "html", ""
+		case model.SiteTypeProxy:
+			// 反向代理：先建站点承载域名，随后用 CreateProxy 配置反代目标
+			siteKind, siteType, sitePhpVer = "反向代理站点", "proxy", ""
+		}
+		t.logf("在对端面板创建%s %s（域名 %s，目录 %s）...", siteKind, ms.Name, domains, path)
+		addRes, err := bt.AddSite(ms.Name, domains, path, sitePhpVer, siteType)
 		if err != nil {
-			t.logf("创建网站 %s 失败: %v", ms.Name, err)
-			t.addItem("site", ms.Name, "failed", "创建网站失败："+err.Error())
+			t.logf("创建%s %s 失败: %v", siteKind, ms.Name, err)
+			t.addItem("site", ms.Name, "failed", "创建失败："+err.Error())
 			continue
 		}
 		// 记下新站点 ID，后续设置运行目录需要（不同版本字段名略有差异，做多候选解析）
@@ -173,46 +300,33 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 				}
 			}
 		}
-		t.logf("网站 %s 创建成功（ID %s，webname %s）", ms.Name, siteID, btWebname)
+		t.logf("%s %s 创建成功（ID %s，webname %s）", siteKind, ms.Name, siteID, btWebname)
 		t.addItem("site", ms.Name, "success", "创建成功（ID "+siteID+"）")
 
-		// 3.3 上传网站文件（无文件包时跳过）
-		src := filepath.Join(workDir, "sites", ms.Name, "wwwroot.tar.gz")
-		if !fileExists(src) {
-			t.logf("网站 %s 无文件包，跳过文件上传", ms.Name)
-		} else {
-			remote := "/www/backup/migrate-" + ms.Name + ".tar.gz"
-			t.logf("上传网站 %s 文件包...", ms.Name)
-			lastProg := time.Now()
-			if err := bt.Upload(src, remote, func(done, total int64) {
-				if time.Since(lastProg) < 2*time.Second {
-					return
-				}
-				lastProg = time.Now()
-				pct := float64(0)
-				if total > 0 {
-					pct = float64(done) / float64(total) * 100
-				}
-				t.logf("上传网站 %s 文件包中... %.0f%%（%d/%d MB）", ms.Name, pct, done/1024/1024, total/1024/1024)
-			}); err != nil {
-				t.logf("上传网站 %s 文件失败: %v", ms.Name, err)
-				t.addItem("site-file", ms.Name, "failed", "上传文件失败："+err.Error())
-				continue
-			}
-			t.logf("解压网站 %s 文件到站点目录...", ms.Name)
-			if err := bt.Unzip(remote, path); err != nil {
-				t.logf("解压网站 %s 文件失败: %v", ms.Name, err)
-				t.addItem("site-file", ms.Name, "failed", "解压文件失败："+err.Error())
-				continue
-			}
-			btDeleteRemoteFile(bt, remote)
-			t.logf("网站 %s 文件恢复完成", ms.Name)
+		// 3.4 上传网站文件（无文件包时仅创建目录）
+		if err := btUploadSiteFiles(t, bt, ms, path, pkgFile); err != nil {
+			t.addItem("site-file", ms.Name, "failed", err.Error())
+			continue
 		}
 
-		// 3.4 站点级配置：运行目录 / 伪静态 / SSL
-		// applyBTSiteSettings 内部已记录详细日志，失败时通过返回 false 报告给外层记录 item
-		configOK := applyBTSiteSettings(t, bt, &ms, siteID, btWebname)
-		if !configOK {
+		// 3.5 反向代理：把对端站点的请求转发到源站应用端口
+		if ms.Type == model.SiteTypeProxy {
+			target := strings.TrimSpace(ms.ProxyPass)
+			if target == "" && ms.ProxyPort > 0 {
+				target = fmt.Sprintf("http://127.0.0.1:%d", ms.ProxyPort)
+			}
+			if target == "" {
+				t.logf("反向代理站点 %s 源站未记录反代目标，请到对端面板手动配置", ms.Name)
+			} else if err := bt.CreateProxy(btPrimaryDomain(domainList, ms.Name), target); err != nil {
+				t.logf("配置反向代理 %s -> %s 失败（可到对端面板手动配置）: %v", ms.Name, target, err)
+				t.addItem("site-config", ms.Name, "failed", "反向代理配置失败："+err.Error())
+			} else {
+				t.logf("反向代理 %s -> %s 配置完成", ms.Name, target)
+			}
+		}
+
+		// 3.6 站点级配置：运行目录 / 伪静态 / SSL
+		if !applyBTSiteSettings(t, bt, &ms, siteID, btWebname) {
 			t.addItem("site-config", ms.Name, "failed", "伪静态/运行目录/SSL 至少一项失败，请查看上方日志详情")
 		}
 	}
@@ -243,7 +357,13 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 
 		// 4.1 处理对端已存在的同名数据库
 		if dbID, exists := dbsExist[db.Name]; exists {
-			if !req.DatabaseOverwrite[db.Name] {
+			overwrite, decided := req.DatabaseOverwrite[db.Name]
+			if !decided {
+				t.logf("数据库 %s 在对端面板已存在，但未提供覆盖/跳过选择", db.Name)
+				t.addItem("database", db.Name, "failed", "对端面板已存在同名数据库，请重新预检并在弹窗中选择「覆盖」或「跳过」")
+				continue
+			}
+			if !overwrite {
 				t.logf("数据库 %s 在对端面板已存在，按选择跳过（含 SQL 导入）", db.Name)
 				t.addItem("database", db.Name, "skipped", "对端面板已存在，按选择跳过（含 SQL 导入）")
 				continue
@@ -358,7 +478,13 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 			return
 		}
 		if btFtpExist[f.Username] {
-			if !req.FtpOverwrite[f.Username] {
+			overwrite, decided := req.FtpOverwrite[f.Username]
+			if !decided {
+				t.logf("FTP 账号 %s 在对端面板已存在，但未提供覆盖/跳过选择", f.Username)
+				t.addItem("ftp", f.Username, "failed", "对端面板已存在同名 FTP 账号，请重新预检并在弹窗中选择「覆盖」或「跳过」")
+				continue
+			}
+			if !overwrite {
 				t.logf("FTP 账号 %s 在对端面板已存在，按选择跳过", f.Username)
 				t.addItem("ftp", f.Username, "skipped", "对端面板已存在，按选择跳过")
 				continue
@@ -397,13 +523,30 @@ func runExportToBT(t *ImportTask, req BTExportRequest) {
 	} else {
 		t.Status = "success"
 	}
+	// 统计跳过项：全是跳过（对端已有同名对象、用户选了跳过）时不能报「迁移完成」，
+	// 否则用户会以为对象都迁过去了 —— 这正是之前那个「一下就提示迁移成功」的坑。
+	skippedN, successN := 0, 0
+	for _, it := range t.Items {
+		switch it.Status {
+		case "skipped":
+			skippedN++
+		case "success":
+			successN++
+		}
+	}
 	t.UpdatedAt = time.Now()
 	t.mu.Unlock()
 
-	if t.Status == "success" {
-		t.logf("迁出到对端面板完成！请到对端面板确认站点/数据库/FTP 状态。")
-	} else {
+	switch {
+	case t.Status != "success":
 		t.logf("迁出未完成：上方存在失败项，请按提示处理后重试")
+	case skippedN > 0 && successN == 0:
+		t.logf("所选对象在对端面板都已存在，已按你的选择全部跳过，对端面板未做任何改动。")
+	default:
+		t.logf("迁出到对端面板完成！请到对端面板确认站点/数据库/FTP 状态。")
+		if skippedN > 0 {
+			t.logf("其中 %d 项因对端已存在同名对象、按你的选择跳过（详见完成页列表）。", skippedN)
+		}
 	}
 }
 
@@ -559,32 +702,54 @@ func normalizeSQLCompat(path string) error {
 //   mysql_required / mysql_installed / mysql_local_version / mysql_remote_version / mysql_diff
 //     mysql_diff: none(未选库) / missing(对端无 MySQL=阻断) / same(版本一致) /
 //                diff(版本不同=需用户确认) / downgrade(本机 8.x 迁到对端 5.x=高风险确认) / unknown(版本未知=确认)
+//   runtime_required / runtime_installed / runtime_missing —— 非 PHP 项目所需运行时
+//     （Java 需要 JDK、Node 需要 Node 版本、Python 需要虚拟环境；Go 跑的是已编译二进制，无需运行时）
+//     runtime_missing 非空=阻断迁移
 func BTEnvCompare(btURL, btSK string, sites, databases []string) (map[string]any, error) {
 	bt := NewBTClient(btURL, btSK)
 	phpList, err := bt.PHPVersionList()
 	if err != nil {
 		return nil, err
 	}
-	// 对端面板返回版本号可能带点（如 "7.4"）或纯数字（"74"），统一转 Remi 风格
+	// 对端面板返回版本号可能带点（如 "7.4"）或纯数字（"74"），统一转 Remi 风格。
+	// "" 与 "00" 是面板的占位值（静态站点），不是 PHP 版本，需要剔除——
+	// 否则前端会显示成「PHP 、PHP 00」这种噪声。
 	normalized := map[string]bool{}
 	for _, v := range phpList {
 		v = strings.TrimSpace(v)
+		if v == "" || v == "00" {
+			continue
+		}
 		normalized[v] = true
 		key := strings.ReplaceAll(v, ".", "")
 		normalized[key] = true
 	}
 	need := map[string]bool{}
+	runtimeNeed := map[string]bool{}
+	// 源站 Java 站点要求的最低 JDK 主版本（取所有 Java 站点里最高的那个；0 = 源站没记录版本）
+	javaNeedMajor := 0
 	for _, name := range sites {
 		var s model.Site
 		if err := model.DB.Where("name = ?", name).First(&s).Error; err != nil {
 			continue
 		}
-		if s.Type == model.SiteTypePHP {
+		switch s.Type {
+		case model.SiteTypePHP:
 			v := phpVersionFromFpm(s.PhpFpm)
 			if v == "" {
 				v = "74"
 			}
 			need[v] = true
+		case model.SiteTypeJava:
+			runtimeNeed["java"] = true
+			// 站点的 runtime_version 形如 "Java 21.0"：必须用 ≥ 该版本的 JDK 才能跑起来
+			if m := btJavaMajor(s.RuntimeVersion); m > javaNeedMajor {
+				javaNeedMajor = m
+			}
+		case model.SiteTypeNode:
+			runtimeNeed["node"] = true
+		case model.SiteTypePython:
+			runtimeNeed["python"] = true
 		}
 	}
 	var missing []string
@@ -618,17 +783,77 @@ func BTEnvCompare(btURL, btSK string, sites, databases []string) (map[string]any
 		}
 	}
 
-	allReady := len(missing) == 0 && !(needMySQL && !mysqlInstalled)
+	// ---- 非 PHP 运行时对比（Java / Node / Python）----
+	// 项目型站点迁出后由对端面板的项目守护进程运行，必须有对应运行时：
+	//   Java 需要 JDK、Node 需要已安装的 Node 版本、Python 需要虚拟环境；
+	//   Go 项目跑的是已经编译好的二进制，不需要 Go 工具链。
+	var runtimeInstalled = map[string]any{
+		"java":   []string{},
+		"node":   []string{},
+		"python": []string{},
+	}
+	var runtimeMissing []string
+	runtimeHints := map[string]string{
+		"java":   "请在对端面板「网站 → Java 项目」中安装 JDK",
+		"node":   "请在对端面板「网站 → Node 项目」中安装 Node 版本",
+		"python": "请在对端面板「网站 → Python 项目」中创建 Python 环境",
+	}
+	if runtimeNeed["java"] {
+		// 必须按源站要求的版本比对：源站 JDK 21 编译的 jar 在 JDK 8 上会报
+		// UnsupportedClassVersionError，项目建出来也是跑不起来的。
+		jdks := bt.JavaJDKs()
+		if home := pickJavaFrom(jdks, javaNeedMajor); home != "" {
+			ver := ""
+			for _, j := range jdks {
+				if j.Home == home {
+					ver = j.Version
+					break
+				}
+			}
+			runtimeInstalled["java"] = []string{ver}
+		} else if len(jdks) == 0 {
+			runtimeMissing = append(runtimeMissing, "Java (JDK)")
+		} else {
+			runtimeMissing = append(runtimeMissing, fmt.Sprintf("Java (JDK %d)", javaNeedMajor))
+			runtimeHints["java"] = fmt.Sprintf(
+				"源站项目用 JDK %d 编译，对端只装了 %s，请在对端面板「网站 → Java 项目」中安装 JDK %d 后重试",
+				javaNeedMajor, btJavaVersionsText(jdks), javaNeedMajor)
+		}
+	}
+	if runtimeNeed["node"] {
+		if versions := bt.NodejsVersions(); len(versions) == 0 {
+			runtimeMissing = append(runtimeMissing, "Node")
+		} else {
+			for _, v := range versions {
+				runtimeInstalled["node"] = append(runtimeInstalled["node"].([]string), strings.TrimPrefix(v, "v"))
+			}
+		}
+	}
+	if runtimeNeed["python"] {
+		if bt.PythonBinPath() == "" {
+			runtimeMissing = append(runtimeMissing, "Python 环境")
+		} else {
+			runtimeInstalled["python"] = []string{"已安装"}
+		}
+	}
+
+	allReady := len(missing) == 0 && len(runtimeMissing) == 0 && !(needMySQL && !mysqlInstalled)
 	return map[string]any{
-		"php_installed":      normalized,
-		"php_required":       need,
-		"php_missing":        missing,
-		"mysql_required":     needMySQL,
-		"mysql_installed":    mysqlInstalled,
-		"mysql_local_version": localVer,
+		"php_installed":        normalized,
+		"php_required":         need,
+		"php_missing":          missing,
+		"php_hint":             "请在对端面板「软件商店」安装对应 PHP 版本",
+		"mysql_required":       needMySQL,
+		"mysql_installed":      mysqlInstalled,
+		"mysql_local_version":  localVer,
 		"mysql_remote_version": remoteVer,
-		"mysql_diff":          mysqlDiff,
-		"all_ready":           allReady,
+		"mysql_diff":           mysqlDiff,
+		"runtime_required":     runtimeNeed,
+		"runtime_installed":    runtimeInstalled,
+		"runtime_missing":      runtimeMissing,
+		"runtime_hints":        runtimeHints,
+		"java_major":           javaNeedMajor, // 源站 Java 项目要求的 JDK 主版本（0=未知）
+		"all_ready":            allReady,
 	}, nil
 }
 

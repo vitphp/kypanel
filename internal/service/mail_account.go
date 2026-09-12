@@ -30,14 +30,19 @@ func ListMailboxes(domainID uint) []model.MailboxView {
 
 func toMailboxView(b model.Mailbox) model.MailboxView {
 	return model.MailboxView{
-		ID:        b.ID,
-		Domain:    b.Domain,
-		Name:      b.Name,
-		Address:   b.Address(),
-		Enabled:   b.Enabled,
-		QuotaMb:   b.QuotaMb,
-		Remark:    b.Remark,
-		CreatedAt: b.CreatedAt,
+		ID:            b.ID,
+		Domain:        b.Domain,
+		Name:          b.Name,
+		Address:       b.Address(),
+		Enabled:       b.Enabled,
+		QuotaMb:       b.QuotaMb,
+		StorageUsed:   b.StorageUsed,
+		ForwardTo:     b.ForwardTo,
+		KeepCopy:      b.KeepCopy,
+		AutoReplyOn:   b.AutoReplyOn,
+		AutoReplyText: b.AutoReplyText,
+		Remark:        b.Remark,
+		CreatedAt:     b.CreatedAt,
 	}
 }
 
@@ -162,14 +167,19 @@ func GenerateRandomMailboxes(domainID uint, rule RandomMailboxRule) (created int
 	return created, accounts, failed, nil
 }
 
-// DeleteMailbox 删除邮箱账号
+// DeleteMailbox 删除邮箱账号（连带清理邮件索引、maildir 文件与附件库）
 func DeleteMailbox(id uint) error {
-	res := model.DB.Delete(&model.Mailbox{}, id)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
+	var box model.Mailbox
+	if err := model.DB.First(&box, id).Error; err != nil {
 		return errors.New("账号不存在")
+	}
+	// 先清理数据（此时账号记录还在，便于定位目录）
+	CleanupMailboxStorage(box)
+	// 清理队列中该账号的待发邮件
+	model.DB.Where("mailbox_id = ?", box.ID).Delete(&model.MailOutbox{})
+	// 最后删账号
+	if err := model.DB.Delete(&model.Mailbox{}, id).Error; err != nil {
+		return err
 	}
 	return nil
 }

@@ -98,7 +98,7 @@ type CreateSiteReq struct {
 	Name      string `json:"name"` // 可选，留空时自动用主域名作为站点名称
 	Domain    string `json:"domain" binding:"required"`
 	Port      int    `json:"port"`
-	Type      string `json:"type" binding:"required,oneof=static php node python go proxy"`
+	Type      string `json:"type" binding:"required,oneof=static php node python go java proxy"`
 	Root      string `json:"root"` // 静态/PHP 根目录 或 python/node/go 项目路径
 	ProxyPass string `json:"proxy_pass"`
 	Remark    string `json:"remark"`
@@ -116,6 +116,9 @@ type CreateSiteReq struct {
 	EnvVars    string `json:"env_vars"`   // 环境变量，KEY=VALUE 每行一个
 	ProxyPort  int    `json:"proxy_port"` // 应用运行端口（nginx 反代目标）
 	Framework  string `json:"framework"`  // python 框架：flask / django / generic
+	// Java 站点（jar 形态）
+	JvmArgs string `json:"jvm_args"` // JVM 参数，如 -Xmx512m -Duser.timezone=GMT+08
+	JarFile string `json:"jar_file"` // 项目目录下已有的 jar 文件名（不上传时直接指定）
 	// 依赖安装 / 构建命令（node：npm install && npm run build；python：pip install -r requirements.txt）
 	InstallCommand string `json:"install_command"`
 
@@ -820,160 +823,15 @@ func writeDefaultPageIfMissing(root, fileName, kind string, fallback func() stri
 	_ = os.WriteFile(dst, []byte(content), 0o755)
 }
 
-// isRuntimeSite 是否为进程型站点（python/node/go，由 systemd 守护）
+// isRuntimeSite 是否为进程型站点（python/node/go/java，由 systemd 守护）。
+// 判定依据是站点类型注册表：新增语言站点只需在 siteTypeSpecs 里加一项。
 func isRuntimeSite(t string) bool {
-	return t == model.SiteTypeNode || t == model.SiteTypePython || t == model.SiteTypeGo
+	_, ok := siteSpec(t)
+	return ok
 }
 
-// ensureRuntime 校验运行环境已安装（支持多版本）
-// runtimeVersion 格式：PHP 8.2 / Python 3.12 / Node 20 / Go 1.23
-func ensureRuntime(t string, runtimeVersion string) error {
-	switch t {
-	case model.SiteTypePHP:
-		bin := "php"
-		if runtimeVersion != "" {
-			// 尝试 php8.2 等版本特定二进制（兼容 "PHP 8.2.33" 完整版本号，归约为主.次版本）
-			v := phpMinorVersion(runtimeVersion)
-			if v == "" {
-				v = strings.TrimPrefix(runtimeVersion, "PHP ")
-			}
-			if v != "" && v != runtimeVersion {
-				bin = "php" + v
-			}
-		}
-		if _, err := exec.LookPath(bin); err != nil {
-			return errors.New("未检测到 " + bin + "，请先在「应用商店」安装对应 PHP 版本")
-		}
-	case model.SiteTypePython:
-		if runtimeVersion != "" {
-			if findRuntimeBinDir(model.SiteTypePython, normalizeRuntimeVersion(runtimeVersion)) != "" {
-				return nil
-			}
-		}
-		if _, err := exec.LookPath("python3"); err != nil {
-			return errors.New("未检测到 python3，请先在「应用商店」安装 Python 环境")
-		}
-	case model.SiteTypeNode:
-		if runtimeVersion != "" {
-			if findRuntimeBinDir(model.SiteTypeNode, normalizeRuntimeVersion(runtimeVersion)) != "" {
-				return nil
-			}
-		}
-		if _, err := exec.LookPath("node"); err != nil {
-			return errors.New("未检测到 node，请先在「应用商店」安装 Node.js 环境")
-		}
-	case model.SiteTypeGo:
-		if runtimeVersion != "" {
-			if findRuntimeBinDir(model.SiteTypeGo, normalizeRuntimeVersion(runtimeVersion)) != "" {
-				return nil
-			}
-		}
-		if _, err := exec.LookPath("go"); err != nil {
-			return errors.New("未检测到 go，请先在「应用商店」安装 Golang 环境")
-		}
-	}
-	return nil
-}
-
-// runtimeVersionOf 检测本机已安装的运行环境版本。
-// 输出统一归一化为「前缀 + 主.次版本」（如 "Python 3.13"、"Node 20.19"、"Go 1.24"），
-// 保证 ensureRuntime / writeSiteService 解析一致，不再出现 "go1.24.4" / "Node v20.19.2" 等格式混杂。
-func runtimeVersionOf(t string) string {
-	switch t {
-	case model.SiteTypePHP:
-		res, err := ExecCommand("php -v", 15*time.Second)
-		if err == nil && res.ExitCode == 0 {
-			fields := strings.Fields(res.Stdout)
-			if len(fields) >= 2 && strings.HasPrefix(fields[0], "PHP") {
-				if v := normalizeRuntimeVersion(fields[1]); v != "" {
-					return "PHP " + v
-				}
-			}
-		}
-	case model.SiteTypePython:
-		res, err := ExecCommand("python3 --version", 15*time.Second)
-		if err == nil && res.ExitCode == 0 {
-			if v := normalizeRuntimeVersion(strings.TrimSpace(res.Stdout)); v != "" {
-				return "Python " + v
-			}
-		}
-	case model.SiteTypeNode:
-		res, err := ExecCommand("node -v", 15*time.Second)
-		if err == nil && res.ExitCode == 0 {
-			if v := normalizeRuntimeVersion(strings.TrimSpace(res.Stdout)); v != "" {
-				return "Node " + v
-			}
-		}
-	case model.SiteTypeGo:
-		res, err := ExecCommand("go version", 15*time.Second)
-		if err == nil && res.ExitCode == 0 {
-			fields := strings.Fields(res.Stdout)
-			if len(fields) >= 3 {
-				if v := normalizeRuntimeVersion(fields[2]); v != "" {
-					return "Go " + v
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// normalizeRuntimeVersion 从任意格式的版本描述中提取主.次版本号（如 "20.19"）。
-// 兼容 "Node v20.19.2"、"go1.24.4"、"Python 3.13.5"、"PHP 8.2.33"、"Node 20" 等写法。
-func normalizeRuntimeVersion(raw string) string {
-	m := regexp.MustCompile(`(\d+)\.(\d+)`).FindStringSubmatch(strings.TrimSpace(raw))
-	if len(m) >= 3 {
-		return m[1] + "." + m[2]
-	}
-	return strings.TrimSpace(raw)
-}
-
-// findRuntimeBinDir 定位指定类型、主.次版本运行时的 bin 目录（供 PATH 注入 / 环境校验）。
-// 兼容各版本实际安装位置的差异，全部用 glob 模糊匹配：
-//   - Node:   $HOME/.nvm/versions/node/v20.*/bin、/usr/local/node20*/bin
-//   - Python: $HOME/.pyenv/versions/3.13.*/bin（pyenv 目录是完整补丁号 3.13.15，必须 glob）、/usr/local/python3.13*/bin
-//   - Go:     /usr/local/go1.24*/bin
-//
-// 家目录候选包含 $HOME 与 /root：面板以 systemd 服务运行时曾存在未注入 HOME 的历史部署，
-// 导致 pyenv 装到了 /.pyenv，这里一并兜底兼容。
-func findRuntimeBinDir(t, v string) string {
-	if v == "" {
-		return ""
-	}
-	mainVer := strings.SplitN(v, ".", 2)[0]
-	homes := make([]string, 0, 3)
-	if h := os.Getenv("HOME"); h != "" {
-		homes = append(homes, h)
-	}
-	// /root 与 / 兜底：面板以 systemd 运行时可能未注入 HOME，此时 pyenv/nvm 会装到
-	// /.pyenv、/.nvm（与应用商店的探测逻辑保持一致），否则按版本注入 PATH 会失败。
-	homes = append(homes, "/root", "/")
-	switch t {
-	case model.SiteTypeNode:
-		for _, h := range homes {
-			if matches, _ := filepath.Glob(filepath.Join(h, ".nvm", "versions", "node", "v"+v+".*", "bin")); len(matches) > 0 {
-				return matches[0]
-			}
-		}
-		if matches, _ := filepath.Glob("/usr/local/node" + mainVer + "*/bin"); len(matches) > 0 {
-			return matches[0]
-		}
-	case model.SiteTypePython:
-		for _, h := range homes {
-			if matches, _ := filepath.Glob(filepath.Join(h, ".pyenv", "versions", v+".*", "bin")); len(matches) > 0 {
-				return matches[0]
-			}
-		}
-		if matches, _ := filepath.Glob("/usr/local/python" + mainVer + "*/bin"); len(matches) > 0 {
-			return matches[0]
-		}
-	case model.SiteTypeGo:
-		if matches, _ := filepath.Glob("/usr/local/go" + v + "*/bin"); len(matches) > 0 {
-			return matches[0]
-		}
-	}
-	return ""
-}
+// runtimeVersionOf / normalizeRuntimeVersion / findRuntimeBinDir 已下沉到站点类型注册表
+// （见 site_types.go）：各类型的探测命令、版本正则、安装路径 glob 全部由 siteTypeSpecs 描述。
 
 func siteServiceName(name string) string { return "lp-" + name }
 
@@ -984,26 +842,19 @@ func siteServicePath(name string) string {
 func siteRunnerPath(name string) string { return "/www/.lp-run/" + name + ".sh" }
 
 // siteRuntimePrelude 生成站点进程 / 命令运行所需的环境前置：
-// 运行时 PATH（含 Node/Python/Go 指定版本）、GOROOT、应用端口与用户自定义环境变量。
-// 供启动脚本与依赖安装命令共用，保证两者环境一致。
+// 运行时 PATH（按所选版本注入）、类型对应环境变量（GOROOT/JAVA_HOME）、
+// 应用端口与用户自定义环境变量。供启动脚本与依赖安装命令共用，保证两者环境一致。
 func siteRuntimePrelude(s *model.Site) string {
 	var sb strings.Builder
-	// 根据 RuntimeVersion 设置对应版本的环境变量（版本统一归一化为主.次格式，路径 glob 模糊匹配）
+	// 按 RuntimeVersion 注入指定版本的运行时 PATH（版本统一归一化为主.次格式，路径 glob 模糊匹配）
 	if s.RuntimeVersion != "" {
-		switch s.Type {
-		case model.SiteTypeNode:
-			if bin := findRuntimeBinDir(model.SiteTypeNode, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
+		if spec, ok := siteSpec(s.Type); ok {
+			if bin := findRuntimeBinDir(s.Type, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
 				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
-			}
-		case model.SiteTypePython:
-			if bin := findRuntimeBinDir(model.SiteTypePython, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
-				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
-			}
-		case model.SiteTypeGo:
-			if bin := findRuntimeBinDir(model.SiteTypeGo, normalizeRuntimeVersion(s.RuntimeVersion)); bin != "" {
-				fmt.Fprintf(&sb, "export PATH=\"%s:$PATH\"\n", bin)
-				// GOROOT = bin 目录的上一级（如 /usr/local/go1.24）
-				fmt.Fprintf(&sb, "export GOROOT=\"%s\"\n", filepath.Dir(bin))
+				// 类型需要的基础环境变量（GOROOT/JAVA_HOME）= bin 的上一级
+				if spec.EnvKey != "" {
+					fmt.Fprintf(&sb, "export %s=\"%s\"\n", spec.EnvKey, filepath.Dir(bin))
+				}
 			}
 		}
 	}
@@ -1023,7 +874,20 @@ func siteRuntimePrelude(s *model.Site) string {
 	return sb.String()
 }
 
-// writeSiteService 为 python/node/go 站点生成 systemd 服务 + 启动脚本。
+// effectiveStartCommand 返回站点实际执行的启动命令。
+// 用户显式填写时一律优先；留空则由类型的 DefaultRun 自动拼装
+// （Java：java <JVM参数> -jar <jar> --server.port=<端口>，免去手写整条命令）。
+func effectiveStartCommand(s *model.Site) string {
+	if cmd := strings.TrimSpace(s.StartCommand); cmd != "" {
+		return cmd
+	}
+	if spec, ok := siteSpec(s.Type); ok && spec.DefaultRun != nil {
+		return spec.DefaultRun(s)
+	}
+	return ""
+}
+
+// writeSiteService 为 python/node/go/java 站点生成 systemd 服务 + 启动脚本。
 // autoStart=false 时只生成并 enable（不启动）：用于「启动命令尚未就绪/不可用」的场景，
 // 避免空目录或错误命令导致 Restart=always 无限重启刷日志。
 func writeSiteService(s *model.Site, autoStart bool) error {
@@ -1037,13 +901,14 @@ func writeSiteService(s *model.Site, autoStart bool) error {
 	if strings.TrimSpace(s.Root) != "" {
 		fmt.Fprintf(&sb, "cd %s\n", shellQuote(s.Root))
 	}
-	if strings.TrimSpace(s.StartCommand) == "" {
+	startCmd := effectiveStartCommand(s)
+	if strings.TrimSpace(startCmd) == "" {
 		sb.WriteString("echo 'start command not set, waiting for entry selection'\n")
 		sb.WriteString("exit 0\n")
 	} else {
 		// 用 bash -c 执行：支持 && / 变量赋值 / 重定向等 shell 语法
 		// （exec 是内建，无法直接解析这些语法，会导致复杂启动命令失败）
-		fmt.Fprintf(&sb, "exec bash -c %s\n", shellQuote(s.StartCommand))
+		fmt.Fprintf(&sb, "exec bash -c %s\n", shellQuote(startCmd))
 	}
 	if err := os.WriteFile(siteRunnerPath(s.Name), []byte(sb.String()), 0o755); err != nil {
 		return err
@@ -1069,6 +934,9 @@ Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/nginx/%s.service.log
 StandardError=append:/var/log/nginx/%s.service.log
+# 面板点「停止」时 systemd 发 SIGTERM，进程以 143 退出；不声明为成功会让单元停在
+# failed 状态（列表显示异常、再次启动前需要 reset-failed）。
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target
@@ -1495,7 +1363,9 @@ func firstCommandWord(cmd string) string {
 // 提前发现"填了 gunicorn/npm 但运行环境里没装"的情况（避免 systemd 无限重启）。
 // 返回非致命告警（调用方只记 warning，不阻断创建）。
 func checkStartCommandAvailable(s *model.Site) error {
-	first := firstCommandWord(s.StartCommand)
+	// 用「实际执行」的命令校验：Java 站点启动命令可留空（自动拼装），必须取拼装后的结果，
+	// 否则留空时会跳过校验、并在 autoStart 判定上被当成"命令未就绪"而不启动。
+	first := firstCommandWord(effectiveStartCommand(s))
 	if first == "" || startCmdBuiltins[first] {
 		return nil
 	}
@@ -1648,6 +1518,8 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		ProxyPort:       req.ProxyPort,
 		Framework:       req.Framework,
 		InstallCommand:  strings.TrimSpace(req.InstallCommand),
+		JvmArgs:         strings.TrimSpace(req.JvmArgs),
+		JarFile:         strings.TrimSpace(req.JarFile),
 		Status:          model.SiteRunning,
 		SecurityHeaders: true, // 默认开启安全响应头（防跨站/防嗅探）
 	}
@@ -1667,22 +1539,30 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 			return nil, errors.New("请填写项目路径")
 		}
 		s.Root = strings.TrimRight(req.Root, "/")
-		if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
+		// Java 站点的应用端口允许留空：自动分配逻辑见下方 Java 分支（需等 jar 落盘/解压后
+		// 才能读其内嵌 server.port，故不能在此处提前校验）。其余进程型站点仍要求必填。
+		if s.ProxyPort <= 0 && s.Type != model.SiteTypeJava {
 			return nil, errors.New("请填写应用运行端口（1-65535）")
 		}
-		if s.ProxyPort == s.Port {
+		if s.ProxyPort > 65535 {
+			return nil, errors.New("应用运行端口超出范围（1-65535）")
+		}
+		if s.ProxyPort > 0 && s.ProxyPort == s.Port {
 			return nil, fmt.Errorf("应用运行端口不能与站点监听端口相同（%d），请更换", s.Port)
 		}
-		if err := checkProxyPortConflict(s.Name, s.ProxyPort); err != nil {
-			return nil, err
+		if s.ProxyPort > 0 {
+			if err := checkProxyPortConflict(s.Name, s.ProxyPort); err != nil {
+				return nil, err
+			}
 		}
 		// 启动命令选填：Go 不填时按上传内容自动推断（见下方 Go 分支）；
-		// Python 选择框架后可自动生成推荐命令；其余情况仍要求填写。
+		// Python 选择框架后可自动生成推荐命令；Java 有 jar 时按 jar + JVM 参数自动拼装；
+		// 其余情况仍要求填写。
 		if s.Type != model.SiteTypeGo && s.StartCommand == "" {
 			if s.Type == model.SiteTypePython {
 				s.StartCommand = defaultPythonStartCommand(s.Framework, s.ProxyPort)
 			}
-			if s.StartCommand == "" {
+			if s.StartCommand == "" && s.Type != model.SiteTypeJava {
 				return nil, errors.New("请填写启动命令，如 python app.py / npm run start")
 			}
 		}
@@ -1707,6 +1587,61 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 				}
 				// len(execs) > 1 时留空，交由前端弹窗选择入口
 			}
+		}
+		// Java 站点：部署上传的 jar（或 .zip 内含 jar）到项目目录，确定要运行的 jar 文件名
+		if s.Type == model.SiteTypeJava {
+			if req.SourceTmp != "" {
+				jarName, err := DeployJavaArtifact(req.SourceTmp, req.SourceName, s.Root)
+				if err != nil {
+					return nil, err
+				}
+				CleanupUpload(req.SourceTmp)
+				s.JarFile = jarName
+			}
+			// 应用端口留空时自动确定（用户显式填写则直接采用）：
+			//  1) 读已落盘 jar 内嵌的 server.port（兼容 jar 直传与 zip 解压两种上传方式）
+			//  2) 否则自动分配空闲端口
+			if s.ProxyPort <= 0 {
+				declared := 0
+				if s.JarFile != "" {
+					if info := InspectJavaArtifact(filepath.Join(s.Root, s.JarFile)); info.Port > 0 {
+						declared = info.Port
+					}
+				}
+				if declared > 0 && isPortBindable(declared) {
+					s.ProxyPort = declared
+				} else {
+					if declared > 0 {
+						s.DeployWarning = appendWarning(s.DeployWarning,
+							"项目内声明的端口 "+strconv.Itoa(declared)+" 已被占用，已改用自动分配的端口")
+					}
+					s.ProxyPort = AllocateSitePort()
+				}
+				if s.ProxyPort <= 0 {
+					return nil, errors.New("自动分配应用端口失败，请手动填写应用端口")
+				}
+			}
+			// 补校验：自动分配的端口可能与监听端口/其它站点冲突（显式填写已在校验阶段处理）
+			if s.ProxyPort == s.Port {
+				return nil, fmt.Errorf("应用运行端口不能与站点监听端口相同（%d），请更换", s.Port)
+			}
+			if err := checkProxyPortConflict(s.Name, s.ProxyPort); err != nil {
+				return nil, err
+			}
+			// jar 仅在使用「自动拼装启动命令」时必需：已自定义启动命令的场景
+			// （如从宝塔迁移过来的 Java 项目）允许只给命令、不给 jar。
+			if s.JarFile == "" && s.StartCommand == "" {
+				return nil, errors.New("请上传 jar 包，或填写项目目录中已有的 jar 文件名（也可直接自定义启动命令）")
+			}
+			// jar 必须真实存在，否则 systemd 会 Restart=always 无限重启刷日志
+			if s.JarFile != "" && !jarFileExists(s.Root, s.JarFile) {
+				return nil, errors.New("项目目录中未找到 " + s.JarFile + "，请重新上传")
+			}
+			// 非可执行包（清单里没有主类）不阻断创建，但明确告警，避免用户以为"没反应"
+			if hint := JarMainHint(s.Root, s.JarFile); hint != "" {
+				s.DeployWarning = appendWarning(s.DeployWarning, hint)
+			}
+			// 启动命令留空时由 effectiveStartCommand 按 jar + JVM 参数 + 端口自动拼装
 		}
 		s.ProxyPass = fmt.Sprintf("http://127.0.0.1:%d", s.ProxyPort)
 		if s.RuntimeVersion == "" {
@@ -1818,7 +1753,8 @@ func CreateSite(req CreateSiteReq) (*model.Site, error) {
 		}
 		// 启动命令为空（如 Go 多入口等待选择）或首词不可用时，只 enable 不启动，
 		// 避免空目录 / 错误命令触发 Restart=always 无限重启；用户修正后手动启动即可。
-		autoStart := strings.TrimSpace(s.StartCommand) != ""
+		// 注意取 effectiveStartCommand：Java 站点命令由 jar 自动拼装，StartCommand 可能为空。
+		autoStart := strings.TrimSpace(effectiveStartCommand(s)) != ""
 		if err := checkStartCommandAvailable(s); err != nil {
 			s.DeployWarning = appendWarning(s.DeployWarning, err.Error())
 			autoStart = false

@@ -58,6 +58,10 @@ func Init(path string) error {
 		&MailDomain{},
 		&Mailbox{},
 		&MailMessage{},
+		&MailAlias{},
+		&MailOutbox{},
+		&MailApiKey{},
+		&MailLog{},
 	); err != nil {
 		return err
 	}

@@ -57,6 +57,8 @@ type MigrateSite struct {
 	EnvVars        string   `json:"env_vars,omitempty"`
 	Framework      string   `json:"framework,omitempty"`
 	InstallCommand string   `json:"install_command,omitempty"`
+	JvmArgs        string   `json:"jvm_args,omitempty"`
+	JarFile        string   `json:"jar_file,omitempty"`
 	DefaultIndex   string   `json:"default_index,omitempty"`
 	Rewrite        string   `json:"rewrite,omitempty"`
 	RedirectURL    string   `json:"redirect_url,omitempty"`
@@ -98,6 +100,8 @@ type MigrateExport struct {
 	Size      int64           `json:"size"`
 	File      string          `json:"file"` // tar.gz 文件名
 	Manifest  MigrateManifest `json:"manifest"`
+	// Warnings 打包过程中的提示（如项目路径是共享根目录、只打包了 jar），供迁移日志展示
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ---------------- 数据目录 ----------------
@@ -119,7 +123,8 @@ func migrateExportFile(id string) string {
 // ExportMigration 本机打包选中的网站/数据库/FTP，生成迁移包
 func ExportMigration(siteNames, dbNames, ftpNames []string) (*MigrateExport, error) {
 	_ = os.MkdirAll(migrateRoot(), 0o755)
-	id := "export-" + time.Now().Format("20060102150405")
+	// 秒级时间戳 + 随机后缀：同一秒内两次打包若同 ID，会共用同一个目录/压缩包互相覆盖
+	id := "export-" + time.Now().Format("20060102150405") + "-" + randHex(4)
 	dir := migrateExportDir(id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, errors.New("创建迁移目录失败: " + err.Error())
@@ -132,6 +137,7 @@ func ExportMigration(siteNames, dbNames, ftpNames []string) (*MigrateExport, err
 		PanelVersion:  PanelVersion(),
 		ExportedAt:    time.Now().Format("2006-01-02 15:04:05"),
 	}
+	var warnings []string
 
 	// ---- 打包网站 ----
 	for _, name := range siteNames {
@@ -152,7 +158,34 @@ func ExportMigration(siteNames, dbNames, ftpNames []string) (*MigrateExport, err
 				cleanup()
 				return nil, err
 			}
-			tarGzDir(s.Root, filepath.Join(dst, "wwwroot.tar.gz"))
+			pkg := filepath.Join(dst, "wwwroot.tar.gz")
+			// 特例：站点项目路径被设成了共享的网站根目录（/www/wwwroot）——
+			// 整目录打包会把其它所有站点一起搬走（实测 221MB）。Java 站点只打包它自己的 jar，
+			// 其余类型仍整目录打包（文件就散在根目录里，无法可靠区分归属）。
+			if isSharedWebRoot(s.Root) && s.Type == model.SiteTypeJava && strings.TrimSpace(s.JarFile) != "" {
+				jar := filepath.Join(s.Root, filepath.Base(s.JarFile))
+				if fileExists(jar) {
+					if err := tarGzOne(jar, pkg); err != nil {
+						cleanup()
+						return nil, err
+					}
+					warnings = append(warnings, fmt.Sprintf(
+						"网站 %s 的项目目录是共享根目录 %s，已只打包它的 jar 包 %s（避免把其它站点一起搬走）",
+						name, s.Root, filepath.Base(jar)))
+					manifest.Sites = append(manifest.Sites, ms)
+					_ = os.MkdirAll(filepath.Join(dir, "sites", name), 0o755)
+					data, _ := json.Marshal(ms)
+					if err := os.WriteFile(filepath.Join(dir, "sites", name, "site.json"), data, 0o644); err != nil {
+						cleanup()
+						return nil, err
+					}
+					continue
+				}
+			}
+			if err := tarGzDir(s.Root, pkg); err != nil {
+				cleanup()
+				return nil, err
+			}
 		}
 		// 记录 site.json
 		data, _ := json.Marshal(ms)
@@ -210,8 +243,30 @@ func ExportMigration(siteNames, dbNames, ftpNames []string) (*MigrateExport, err
 		Size:      st.Size(),
 		File:      id + ".tar.gz",
 		Manifest:  manifest,
+		Warnings:  warnings,
 	}
 	return exp, nil
+}
+
+// isSharedWebRoot 判断站点目录是否是「共享的网站根目录」（本机的 /www/wwwroot）。
+// 站点项目路径被设成它时，整目录打包会把所有站点一起搬走，需要特殊处理。
+func isSharedWebRoot(root string) bool {
+	p := strings.TrimRight(strings.TrimSpace(root), "/")
+	return p == strings.TrimRight(webRootBase, "/")
+}
+
+// tarGzOne 把单个文件打成 tar.gz（包内保留原文件名），供共享根目录下只打包 jar 使用
+func tarGzOne(file, dest string) error {
+	_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+	cmd := fmt.Sprintf("tar -czf %s -C %s %s", shellQuote(dest), shellQuote(filepath.Dir(file)), shellQuote(filepath.Base(file)))
+	res, err := ExecCommand(cmd, 600*time.Second)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("tar 失败: %s %s", res.Stdout, res.Stderr)
+	}
+	return nil
 }
 
 // ListMigrationExports 列出已生成的迁移包
@@ -287,6 +342,8 @@ func snapshotSite(s *model.Site) (MigrateSite, error) {
 		EnvVars:        s.EnvVars,
 		Framework:      s.Framework,
 		InstallCommand: s.InstallCommand,
+		JvmArgs:        s.JvmArgs,
+		JarFile:        s.JarFile,
 		DefaultIndex:   s.DefaultIndex,
 		Rewrite:        s.Rewrite,
 		RedirectURL:    s.RedirectURL,
@@ -470,6 +527,10 @@ func CompareEnvForMigration(manifest *MigrateManifest, env MigrateEnvInfo) []Mis
 		case model.SiteTypeGo:
 			if !appInstalled("golang") {
 				add("Go 运行时", "golang", "go")
+			}
+		case model.SiteTypeJava:
+			if !appInstalled("java") {
+				add("Java 运行时", "java", "java")
 			}
 		}
 	}
@@ -850,7 +911,7 @@ func StartImport(req ImportRunRequest) (string, error) {
 	if len(req.Sites) == 0 && len(req.Databases) == 0 && len(req.FTPs) == 0 {
 		return "", errors.New("请至少选择一个迁移对象")
 	}
-	id := "import-" + time.Now().Format("20060102150405")
+	id := "import-" + time.Now().Format("20060102150405") + "-" + randHex(4)
 	task := newImportTask(id, TaskKindImport)
 	go runImport(task, req)
 	return id, nil

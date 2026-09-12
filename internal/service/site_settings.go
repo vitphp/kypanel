@@ -131,6 +131,9 @@ type SiteSettingsReq struct {
 	RuntimeVersion   string             `json:"runtime_version"`
 	InstallCommand   string             `json:"install_command"`
 	Framework        string             `json:"framework"`
+	// Java 站点（jar 形态）
+	JvmArgs string `json:"jvm_args"`
+	JarFile string `json:"jar_file"`
 }
 
 // RedirectRuleItem 单条重定向规则
@@ -385,7 +388,20 @@ func saveBaseTab(s *model.Site, req SiteSettingsReq) error {
 			}
 			s.ProxyPort = req.ProxyPort
 		}
-		if s.StartCommand == "" {
+		// Java 站点：JVM 参数与 jar 文件可改；启动命令留空时按 jar 自动拼装
+		if s.Type == model.SiteTypeJava {
+			s.JvmArgs = strings.TrimSpace(req.JvmArgs)
+			if jf := strings.TrimSpace(req.JarFile); jf != "" {
+				if _, err := os.Stat(filepath.Join(s.Root, jf)); err != nil {
+					return errors.New("项目目录中未找到 " + jf + "，请确认文件名")
+				}
+				s.JarFile = jf
+			}
+			if s.JarFile == "" && s.StartCommand == "" {
+				return errors.New("请填写 jar 文件名或自定义启动命令")
+			}
+		}
+		if s.StartCommand == "" && strings.TrimSpace(effectiveStartCommand(s)) == "" {
 			return errors.New("启动命令不能为空")
 		}
 		s.ProxyPass = fmt.Sprintf("http://127.0.0.1:%d", s.ProxyPort)

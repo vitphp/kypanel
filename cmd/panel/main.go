@@ -250,8 +250,15 @@ func main() {
 	service.ApplySecurityRules()
 
 	// 启动 SMTP 收信服务（进程内自研，maildir 落盘）。监听端口可用环境变量
-	// PANEL_MAIL_SMTP_PORTS 覆盖，默认 2525。放行端口请在防火墙里开放。
+	// PANEL_MAIL_SMTP_PORTS（默认 25,587,2525）与 PANEL_MAIL_SMTPS_PORTS（默认 465）覆盖。
+	// 587/465 为提交端口，要求认证；其余端口对外收信。放行端口请在防火墙里开放。
 	service.StartMailSmtpServer()
+
+	// 邮箱模块后台任务：容量校准、外发队列重试、日志清理、自动回复频率表清理
+	service.RecalcAllMailboxStorage()
+	service.StartMailOutboxWorker()
+	service.StartMailLogJanitor()
+	service.StartMailAutoReplyJanitor()
 
 	// 确保 cron 任务 wrapper 脚本存在（系统 cron 调起任务时用它执行用户命令并写日志）
 	service.EnsureCronWrapper()

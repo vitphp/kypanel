@@ -40,8 +40,9 @@ type MailDomain struct {
 	PortalCertEmail   string `gorm:"size:255" json:"portal_cert_email"`    // 证书到期通知邮箱（可选）
 	PortalCertDomains string `gorm:"size:1024" json:"portal_cert_domains"` // 证书覆盖的域名（逗号分隔）
 
-	// DKIM 私钥
+	// DKIM 私钥（PEM，加密存储）+ 选择器（默认 default）
 	DkimPrivateKey string `gorm:"size:4096" json:"-"`
+	DkimSelector   string `gorm:"size:64;default:default" json:"dkim_selector"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -93,7 +94,13 @@ type Mailbox struct {
 	Domain       string    `gorm:"size:255" json:"domain"`       // 冗余存域名字符串，方便展示
 	PasswordHash string    `gorm:"size:255" json:"-"`
 	Enabled      bool      `gorm:"default:true" json:"enabled"`
-	QuotaMb      int64     `gorm:"default:1024" json:"quota_mb"` // 该账号容量上限 MB
+	QuotaMb      int64     `gorm:"default:1024" json:"quota_mb"`     // 该账号容量上限 MB
+	StorageUsed  int64     `gorm:"default:0" json:"storage_used"`    // 已用容量（字节）
+	ForwardTo    string    `gorm:"size:1024" json:"forward_to"`      // 转发目标（逗号分隔，留空不转发）
+	KeepCopy     bool      `gorm:"default:true" json:"keep_copy"`    // 转发时是否保留本地副本
+	AutoReplyOn  bool      `gorm:"default:false" json:"auto_reply_on"`  // 自动回复开关
+	AutoReplyText string   `gorm:"size:2048" json:"auto_reply_text"`    // 自动回复内容
+	AutoReplyAt  int64     `gorm:"default:0" json:"auto_reply_at"`   // 上次自动回复时间（防轰炸）
 	Remark       string    `gorm:"size:255" json:"remark"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -107,14 +114,19 @@ func (Mailbox) TableName() string { return "mail_mailboxes" }
 
 // MailboxView 返回给前端的展示视图（不含密码）
 type MailboxView struct {
-	ID        uint      `json:"id"`
-	Domain    string    `json:"domain"`
-	Name      string    `json:"name"`
-	Address   string    `json:"address"`
-	Enabled   bool      `json:"enabled"`
-	QuotaMb   int64     `json:"quota_mb"`
-	Remark    string    `json:"remark"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            uint      `json:"id"`
+	Domain        string    `json:"domain"`
+	Name          string    `json:"name"`
+	Address       string    `json:"address"`
+	Enabled       bool      `json:"enabled"`
+	QuotaMb       int64     `json:"quota_mb"`
+	StorageUsed   int64     `json:"storage_used"`
+	ForwardTo     string    `json:"forward_to"`
+	KeepCopy      bool      `json:"keep_copy"`
+	AutoReplyOn   bool      `json:"auto_reply_on"`
+	AutoReplyText string    `json:"auto_reply_text"`
+	Remark        string    `json:"remark"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // MailMessage 一封邮件的索引元数据（正文存 maildir 文件，这里存便于收件箱列表/已读/搜索）。
@@ -165,3 +177,79 @@ type MailAttachmentView struct {
 	ContentType string `json:"content_type"`
 	Size        int64  `json:"size"`
 }
+
+// MailAlias 邮箱别名：把 source@domain 收到的信投递给 target（逗号分隔多个目标）。
+// 别名仅在域名内生效，且优先于同名的真实账号（真实账号存在时以账号为准）。
+type MailAlias struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	DomainID  uint      `gorm:"not null;index" json:"domain_id"`
+	Domain    string    `gorm:"size:255;index" json:"domain"`
+	Source    string    `gorm:"size:64;not null" json:"source"`  // @ 前部分，如 info
+	Target    string    `gorm:"size:1024;not null" json:"target"` // 目标地址，逗号分隔
+	Enabled   bool      `gorm:"default:true" json:"enabled"`
+	Remark    string    `gorm:"size:255" json:"remark"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TableName 指定表名
+func (MailAlias) TableName() string { return "mail_aliases" }
+
+// MailOutbox 外发队列：外域直发失败的邮件入队，后台按退避策略重试，超限生成退信。
+type MailOutbox struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	MailboxID uint   `gorm:"index" json:"mailbox_id"`    // 发件账号（用于退信与已发送副本）
+	DomainID  uint   `gorm:"index" json:"domain_id"`     // 发件域名（DKIM 签名用）
+	FromAddr  string `gorm:"size:255" json:"from_addr"`  // 信封发件人
+	ToAddrs   string `gorm:"size:1024" json:"to_addrs"`  // 收件人（逗号分隔）
+	Subject   string `gorm:"size:512" json:"subject"`
+	Filename  string `gorm:"size:255" json:"-"`          // 原始报文文件（outbox 目录）
+	MessageID string `gorm:"size:255" json:"message_id"`
+	Retry     int    `gorm:"default:0" json:"retry"`
+	MaxRetry  int    `gorm:"default:6" json:"max_retry"`
+	LastError string `gorm:"size:1024" json:"last_error"`
+	NextTry   int64  `gorm:"index;default:0" json:"next_try"`              // 下次尝试 unix 秒
+	Status    string `gorm:"size:16;index;default:pending" json:"status"` // pending / sent / failed
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TableName 指定表名
+func (MailOutbox) TableName() string { return "mail_outbox" }
+
+// MailApiKey 对外邮件 REST API 的访问令牌。只存哈希，明文仅在创建时返回一次。
+type MailApiKey struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	DomainID   uint      `gorm:"not null;index" json:"domain_id"`
+	Domain     string    `gorm:"size:255" json:"domain"`
+	Name       string    `gorm:"size:128" json:"name"`
+	KeyPrefix  string    `gorm:"size:32" json:"key_prefix"` // 明文前缀（便于识别，如 mk_ab12）
+	KeyHash    string    `gorm:"size:128;index" json:"-"`   // SHA256(明文)
+	Enabled    bool      `gorm:"default:true" json:"enabled"`
+	LastUsedAt int64     `gorm:"default:0" json:"last_used_at"`
+	CallCount  int64     `gorm:"default:0" json:"call_count"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// TableName 指定表名
+func (MailApiKey) TableName() string { return "mail_api_keys" }
+
+// MailLog 收发信日志（审计）。direction: in=收信 / out=发信 / bounce=退信。
+type MailLog struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	Direction string `gorm:"size:8;index" json:"direction"`
+	Domain    string `gorm:"size:255;index" json:"domain"`
+	MailboxID uint   `gorm:"index" json:"mailbox_id"`
+	FromAddr  string `gorm:"size:255" json:"from_addr"`
+	ToAddrs   string `gorm:"size:1024" json:"to_addrs"`
+	Subject   string `gorm:"size:512" json:"subject"`
+	Size      int64  `json:"size"`
+	Status    string `gorm:"size:16;index" json:"status"` // ok / failed / reject / queued
+	Detail    string `gorm:"size:1024" json:"detail"`
+	IP        string `gorm:"size:64" json:"ip"`
+	CreatedAt time.Time `gorm:"index" json:"created_at"`
+}
+
+// TableName 指定表名
+func (MailLog) TableName() string { return "mail_logs" }

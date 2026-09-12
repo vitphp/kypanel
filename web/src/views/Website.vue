@@ -239,6 +239,7 @@
             <el-radio-button value="python">Python</el-radio-button>
             <el-radio-button value="node">Node</el-radio-button>
             <el-radio-button value="go">Go</el-radio-button>
+            <el-radio-button value="java">Java</el-radio-button>
             <el-radio-button value="proxy">反向代理</el-radio-button>
           </el-radio-group>
         </el-form-item>
@@ -440,6 +441,65 @@
             <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个，可选" />
           </el-form-item>
           <!-- 创建进度 -->
+          <div v-if="deploying" class="deploy-progress">
+            <div class="deploy-stage">{{ deployStageText }}</div>
+            <el-progress :percentage="deployPercent" :status="deployPercent >= 100 ? 'success' : ''" />
+          </div>
+        </template>
+
+        <!-- Java（Spring Boot fat jar，反代本地端口；war 请用反向代理 + Tomcat） -->
+        <template v-else-if="form.type === 'java'">
+          <el-form-item label="项目文件">
+            <div class="src-picker">
+              <el-button :icon="Upload" @click="sourceInputRef.click()">选择 jar 包</el-button>
+              <span v-if="sourceFile" class="src-name" :title="sourceFile.name">{{ sourceFile.name }}</span>
+            </div>
+            <span class="tip">上传可执行 jar（Spring Boot fat jar）或内含 jar 的 zip。端口、启动命令、JVM 参数都会自动处理，不用管</span>
+          </el-form-item>
+          <el-form-item label="JDK 版本" prop="runtime_version">
+            <el-select v-model="form.runtime_version" placeholder="选择 JDK 版本" style="width: 100%" :disabled="!runtimeOptions.java.length">
+              <el-option v-for="v in runtimeOptions.java" :key="v.value" :label="v.label" :value="v.value" />
+              <template v-if="!runtimeOptions.java.length">
+                <el-option label="未检测到已安装的 JDK，请先在应用商店安装 Java (OpenJDK)" value="" disabled />
+              </template>
+            </el-select>
+            <span class="tip">默认已选最新版本，无需修改</span>
+          </el-form-item>
+
+          <el-collapse class="site-adv-collapse">
+            <el-collapse-item name="adv">
+              <template #title>
+                <span class="site-adv-title">高级选项</span>
+                <span class="site-adv-sub">默认自动处理，仅特殊项目需要改</span>
+              </template>
+              <el-form-item label="项目路径" prop="root">
+                <div class="root-picker">
+                  <el-input v-model="form.root" placeholder="留空自动创建 /www/wwwroot/域名" />
+                  <el-button :icon="FolderOpened" @click="pickerVisible = true" />
+                </div>
+              </el-form-item>
+              <el-form-item label="jar 文件名">
+                <el-input v-model="form.jar_file" placeholder="上传后自动识别，如 app.jar" />
+                <span class="tip">项目目录下要运行的 jar（可带子目录，如 target/app.jar）</span>
+              </el-form-item>
+              <el-form-item label="应用端口" prop="proxy_port">
+                <el-input-number v-model="form.proxy_port" :min="0" :max="65535" :value-on-clear="null" placeholder="自动分配" />
+                <span class="tip">留空自动分配（优先用项目里声明的 server.port）；站点反代到 127.0.0.1:该端口</span>
+              </el-form-item>
+              <el-form-item label="JVM 参数">
+                <el-input v-model="form.jvm_args" placeholder="选填，如 -Xmx512m -Duser.timezone=GMT+08" />
+                <span class="tip">会拼在 java 命令中 -jar 之前</span>
+              </el-form-item>
+              <el-form-item label="启动命令" prop="start_command">
+                <el-input v-model="form.start_command" placeholder="留空自动生成 java -jar xxx.jar --server.port=端口" />
+                <span class="tip">留空按 jar + JVM 参数 + 端口自动拼装（Spring Boot 标准参数 --server.port）；非 Spring Boot 项目才需要填写</span>
+              </el-form-item>
+              <el-form-item label="环境变量">
+                <el-input v-model="form.env_vars" type="textarea" :rows="2" placeholder="KEY=VALUE，每行一个，可选" />
+              </el-form-item>
+            </el-collapse-item>
+          </el-collapse>
+
           <div v-if="deploying" class="deploy-progress">
             <div class="deploy-stage">{{ deployStageText }}</div>
             <el-progress :percentage="deployPercent" :status="deployPercent >= 100 ? 'success' : ''" />
@@ -655,7 +715,7 @@ const selectedVersionMap = ref({})
 // - setter：用户改动多选框时把所有选中的 app key 写回 selectedVersionMap（按 Tab 隔离记忆）
 const selectedRuntimeVersion = computed({
   get() {
-    if (!['php', 'python', 'go', 'node'].includes(activeTab.value)) return []
+    if (!['php', 'python', 'go', 'node', 'java'].includes(activeTab.value)) return []
     const keys = runtimeAppKey[activeTab.value]
     const keyArray = Array.isArray(keys) ? keys : [keys]
     // 只返回用户明确勾选的版本，默认不预勾选任何版本
@@ -664,7 +724,7 @@ const selectedRuntimeVersion = computed({
   set(v) {
     if (Array.isArray(v)) {
       const active = activeTab.value
-      if (!['php', 'python', 'go', 'node'].includes(active)) return
+      if (!['php', 'python', 'go', 'node', 'java'].includes(active)) return
       const keyArray = Array.isArray(runtimeAppKey[active]) ? runtimeAppKey[active] : [runtimeAppKey[active]]
       // 只记录当前 Tab 涉及的 key；取消勾选的 key 从 map 中移除
       for (const k of keyArray) {
@@ -715,6 +775,7 @@ const typeMeta = {
   python: { label: 'Python', tag: 'primary' },
   go: { label: 'Go', tag: 'danger' },
   node: { label: 'Node', tag: 'info' },
+  java: { label: 'Java', tag: 'warning' },
   proxy: { label: '反向代理', tag: 'warning' }
 }
 
@@ -723,7 +784,8 @@ const runtimeAppKey = {
   php: ['php56', 'php70', 'php71', 'php72', 'php73', 'php74', 'php80', 'php81', 'php82', 'php83', 'php84', 'php'],
   python: ['python3', 'python38', 'python39', 'python310', 'python311', 'python312', 'python313'],
   node: ['nodejs', 'node14', 'node16', 'node18', 'node20', 'node22', 'node24'],
-  go: ['golang', 'go119', 'go120', 'go121', 'go122', 'go123', 'go124', 'go125']
+  go: ['golang', 'go119', 'go120', 'go121', 'go122', 'go123', 'go124', 'go125'],
+  java: ['java']
 }
 
 // 当前 Tab 是否有运行时任务正在安装或排队中（基于 /apps/list 实时状态，含 queued）。
@@ -830,7 +892,7 @@ const runtimeMissing = computed(() => {
   const missingMetas = allMetas.filter(m => !m.installed)
   if (missingMetas.length === 0) return null
 
-  const labelMap = { php: 'PHP', python: 'Python', go: 'Go', node: 'Node.js' }
+  const labelMap = { php: 'PHP', python: 'Python', go: 'Go', node: 'Node.js', java: 'Java' }
   const first = missingMetas[0]
   return {
     ...first,
@@ -849,6 +911,7 @@ const tabs = computed(() => {
     { key: 'python', label: 'Python', badgeType: 'primary' },
     { key: 'go', label: 'Go', badgeType: 'danger' },
     { key: 'node', label: 'Node', badgeType: 'info' },
+    { key: 'java', label: 'Java', badgeType: 'warning' },
     { key: 'proxy', label: '反向代理', badgeType: 'warning' }
   ]
   return list.map(t => ({
@@ -891,7 +954,7 @@ function onTabChange() {
 
 // 已安装运行环境版本选项（从 envStatus 读取多版本信息）
 const runtimeOptions = computed(() => {
-  const opts = { php: [], python: [], node: [], go: [] }
+  const opts = { php: [], python: [], node: [], go: [], java: [] }
   for (const [key, meta] of Object.entries(envStatusMap.value)) {
     if (!meta.installed) continue
     const t = Object.keys(runtimeAppKey).find(k => {
@@ -925,6 +988,16 @@ function cleanVer(type, raw) {
     const first = raw.split('\n')[0].trim()
     return first.startsWith('go') ? 'Go ' + first.replace('go version ', '').split(' ')[0] : first
   }
+  if (type === 'java') {
+    // 应用商店的 java 应用 VersionCmd 是 `java -version`，输出形如
+    // openjdk version "17.0.11" 2024-04-16 → 归一化为 "Java 17.0"（与后端 runtimeVersionOf 一致）
+    const m = raw.match(/"(\d+(?:\.\d+)?)/)
+    if (m) {
+      const parts = m[1].split('.')
+      return 'Java ' + (parts.length >= 2 ? parts[0] + '.' + parts[1] : parts[0])
+    }
+    return raw.split('\n')[0].trim()
+  }
   return raw.split('\n')[0].trim()
 }
 
@@ -948,6 +1021,8 @@ const form = reactive({
   create_ftp: false,
   ftp_username: '',
   ftp_password: '',
+  jvm_args: '',
+  jar_file: '',
   remark: ''
 })
 
@@ -1399,6 +1474,12 @@ function onTypeChange() {
   } else {
     form.runtime_version = ''
   }
+  // Java 站点的应用端口可留空（后端按项目 server.port 或自动分配），切到 Java 时清空默认 3000
+  if (form.type === 'java') {
+    form.proxy_port = null
+  } else if (!form.proxy_port) {
+    form.proxy_port = 3000
+  }
 }
 
 function buildPayload() {
@@ -1407,16 +1488,21 @@ function buildPayload() {
   if (!p.name && p.domain) p.name = p.domain.split(',')[0].trim().replace(/^\*\./, '')
   // 备注为空时默认与站点名称一致（用户没主动填备注就跟随 name）
   if (!p.remark) p.remark = p.name
-  if (form.type === 'node' || form.type === 'python' || form.type === 'go') {
+  if (['node', 'python', 'go', 'java'].includes(form.type)) {
     if (!p.root) p.root = `/www/wwwroot/${p.name}`
-    p.proxy_pass = `http://127.0.0.1:${form.proxy_port}`
+    // Java 站点端口可留空（后端按 server.port 或自动分配），其余进程型站点必须有端口
+    if (form.proxy_port) {
+      p.proxy_pass = `http://127.0.0.1:${form.proxy_port}`
+    }
   }
   // 安装命令仅 node/python 使用、框架仅 python 使用，避免切换类型后残留误传
   if (form.type !== 'node' && form.type !== 'python') p.install_command = ''
   if (form.type !== 'python') p.framework = ''
-  // 项目端口仅进程型站点（node/python/go）有意义：其余类型清空，
+  // JVM 参数 / jar 仅 Java 站点使用
+  if (form.type !== 'java') { p.jvm_args = ''; p.jar_file = '' }
+  // 项目端口仅进程型站点（node/python/go/java）有意义：其余类型清空，
   // 避免默认值 3000 被无意义落库，导致后续进程型站点被误判端口冲突
-  if (form.type !== 'node' && form.type !== 'python' && form.type !== 'go') p.proxy_port = 0
+  if (!['node', 'python', 'go', 'java'].includes(form.type)) p.proxy_port = 0
   // 反向代理：省略协议时自动补 http://（与后端 normalizeProxyPass 保持一致）
   if (form.type === 'proxy' && p.proxy_pass) {
     const v = String(p.proxy_pass).trim()
@@ -1489,9 +1575,20 @@ async function submit() {
     ElMessage.warning('创建 FTP 需要填写 FTP 密码')
     return
   }
+  if (form.type === 'java') {
+    if (!form.runtime_version) { ElMessage.warning('请选择 JDK 版本（需先在应用商店安装 Java）'); return }
+    if (!sourceFile.value && !form.jar_file) {
+      ElMessage.warning('请上传 jar 包，或填写项目目录中已有的 jar 文件名')
+      return
+    }
+    // 端口留空自动分配（优先用项目声明的 server.port），启动命令留空自动拼装
+  }
 
   if (form.type === 'go') {
     return submitGoSite()
+  }
+  if (form.type === 'java') {
+    return submitJavaSite()
   }
 
   submitting.value = true
@@ -1551,6 +1648,42 @@ async function submitGoSite() {
 function finishCreate() {
   createVisible.value = false
   loadSites()
+}
+
+// Java 站点：上传 jar（可选）→ 创建 → 后端落盘并自动拼装启动命令（java -jar ... --server.port=端口）
+async function submitJavaSite() {
+  submitting.value = true
+  const needUpload = !!sourceFile.value
+  if (needUpload) {
+    deploying.value = true
+    deployPercent.value = 0
+    deployStageText.value = '正在上传 jar…'
+  }
+  try {
+    const payload = buildPayload()
+    if (needUpload) {
+      const up = await uploadSource(sourceFile.value, (p) => {
+        deployPercent.value = Math.min(90, p)
+        deployStageText.value = `正在上传 jar… ${p}%`
+      })
+      const tmp = up.data?.tmp
+      if (!tmp) throw new Error('上传失败')
+      payload.source_tmp = tmp
+      payload.source_name = up.data?.filename || sourceFile.value.name
+      deployPercent.value = 92
+      deployStageText.value = '正在配置并启动 Java 进程…'
+    }
+    const res = await request.post('/site/create', payload)
+    finishCreate()
+    showCreateResult(res.data)
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.msg || e?.message || '创建失败')
+  } finally {
+    submitting.value = false
+    deploying.value = false
+    deployPercent.value = 0
+    deployStageText.value = ''
+  }
 }
 
 async function confirmEntry() {

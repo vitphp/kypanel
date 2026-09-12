@@ -27,9 +27,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"kypanel/internal/model"
 )
 
 // BTClient 对端面板 API 客户端
@@ -234,9 +237,59 @@ func (c *BTClient) SiteList() ([]map[string]any, error) {
 	return btParseDataList(res)
 }
 
-// AddSite 在对端面板创建网站
+// SiteDomainIndex 构造对端「已绑定域名 → 站点名」索引（冲突判断用）。
+//
+// 对端新版把域名单独存在 domain 表里（sites.domain 只是个数字），因此优先查 domain 表
+// （name=域名、pid=站点 id，与 sites.id 对应）；拿不到时回落到站点记录里的 domain 字段。
+func (c *BTClient) SiteDomainIndex(sites []map[string]any) map[string]string {
+	byID := map[string]string{}
+	for _, s := range sites {
+		id := strings.TrimSpace(strFromAny(s["id"]))
+		n := strings.TrimSpace(strFromAny(s["name"]))
+		if id != "" && n != "" {
+			byID[id] = n
+		}
+	}
+	idx := map[string]string{}
+	params := url.Values{}
+	params.Set("table", "domain")
+	params.Set("limit", "2000")
+	if res, err := c.btRequest("data", "getData", params); err == nil {
+		if rows, rerr := btParseDataList(res); rerr == nil {
+			for _, row := range rows {
+				d := strings.ToLower(strings.TrimSpace(strFromAny(row["name"])))
+				pid := strings.TrimSpace(strFromAny(row["pid"]))
+				if d == "" {
+					continue
+				}
+				if n := byID[pid]; n != "" {
+					idx[d] = n
+				}
+			}
+		}
+	}
+	for _, s := range sites {
+		n := strings.TrimSpace(strFromAny(s["name"]))
+		for _, d := range parseBTDomains(s["domain"]) {
+			if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+				if _, ok := idx[d]; !ok {
+					idx[d] = n
+				}
+			}
+		}
+	}
+	return idx
+}
+
+// AddSite 在对端面板创建「网站」（PHP / 纯静态）。
 // domains: 逗号分隔的域名列表；path: 网站目录（空则对端面板自动生成 /www/wwwroot/xxx）
-func (c *BTClient) AddSite(siteName, domains, path, phpVersion string) (map[string]any, error) {
+// phpVersion: PHP 版本号（如 "74"）；空字符串表示纯静态站点（type 为空 + version=00）。
+// siteType: sites.project_type 取值（PHP / html / proxy），仅用于对端面板列表归类展示。
+//
+// 注意：非 PHP 项目（Java/Node/Python/Go）不能走本接口——本接口只建站点记录，
+// 不会生成 project_config、不会起守护进程、也不会反代到应用端口，
+// 结果就是「迁过去的 Java 站点变成了 PHP 站点」。项目请走 createBtProject。
+func (c *BTClient) AddSite(siteName, domains, path, phpVersion, siteType string) (map[string]any, error) {
 	// 对端面板官方要求 webname 为 JSON 对象格式（新版不再接受 ["域名","备注"] 数组）：
 	//   {"domain":"主域名","domainlist":["域名1","域名2"],"count":2}
 	domList := make([]string, 0)
@@ -262,8 +315,17 @@ func (c *BTClient) AddSite(siteName, domains, path, phpVersion string) (map[stri
 	params := url.Values{}
 	params.Set("webname", string(wb))
 	params.Set("type_id", "0")
-	params.Set("type", "PHP")
-	params.Set("version", phpVersion) // 如 "74" / "80"
+	if phpVersion == "" {
+		// 纯静态：type 留空 + version=00（对端面板按「静态站点」处理）
+		params.Set("type", "")
+		params.Set("version", "00")
+	} else {
+		params.Set("type", "PHP")
+		params.Set("version", phpVersion) // 如 "74" / "80"
+	}
+	if siteType != "" {
+		params.Set("project_type", siteType)
+	}
 	params.Set("ps", "由 kypanel 网站搬家迁入")
 	params.Set("ftp", "false")
 	params.Set("sql", "false")
@@ -272,6 +334,468 @@ func (c *BTClient) AddSite(siteName, domains, path, phpVersion string) (map[stri
 		params.Set("path", path)
 	}
 	return c.btRequest("site", "AddSite", params)
+}
+
+// ---------------- 非 PHP 项目（Java / Node / Python / Go） ----------------
+
+// btProjectTypeMap 进程型站点类型 → 对端面板 sites.project_type 取值（仅用于判断与日志）。
+var btProjectTypeMap = map[string]string{
+	"node":   "Node",
+	"python": "Python",
+	"go":     "Go",
+	"java":   "Java",
+}
+
+// btIsProjectType 站点类型在对端面板是否属于「项目」（必须走项目接口创建，而非 AddSite）。
+func btIsProjectType(t string) bool {
+	_, ok := btProjectTypeMap[t]
+	return ok
+}
+
+// btExactDenyDirs 与路径完全相等才会被对端面板拒绝的目录。
+// 对应宝塔 public.get_sys_path() 的 a 列表（只有目录本身被拒），另外补上面板自身的
+// 「网站根目录 / 备份目录」——默认 /www/wwwroot，把站点目录设成它就会报本次这个错：
+// 「不能以系统关键目录作为站点目录」（PATH_ERROR）。
+var btExactDenyDirs = []string{
+	"/", "/www", "/usr", "/dev", "/home", "/media", "/mnt", "/opt", "/tmp", "/var",
+	"/www/wwwroot", "/www/backup",
+}
+
+// btPrefixDenyDirs 路径本身及其任意子目录都会被拒绝的目录（宝塔 get_sys_path() 的 c 列表）
+var btPrefixDenyDirs = []string{
+	"/www/.Recycle_bin", "/www/backup", "/www/php_session", "/www/wwwlogs", "/www/server",
+	"/etc", "/usr", "/var", "/boot", "/proc", "/sys", "/tmp", "/root",
+	"/lib", "/lib32", "/lib64", "/bin", "/sbin", "/run", "/srv",
+}
+
+// btSafeSitePath 把源站目录转换成对端面板可接受的站点目录。
+// 源站根目录若正好是 /www/wwwroot（用户在文件选择器里选中了「网站根目录」）或 /www/server
+// 这类系统关键目录，直接传给对端面板会被拒绝，这里统一回退到标准站点目录 /www/wwwroot/<站点名>，
+// 保证站点建得出来、文件也有地方落；/www/wwwroot/<站点名> 这类正常目录原样保留。
+func btSafeSitePath(path, name string) string {
+	p := strings.TrimSpace(path)
+	for len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = strings.TrimSuffix(p, "/")
+	}
+	if p == "" {
+		return filepath.Join(webRootBase, name)
+	}
+	for _, d := range btExactDenyDirs {
+		if p == d {
+			return filepath.Join(webRootBase, name)
+		}
+	}
+	for _, d := range btPrefixDenyDirs {
+		if p == d || strings.HasPrefix(p, d+"/") {
+			return filepath.Join(webRootBase, name)
+		}
+	}
+	return p
+}
+
+// btProjectURLs 生成对端面板项目接口的候选路径（两代入口，逐个尝试）：
+//
+//	新版：/mod/<语言>/project/<方法>/stype         （宝塔 9.2+ 网站-项目页，Java 走这里）
+//	新版子模块：/mod/<语言>/<子模块>/<方法>/stype    （Node 是 /mod/nodejs/com/...）
+//	旧版：/project/<语言>/<方法>/<stype>            （Go/Python 等项目模型，实测 11.5 可用）
+//
+// stype 为响应类型段：传空用占位串（面板对非 json/html 的段会原样返回数据）；
+// Python 的「运行方式」恰好也放在这一段（/project/python/CreateProject/command）。
+func btProjectURLs(lang, sub, def, stype string) []string {
+	if stype == "" {
+		stype = "stype"
+	}
+	out := []string{fmt.Sprintf("/mod/%s/project/%s/%s", lang, def, stype)}
+	if sub != "" {
+		out = append(out, fmt.Sprintf("/mod/%s/%s/%s/%s", lang, sub, def, stype))
+	}
+	return append(out, fmt.Sprintf("/project/%s/%s/%s", lang, def, stype))
+}
+
+// btProjectCall 调用对端面板项目接口。
+//
+// 实测调用约定（宝塔 11.5）：
+//   - 业务参数必须以 data=JSON 整体提交，不能拆成顶层表单字段：顶层字段经 get_mod_input 后
+//     全是字符串，模块里 isinstance(domains, list) 之类的判断必然失败（报「域名参数错误」）。
+//   - data 里必须带 def_name：模块内部会读 get.def_name（Node 的 comMod.create 就是如此），
+//     缺失时抛异常，而 /mod 路由在无登录会话（API 调用）时把异常伪装成 404。
+//   - 报错有两种结构：新版 {status:false,msg}，旧版 /project {status:false,status_code,error_msg,data}。
+//
+// urls 为候选路径（相对面板地址，见 btProjectURLs）；fields 为业务参数。
+func (c *BTClient) btProjectCall(urls []string, fields map[string]any) (map[string]any, error) {
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	form := url.Values{}
+	form.Set("request_time", ts)
+	form.Set("request_token", btMD5(ts+btMD5(c.ApiSK)))
+	form.Set("data", string(payload))
+	body := form.Encode()
+
+	var firstErr, lastErr error
+	for _, path := range urls {
+		u := c.BaseURL + path
+		slog.Info("对端面板项目接口请求", "url", u, "data", truncateLog(string(payload), 800))
+		req, err := http.NewRequest("POST", u, strings.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("User-Agent", "kypanel-migrate/1.0")
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("请求对端面板项目接口失败: %w", err)
+		}
+		rb, rerr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		if rerr != nil {
+			return nil, rerr
+		}
+		bodyText := strings.TrimSpace(string(rb))
+		slog.Info("对端面板项目接口响应", "url", u, "status", resp.StatusCode, "body", truncateLog(bodyText, 500))
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("对端面板返回 HTTP %d: %s", resp.StatusCode, truncateLog(bodyText, 120))
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rb, &m); err != nil {
+			lastErr = fmt.Errorf("对端面板项目接口响应无法解析: %s", truncateLog(bodyText, 120))
+			continue
+		}
+		if ok, exists := m["status"].(bool); exists && !ok {
+			err := errors.New("对端面板接口失败: " + btProjectErrMsg(m, bodyText))
+			// 首个 JSON 错误通常来自最匹配的那代接口，优先用它作为最终报错
+			if firstErr == nil {
+				firstErr = err
+			}
+			lastErr = err
+			continue
+		}
+		return m, nil
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("对端面板项目接口调用失败")
+	}
+	return nil, lastErr
+}
+
+// btProjectErrMsg 从项目接口响应里取错误信息（新版用 msg，旧版 /project 用 error_msg/data）
+func btProjectErrMsg(m map[string]any, raw string) string {
+	for _, k := range []string{"msg", "error_msg", "data"} {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return truncateLog(raw, 200)
+}
+
+// RemoteFileExists 判断对端面板服务器上是否存在指定文件（用目录列表判断，避免依赖 stat 接口）
+func (c *BTClient) RemoteFileExists(path string) bool {
+	dir := filepath.Dir(path)
+	name := filepath.Base(path)
+	files, _, err := c.ListDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ListJars 列出对端面板项目目录下的 jar 文件（按名称排序，取第一个作为启动包）
+func (c *BTClient) ListJars(dir string) []string {
+	files, _, err := c.ListDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		if strings.HasSuffix(strings.ToLower(f.Name), ".jar") {
+			out = append(out, f.Name)
+		}
+	}
+	return out
+}
+
+// dirSubNames 列出对端面板目录下的子目录名（目录不存在/无权限/返回目录不匹配时返回 nil）
+func (c *BTClient) dirSubNames(path string) []string {
+	_, dirs, err := c.ListDir(path)
+	if err != nil {
+		return nil
+	}
+	return dirs
+}
+
+// NodejsVersions 对端面板已安装的 Node 版本目录名（形如 v20.15.0），按版本号升序
+func (c *BTClient) NodejsVersions() []string {
+	var out []string
+	for _, name := range c.dirSubNames("/www/server/nodejs") {
+		if regexp.MustCompile(`^v\d+\.\d+`).MatchString(name) {
+			out = append(out, name)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return btVersionLess(out[i], out[j]) })
+	return out
+}
+
+// btVersionLess 比较形如 v20.15.3 的版本串（按数字段比较，避免字符串排序把 v9 排在 v20 之后）
+func btVersionLess(a, b string) bool {
+	pa := strings.Split(strings.TrimPrefix(a, "v"), ".")
+	pb := strings.Split(strings.TrimPrefix(b, "v"), ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		na, _ := strconv.Atoi(pa[i])
+		nb, _ := strconv.Atoi(pb[i])
+		if na != nb {
+			return na < nb
+		}
+	}
+	return len(pa) < len(pb)
+}
+
+// PickNodejsVersion 按源站运行时版本（如 "Node 20.19"）挑一个对端面板可用的 Node 版本；
+// 主版本一致优先，否则取对端最高的已装版本。对端未装任何 Node 版本时返回空串。
+func (c *BTClient) PickNodejsVersion(prefer string) string {
+	versions := c.NodejsVersions()
+	if len(versions) == 0 {
+		return ""
+	}
+	major := ""
+	if m := regexp.MustCompile(`\d+`).FindString(prefer); m != "" {
+		major = m
+	}
+	if major != "" {
+		for i := len(versions) - 1; i >= 0; i-- {
+			v := strings.TrimPrefix(versions[i], "v")
+			if strings.HasPrefix(v, major+".") {
+				return versions[i]
+			}
+		}
+	}
+	return versions[len(versions)-1]
+}
+
+// btJavaJDK 对端面板上一个「真正可用」的 JDK（已校验 <home>/bin/java 存在）
+type btJavaJDK struct {
+	Home    string // 家目录，如 /www/server/java/jdk-21.0.2
+	Version string // 版本串（目录名或接口上报值），如 jdk-21.0.2 / jdk1.8.0_371
+	Major   int    // 主版本：8 / 17 / 21（0 = 识别不出）
+}
+
+// btJavaMajor 从 JDK 名称/路径/版本串里解析主版本号：
+//
+//	jdk1.8.0_371 / 1.8 / Java 1.8 → 8（老式 1.x 版本号）
+//	jdk-21.0.2 / Java 21.0 / 21   → 21
+//
+// 源站记录的 runtime_version 形如 "Java 21.0"，对端目录名形如 "jdk1.8.0_371"，两种都要能认。
+func btJavaMajor(v string) int {
+	s := strings.TrimSpace(v)
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	m := regexp.MustCompile(`\d+(\.\d+)*`).FindString(s)
+	if m == "" {
+		return 0
+	}
+	parts := strings.Split(m, ".")
+	if parts[0] == "1" && len(parts) >= 2 { // 1.8 → 8
+		if n, err := strconv.Atoi(parts[1]); err == nil {
+			return n
+		}
+	}
+	if n, err := strconv.Atoi(parts[0]); err == nil {
+		return n
+	}
+	return 0
+}
+
+// JavaJDKs 列出对端面板上可用的 JDK（校验 bin/java 存在），按主版本升序。
+//
+// 三处来源：面板 Java 项目接口上报的路径、软件商店安装目录 /www/server/java/jdk*、
+// 系统或手动安装的 /usr/lib/jvm/* 与 /opt/*jdk*。
+func (c *BTClient) JavaJDKs() []btJavaJDK {
+	seen := map[string]bool{}
+	var out []btJavaJDK
+	add := func(home, ver string) {
+		home = strings.TrimRight(strings.TrimSpace(home), "/")
+		if home == "" || !strings.HasPrefix(home, "/") || seen[home] {
+			return
+		}
+		ok := false
+		if files, _, err := c.ListDir(home + "/bin"); err == nil {
+			for _, f := range files {
+				if f.Name == "java" {
+					ok = true
+					break
+				}
+			}
+		}
+		if !ok {
+			return
+		}
+		seen[home] = true
+		if ver == "" {
+			ver = filepath.Base(home)
+		}
+		out = append(out, btJavaJDK{Home: home, Version: ver, Major: btJavaMajor(ver)})
+	}
+	// 1) 面板接口上报的 JDK（面板里配置过的 JDK 可能在任意路径，字段名各版本不一，直接递归找 .../bin/java）
+	if res, err := c.btProjectCall(btProjectURLs(btModJava, "", "get_system_info", ""),
+		map[string]any{"def_name": "get_system_info"}); err == nil {
+		var walk func(v any)
+		walk = func(v any) {
+			switch t := v.(type) {
+			case map[string]any:
+				for _, vv := range t {
+					walk(vv)
+				}
+			case []any:
+				for _, vv := range t {
+					walk(vv)
+				}
+			case string:
+				if strings.HasSuffix(t, "/bin/java") {
+					add(strings.TrimSuffix(t, "/bin/java"), "")
+				}
+			}
+		}
+		walk(res)
+	}
+	// 2) 软件商店安装的 JDK：/www/server/java/jdk*
+	for _, name := range c.dirSubNames("/www/server/java") {
+		add("/www/server/java/"+name, name)
+	}
+	// 3) 系统自带 / 手动安装的 JDK
+	for _, dir := range []string{"/usr/lib/jvm", "/opt"} {
+		for _, name := range c.dirSubNames(dir) {
+			l := strings.ToLower(name)
+			if strings.Contains(l, "jdk") || strings.Contains(l, "java") {
+				add(dir+"/"+name, name)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Major < out[j].Major })
+	return out
+}
+
+// pickJavaFrom 从已装 JDK 里挑一个满足 need 主版本的：取「够用的最低版本」，避免把项目跑在过高的 JDK 上。
+// need <= 0（源站没记录版本）时退化为对端最高版本。都不满足返回 ""。
+func pickJavaFrom(jdks []btJavaJDK, need int) string {
+	if len(jdks) == 0 {
+		return ""
+	}
+	if need > 0 {
+		for _, j := range jdks {
+			if j.Major >= need {
+				return j.Home
+			}
+		}
+		return ""
+	}
+	return jdks[len(jdks)-1].Home
+}
+
+// btJavaVersionsText 把已装 JDK 版本串成一行（用于报错/提示）
+func btJavaVersionsText(jdks []btJavaJDK) string {
+	names := make([]string, 0, len(jdks))
+	for _, j := range jdks {
+		names = append(names, j.Version)
+	}
+	return strings.Join(names, "、")
+}
+
+// PickJavaHome 按源站要求挑对端 JDK 家目录（用于 project_jdk 与 java 绝对路径）。
+// prefer 形如 "Java 21.0" / "21"，取主版本 ≥ 要求的最低可用版本；
+// prefer 为空或解析不出主版本时退化为对端最高版本。对端无满足要求的 JDK 时返回 ""。
+//
+// 注意：必须按版本匹配。源站用 JDK 21 编译的 jar（class 65.0）在对端 JDK 8 上会直接
+// 报 UnsupportedClassVersionError（class file version 65.0 ... up to 52.0），
+// 项目建出来了也跑不起来。
+func (c *BTClient) PickJavaHome(prefer string) string {
+	return pickJavaFrom(c.JavaJDKs(), btJavaMajor(prefer))
+}
+
+// PythonBinPath 取对端面板已创建的某个 Python 虚拟环境的解释器（宝塔 Python 项目必须用它）。
+// 环境目录在不同版本位于 /www/server/pyporject_evn/<环境名> 或 /www/server/pyporject_evn/versions/<环境名>。
+func (c *BTClient) PythonBinPath() string {
+	for _, base := range []string{"/www/server/pyporject_evn", "/www/server/pyporject_evn/versions"} {
+		for _, env := range c.dirSubNames(base) {
+			bin := base + "/" + env + "/bin/python"
+			if c.RemoteFileExists(bin) {
+				return bin
+			}
+		}
+	}
+	return ""
+}
+
+// FindGoExecutable 在项目目录里找「像 Go 编译产物」的文件名：
+// 优先与站点同名的文件（kypanel 编译 Go 站点时默认输出二进制名 = 站点名），
+// 其次目录里唯一的无扩展名文件；源码/资源类扩展名（.go/.py/.js/.jar...）一律排除。
+// 有多个候选且都不匹配站点名时返回空串（信息不足，交由用户在对端面板手动指定）。
+func (c *BTClient) FindGoExecutable(dir, siteName string) string {
+	files, _, err := c.ListDir(dir)
+	if err != nil {
+		return ""
+	}
+	skipExt := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".jar": true, ".txt": true,
+		".md": true, ".html": true, ".htm": true, ".json": true, ".yml": true, ".yaml": true,
+		".mod": true, ".sum": true, ".zip": true, ".gz": true, ".tar": true, ".log": true,
+		".db": true, ".conf": true, ".ini": true, ".sh": true,
+	}
+	var candidates []string
+	for _, f := range files {
+		if skipExt[strings.ToLower(filepath.Ext(f.Name))] {
+			continue
+		}
+		candidates = append(candidates, f.Name)
+	}
+	for _, name := range candidates {
+		if name == siteName || strings.TrimSuffix(name, filepath.Ext(name)) == siteName {
+			return name
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// CreateProxy 为对端面板站点创建反向代理（/site?action=CreateProxy）。
+// siteName/domain 为站点主域名（接口要求小写），target 为反代目标（如 http://127.0.0.1:8080）。
+func (c *BTClient) CreateProxy(siteName, target string) error {
+	siteName = strings.ToLower(strings.TrimSpace(siteName))
+	if siteName == "" {
+		return errors.New("反向代理缺少站点域名")
+	}
+	// 代理名称限制 3~40 字节
+	proxyName := "lp_" + strings.NewReplacer(".", "_", "-", "_", ":", "_").Replace(siteName)
+	if len(proxyName) > 40 {
+		proxyName = proxyName[:40]
+	}
+	params := url.Values{}
+	params.Set("sitename", siteName)
+	params.Set("proxyname", proxyName)
+	params.Set("proxydir", "/")
+	params.Set("proxysite", target)
+	params.Set("type", "1")
+	params.Set("cache", "0")
+	params.Set("cachetime", "0")
+	params.Set("todomain", siteName)
+	params.Set("subfilter", `[{"sub1":"","sub2":""}]`)
+	params.Set("advanced", "0")
+	_, err := c.btRequest("site", "CreateProxy", params)
+	return err
 }
 
 // PHPVersionList 获取对端面板可用的 PHP 版本
@@ -822,6 +1346,7 @@ func (c *BTClient) ListDir(path string) (files []btRemoteFile, dirs []string, er
 		return nil, nil, err
 	}
 	var m struct {
+		Path  string         `json:"path"`
 		Files []btRemoteFile `json:"files"`
 		Dirs  []struct {
 			Nm string `json:"nm"`
@@ -829,6 +1354,13 @@ func (c *BTClient) ListDir(path string) (files []btRemoteFile, dirs []string, er
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, nil, fmt.Errorf("解析对端面板目录列表失败: %w", err)
+	}
+	// 目录不存在时对端面板可能回退到「上一次访问的目录」，把别的目录内容当成结果返回
+	// （实测：/www/server/java 不存在时会返回站点目录列表）。这里用响应里的 path 复核。
+	want := strings.TrimRight(strings.TrimSpace(path), "/")
+	got := strings.TrimRight(strings.TrimSpace(m.Path), "/")
+	if got != "" && got != want {
+		return nil, nil, fmt.Errorf("对端面板返回的目录与请求不一致（请求 %s，返回 %s）", want, got)
 	}
 	for _, d := range m.Dirs {
 		dirs = append(dirs, d.Nm)
@@ -1231,52 +1763,89 @@ type BTPrecheckResult struct {
 	ExistsFTPs      []string `json:"exists_ftps"`
 }
 
-// BTPrecheck 检测目标对端面板上已存在的同名网站/数据库/FTP，供前端弹窗让用户选择覆盖或跳过
+// BTPrecheck 检测目标对端面板上已存在的同名网站/数据库/FTP，供前端弹窗让用户选择覆盖或跳过。
+//
+// 站点比对必须按「对端实际登记的信息」来，三路同时匹配：
+//  1. 站点名相同；
+//  2. 项目名相同 —— 对端项目（Java/Node/Python/Go）在 sites 表里存的是去点去横线的项目名
+//     （java-demo.n.05v.cn → java_demo_n_05v_cn），只比站点名会漏检；
+//  3. 域名相同 —— 用户可能在对端用别的名字绑了同一个域名。
+//
+// 漏检的后果很严重：预检不弹窗 → 前端不传覆盖/跳过决策 → 迁出时按默认「跳过」处理，
+// 用户看到的是「一下就迁移成功了」，其实什么都没迁。
 func BTPrecheck(req BTPrecheckRequest) (*BTPrecheckResult, error) {
 	bt := NewBTClient(req.BTURL, req.BTSK)
 	res := &BTPrecheckResult{ExistsSites: []string{}, ExistsDatabases: []string{}, ExistsFTPs: []string{}}
 
-	wantSites := map[string]bool{}
-	for _, s := range req.Sites {
-		wantSites[strings.TrimSpace(s)] = true
-	}
-	if len(wantSites) > 0 {
-		if list, err := bt.SiteList(); err == nil {
-			for _, item := range list {
-				name, _ := item["name"].(string)
-				if wantSites[name] {
-					res.ExistsSites = append(res.ExistsSites, name)
+	if len(req.Sites) > 0 {
+		names := map[string]bool{}   // 对端站点名（含项目名），小写
+		domains := map[string]bool{} // 对端站点绑定的域名，小写
+		list, _ := bt.SiteList()
+		for _, item := range list {
+			if n := strings.ToLower(strings.TrimSpace(strFromAny(item["name"]))); n != "" {
+				names[n] = true
+			}
+		}
+		for d := range bt.SiteDomainIndex(list) {
+			domains[d] = true
+		}
+		for _, raw := range req.Sites {
+			name := strings.TrimSpace(raw)
+			if name == "" {
+				continue
+			}
+			if names[strings.ToLower(name)] || names[strings.ToLower(btProjectName(name))] {
+				res.ExistsSites = append(res.ExistsSites, name)
+				continue
+			}
+			// 本机该站点绑定的域名（主域名 + 附加域名）在对端已被占用，也算冲突
+			var s model.Site
+			if err := model.DB.Where("name = ?", name).First(&s).Error; err != nil {
+				continue
+			}
+			hit := false
+			for _, d := range append([]string{s.Domain}, btSplitDomains(s.Domains)...) {
+				if d = strings.ToLower(strings.TrimSpace(d)); d != "" && domains[d] {
+					hit = true
+					break
 				}
+			}
+			if hit {
+				res.ExistsSites = append(res.ExistsSites, name)
 			}
 		}
 	}
 
-	wantDbs := map[string]bool{}
-	for _, d := range req.Databases {
-		wantDbs[strings.TrimSpace(d)] = true
-	}
-	if len(wantDbs) > 0 {
+	if len(req.Databases) > 0 {
+		existing := map[string]bool{}
 		if list, err := bt.DatabaseList(); err == nil {
 			for _, item := range list {
-				name, _ := item["name"].(string)
-				if wantDbs[name] {
-					res.ExistsDatabases = append(res.ExistsDatabases, name)
+				if n := strings.ToLower(strings.TrimSpace(toStr(item["name"]))); n != "" {
+					existing[n] = true
 				}
+			}
+		}
+		for _, raw := range req.Databases {
+			name := strings.TrimSpace(raw)
+			if name != "" && existing[strings.ToLower(name)] {
+				res.ExistsDatabases = append(res.ExistsDatabases, name)
 			}
 		}
 	}
 
-	wantFtps := map[string]bool{}
-	for _, f := range req.FTPs {
-		wantFtps[strings.TrimSpace(f)] = true
-	}
-	if len(wantFtps) > 0 {
+	if len(req.FTPs) > 0 {
+		existing := map[string]bool{}
 		if list, err := bt.FtpUserList(); err == nil {
 			for _, item := range list {
-				name, _ := item["username"].(string)
-				if wantFtps[name] {
-					res.ExistsFTPs = append(res.ExistsFTPs, name)
+				if n := strings.ToLower(strings.TrimSpace(toStr(item["username"]))); n != "" {
+					existing[n] = true
 				}
+			}
+		}
+		for _, raw := range req.FTPs {
+			name := strings.TrimSpace(raw)
+			if name != "" && existing[strings.ToLower(name)] {
+				res.ExistsFTPs = append(res.ExistsFTPs, name)
 			}
 		}
 	}

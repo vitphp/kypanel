@@ -55,7 +55,7 @@
                     class="imp-item"
                   >
                     <span class="imp-item-name">{{ s.name }}</span>
-                    <span class="imp-item-meta">{{ s.type || '-' }}<span v-if="s.php_version"> · PHP {{ s.php_version }}</span></span>
+                    <span class="imp-item-meta">{{ siteMeta(s) }}</span>
                   </el-checkbox>
                 </el-checkbox-group>
                 <div v-if="localSites.length === 0" class="imp-empty">本机暂无网站</div>
@@ -138,15 +138,27 @@
             </template>
             <template #default>
               <template v-if="precheckResult.target === 'bt'">
+                <!-- 只对比「所选迁移对象真正需要」的环境，且只给结论（已满足 / 未安装 + 安装指引），
+                     不罗列对端已装清单，避免「PHP 、PHP 00」这类噪声和无关类型干扰 -->
                 <div class="env-compare">
-                  <div class="env-row" :class="{ bad: expPhpMissing.length > 0 }">
+                  <div v-if="expPhpRequired" class="env-row" :class="{ bad: expPhpMissing.length > 0 }">
                     <div class="env-name">PHP 版本</div>
-                    <div class="env-val">
-                      本机需要：<b>{{ fmtBtRequired(expBtResult) }}</b>
-                      <span class="env-sub">对端已装：{{ fmtBtPhp(expBtResult) }}</span>
-                    </div>
+                    <div class="env-val">本机需要：<b>{{ fmtBtRequired(expBtResult) }}</b></div>
                     <div class="env-status" :class="expPhpMissing.length > 0 ? 'bad' : 'ok'">
-                      {{ expPhpMissing.length > 0 ? `缺少 ${fmtBtMissing(expBtResult)}` : '已满足' }}
+                      {{ expPhpMissing.length > 0 ? '未安装' : '已满足' }}
+                    </div>
+                  </div>
+                  <!-- 非 PHP 项目（Java / Node / Python）需要的运行时：迁出后由对端面板的项目守护进程运行 -->
+                  <div
+                    v-for="row in expRuntimeRows"
+                    :key="row.key"
+                    class="env-row"
+                    :class="{ bad: row.missing }"
+                  >
+                    <div class="env-name">{{ row.label }}</div>
+                    <div class="env-val">{{ row.need }}</div>
+                    <div class="env-status" :class="row.missing ? 'bad' : 'ok'">
+                      {{ row.missing ? '未安装' : '已满足' }}
                     </div>
                   </div>
                   <div v-if="expBtResult && expBtResult.mysql_required" class="env-row" :class="{ bad: expMysqlDiff === 'missing', warn: expMysqlNeedAck }">
@@ -157,9 +169,13 @@
                     </div>
                     <div class="env-status" :class="expMysqlStatusCls">{{ expMysqlStatusText }}</div>
                   </div>
+                  <!-- 静态 / 反向代理站点不依赖任何运行环境：一句话给结论，不占一行列表 -->
+                  <div v-if="!expHasEnvRows" class="env-block-tip">
+                    所选站点（纯静态 / 反向代理）无需在对端安装任何运行环境，可直接迁移
+                  </div>
                 </div>
-                <div v-if="expPhpMissing.length > 0" class="env-block-tip">
-                  对端面板缺少以上 PHP 版本，请先在对端面板「软件商店」安装后再迁移
+                <div v-if="expEnvFixTips.length > 0" class="env-block-tip">
+                  {{ expEnvFixTips }}
                 </div>
                 <div v-if="expMysqlDiff === 'missing'" class="env-block-tip">
                   对端面板未安装 MySQL，请先在对端面板安装 MySQL 后再迁移
@@ -196,7 +212,8 @@
           </div>
           <div v-if="task && (task.status === 'failed' || task.status === 'canceled')" class="mig-back-btn">
             <el-button @click="expStep = 2">返回上一步</el-button>
-            <el-button type="primary" @click="doBTExport({})">继续迁移</el-button>
+            <!-- 重试要重走一遍冲突预检，否则同名冲突拿不到覆盖/跳过决策，会被后端直接判失败 -->
+            <el-button type="primary" @click="startExport">继续迁移</el-button>
           </div>
         </div>
 
@@ -226,6 +243,20 @@
                   <el-button type="primary" @click="resetExport">完成</el-button>
                 </template>
               </el-result>
+              <!-- 被跳过的子任务必须列出来，否则用户看到「迁出完成」会以为对象都迁过去了 -->
+              <div v-if="skippedItems.length > 0" class="mig-fail-list">
+                <div class="mig-fail-title">已跳过（{{ skippedItems.length }} 项，对端面板已有同名对象，本次未做改动）：</div>
+                <el-alert
+                  v-for="(it, idx) in skippedItems"
+                  :key="idx"
+                  :title="`${labelOf(it.type)}：${it.name}`"
+                  :description="it.message"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="mig-fail-item"
+                />
+              </div>
             </template>
             <!-- 有子任务失败：显示失败列表，强制用户处理后再重试 -->
             <template v-else-if="task && task.status === 'failed'">
@@ -309,7 +340,7 @@
                     class="imp-item"
                   >
                     <span class="imp-item-name">{{ s.name }}</span>
-                    <span class="imp-item-meta">{{ s.type || '-' }}<span v-if="s.php_version"> · PHP {{ s.php_version }}</span></span>
+                    <span class="imp-item-meta">{{ siteMeta(s) }}</span>
                   </el-checkbox>
                 </el-checkbox-group>
                 <div v-if="remoteSites.length === 0" class="imp-empty">源面板暂无网站</div>
@@ -527,6 +558,60 @@ const localSites = ref([])
 const localDbs = ref([])
 const localFtps = ref([])
 
+// 站点类型文案：与「网站」模块的站点类型保持一致（纯静态 / PHP / Python / Node / Go / Java / 反向代理），
+// 不要把 static、proxy 这类内部取值直接显示给用户。
+const SITE_TYPE_LABELS = {
+  static: '纯静态',
+  php: 'PHP',
+  python: 'Python',
+  node: 'Node',
+  go: 'Go',
+  java: 'Java',
+  proxy: '反向代理'
+}
+
+// stripTypeWord 去掉 runtime_version 里自带的类型前缀：
+// 落库值是「PHP 7.4」「Java 21.0」「Python 3.10.21」这类带类型名的写法，展示时要拼自己的文案，先去重。
+function stripTypeWord(v, label) {
+  const s = String(v || '').trim()
+  if (!s) return ''
+  const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return s.replace(new RegExp(`^${esc}\\s*`, 'i'), '').trim()
+}
+
+// phpVerText 取 PHP 站点版本并统一成「7.4」样式：
+// 本机站点用 runtime_version（PHP 7.4），源面板列表给的是 php_version（74），对端站点回落到 php-fpm 套接字名。
+function phpVerText(s) {
+  const rv = stripTypeWord(s.runtime_version, 'PHP')
+  if (/\d/.test(rv)) return rv
+  const raw = String(s.php_version || '').trim()
+  if (/^\d+$/.test(raw)) return dottedVer(raw)
+  const m = String(s.php_fpm || '').match(/php-?fpm(\d+)/i)
+  if (m) {
+    const d = m[1]
+    return d.length >= 2 ? `${d[0]}.${d.slice(1)}` : d
+  }
+  return ''
+}
+
+// siteMeta 网站列表项副标题：类型（与网站模块同文案）+ 该站点运行所需的关键信息
+function siteMeta(s) {
+  const label = SITE_TYPE_LABELS[s.type] || s.type || '-'
+  if (s.type === 'php') {
+    const v = phpVerText(s)
+    return v ? `${label} ${v}` : label
+  }
+  if (['python', 'node', 'go', 'java'].includes(s.type)) {
+    const v = stripTypeWord(s.runtime_version, label)
+    return v ? `${label} ${v}` : label
+  }
+  if (s.type === 'proxy') {
+    const t = String(s.proxy_pass || '').trim()
+    return t ? `${label} · ${t}` : label
+  }
+  return label
+}
+
 // ---------- 迁出 ----------
 const expStep = ref(1)
 const expForm = reactive({ url: '', token: '', panelType: '', version: '', detected: false })
@@ -588,6 +673,69 @@ watch(impStep, (v) => {
 // ---------- 迁出：对端面板（bt）环境对比 ----------
 const expBtResult = computed(() => (precheckResult.value && precheckResult.value.target === 'bt' ? precheckResult.value.result : null))
 const expPhpMissing = computed(() => (expBtResult.value && expBtResult.value.php_missing) || [])
+// 只有勾选了 PHP 站点时才检测/展示 PHP 环境（没选 PHP 就不该提示装 PHP）
+const expPhpRequired = computed(() => Object.keys((expBtResult.value && expBtResult.value.php_required) || {}).length > 0)
+// 非 PHP 项目（Java / Node / Python / Go）所需运行时：只给结论，不罗列对端已装清单。
+// 名称用「网站」模块的站点类型文案（Java / Node / Python / Go），保持两处叫法一致。
+const RUNTIME_LABELS = { java: 'Java', node: 'Node', python: 'Python', go: 'Go' }
+// 各运行时到底需要装什么（避免与左侧名称重复，直接说明用途）
+const RUNTIME_NEEDS = {
+  java: '需要 JDK 运行站点 jar 包',
+  node: '需要 Node 版本运行站点',
+  python: '需要 Python 虚拟环境运行站点',
+  go: '需要 Go 环境'
+}
+const RUNTIME_HINTS = {
+  java: '在对端面板「网站 → Java 项目」中安装 JDK',
+  node: '在对端面板「网站 → Node 项目」中安装 Node 版本',
+  python: '在对端面板「网站 → Python 项目」中创建 Python 环境'
+}
+const expRuntimeMissing = computed(() => (expBtResult.value && expBtResult.value.runtime_missing) || [])
+const expRuntimeRows = computed(() => {
+  const required = (expBtResult.value && expBtResult.value.runtime_required) || {}
+  const javaMajor = Number((expBtResult.value && expBtResult.value.java_major) || 0)
+  return Object.keys(required)
+    .filter((k) => required[k])
+    .map((k) => {
+      const label = RUNTIME_LABELS[k] || k
+      // Java 要显示源站要求的具体版本：JDK 21 编译的 jar 在 JDK 8 上会直接报 UnsupportedClassVersionError
+      const need = k === 'java' && javaMajor > 0
+        ? `需要 JDK ${javaMajor} 运行站点 jar 包`
+        : RUNTIME_NEEDS[k] || `需要 ${label}`
+      return {
+        key: k,
+        label,
+        need,
+        // 对端返回的缺失项文案可能带后缀（如「Java (JDK 21)」「Python 环境」），按前缀匹配
+        missing: expRuntimeMissing.value.some((m) => String(m).startsWith(label))
+      }
+    })
+})
+// 本次迁移对象是否需要检查任何环境（全不需要时给一条「已满足」提示）
+const expHasEnvRows = computed(
+  () => expPhpRequired.value || expRuntimeRows.value.length > 0 || !!(expBtResult.value && expBtResult.value.mysql_required)
+)
+// 未满足项的统一修复指引：告诉用户去对端面板装什么
+const expEnvFixTips = computed(() => {
+  const r = expBtResult.value || {}
+  const tips = []
+  if (expPhpMissing.value.length > 0) {
+    tips.push(`对端面板缺少 PHP ${expPhpMissing.value.map(dottedVer).join('、')}，${r.php_hint || '请在对端面板「软件商店」安装对应 PHP 版本'}`)
+  }
+  const missingRows = expRuntimeRows.value.filter((x) => x.missing)
+  if (missingRows.length > 0) {
+    const hints = r.runtime_hints || {}
+    const detail = missingRows
+      .map((x) => hints[x.key] || RUNTIME_HINTS[x.key] || '')
+      .filter(Boolean)
+      .join('；')
+    tips.push(`对端面板缺少 ${missingRows.map((x) => x.label).join('、')}，${detail}`)
+  }
+  if (expMysqlDiff.value === 'missing') {
+    tips.push('对端面板未安装 MySQL，请先在对端面板安装 MySQL 后再迁移')
+  }
+  return tips.join('；')
+})
 const expMysqlDiff = computed(() => (expBtResult.value && expBtResult.value.mysql_diff) || 'none')
 const expMysqlNeedAck = computed(() => ['diff', 'downgrade', 'unknown'].includes(expMysqlDiff.value))
 const expMysqlStatusCls = computed(() => {
@@ -617,6 +765,7 @@ const expEnvBlocked = computed(() => {
   if (r.target === 'bt') {
     const rr = r.result || {}
     if ((rr.php_missing || []).length > 0) return true // 对端缺 PHP 版本：阻断
+    if ((rr.runtime_missing || []).length > 0) return true // 对端缺 Java/Node/Python 运行时：阻断
     if (rr.mysql_required && !rr.mysql_installed) return true // 对端无 MySQL：阻断
     if (expMysqlNeedAck.value && !mysqlAck.value) return true // 版本差异未确认：阻断
     return false
@@ -650,7 +799,7 @@ const impBlockHint = computed(() => {
 })
 const expAlertType = computed(() => {
   if (precheckResult.value && precheckResult.value.target === 'bt') {
-    if (expPhpMissing.value.length > 0 || expMysqlDiff.value === 'missing') return 'error'
+    if (expPhpMissing.value.length > 0 || expRuntimeMissing.value.length > 0 || expMysqlDiff.value === 'missing') return 'error'
     if (expMysqlNeedAck.value) return 'warning'
     return 'success'
   }
@@ -678,6 +827,13 @@ function labelOf(t) { return ITEM_LABELS[t] || t }
 const failedItems = computed(() => {
   if (!task.value || !Array.isArray(task.value.items)) return []
   return task.value.items.filter((it) => it.status === 'failed')
+})
+
+// 被跳过的子任务（对端已有同名对象且用户选了「跳过」）：成功页也要列出来，
+// 不然「迁出完成」会让人误以为这些对象也迁过去了。
+const skippedItems = computed(() => {
+  if (!task.value || !Array.isArray(task.value.items)) return []
+  return task.value.items.filter((it) => it.status === 'skipped')
 })
 
 const EXP_STORE_KEY = 'kypanel_migrate_exp_api'
@@ -1046,19 +1202,16 @@ function fmtSize(bytes) {
   return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
 }
 
-function fmtBtPhp(result) {
-  const list = result && result.php_installed ? Object.keys(result.php_installed) : []
-  return list.length ? list.map((v) => `PHP ${v}`).join('、') : '未检测到'
+// 两位版本号（74 / 80）显示成带点样式（7.4 / 8.0），与「网站」模块的 PHP 版本文案一致
+function dottedVer(v) {
+  const s = String(v || '').trim()
+  return /^\d{2}$/.test(s) ? `${s[0]}.${s[1]}` : s
 }
 
+// 本机需要的 PHP 版本（PHP 站点才用得到，静态/纯前端站点不会走到这里）
 function fmtBtRequired(result) {
   const list = result && result.php_required ? Object.keys(result.php_required) : []
-  return list.length ? list.map((v) => `PHP ${v}`).join('、') : '（静态/纯前端网站）'
-}
-
-function fmtBtMissing(result) {
-  const list = (result && result.php_missing) || []
-  return list.length ? list.map((v) => `PHP ${v}`).join('、') : '无'
+  return list.length ? list.map((v) => `PHP ${dottedVer(v)}`).join('、') : '无'
 }
 
 function resetExport() {

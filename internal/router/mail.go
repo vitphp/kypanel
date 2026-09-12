@@ -481,6 +481,368 @@ func setupMailRoutes(g *gin.RouterGroup) {
 			}
 			utils.Ok(c, nil)
 		})
+
+		// 账号设置：转发目标 / 保留副本 / 自动回复 / 容量
+		accounts.PATCH("/:id/settings", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			var req service.MailboxSettingsReq
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.UpdateMailboxSettings(uint(id), req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.account.settings", "更新邮箱账号设置 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, nil)
+		})
+
+		// 账号容量用量
+		accounts.GET("/:id/usage", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			usage, err := service.GetMailboxUsage(uint(id))
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, usage)
+		})
+
+		// 重算账号容量（索引与磁盘不一致时手动校正）
+		accounts.POST("/:id/recalc", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			used := service.RecalcMailboxStorage(uint(id))
+			utils.Ok(c, gin.H{"storage_used": used})
+		})
+	}
+
+	// DKIM：生成/查看域名密钥（公钥会同步出现在「DNS 解析」引导里）
+	mail.POST("/domains/:id/dkim", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		id, err := strconv.Atoi(c.Param("id"))
+		if err != nil || id <= 0 {
+			utils.Fail(c, http.StatusBadRequest, "参数错误")
+			return
+		}
+		selector, txt, err := service.EnsureMailDkim(uint(id))
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		domain, err := service.MailDomainNameByID(uint(id))
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		recordOpForCtx(c, "mail.dkim.generate", "生成 DKIM 密钥 #"+strconv.Itoa(id), "success")
+		utils.Ok(c, gin.H{
+			"selector": selector,
+			"host":     service.DkimDnsHost(domain, selector),
+			"value":    txt,
+		})
+	})
+
+	// DKIM：查询当前公钥（未生成时 generated=false）
+	mail.GET("/domains/:id/dkim", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		id, err := strconv.Atoi(c.Param("id"))
+		if err != nil || id <= 0 {
+			utils.Fail(c, http.StatusBadRequest, "参数错误")
+			return
+		}
+		domain, err := service.MailDomainNameByID(uint(id))
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		selector, generated, txt := service.MailDkimInfo(uint(id))
+		utils.Ok(c, gin.H{
+			"selector":  selector,
+			"generated": generated,
+			"host":      service.DkimDnsHost(domain, selector),
+			"value":     txt,
+		})
+	})
+
+	// 邮件服务状态（监听端口 / TLS）
+	mail.GET("/smtp-status", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		utils.Ok(c, service.GetMailSmtpStatus())
+	})
+
+	// ===== 别名 =====
+	aliases := mail.Group("/aliases")
+	{
+		aliases.GET("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			did, _ := strconv.Atoi(c.Query("domain_id"))
+			if did <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少域名参数")
+				return
+			}
+			utils.Ok(c, service.ListMailAliases(uint(did)))
+		})
+
+		aliases.POST("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			var req struct {
+				DomainID uint   `json:"domain_id" binding:"required"`
+				Source   string `json:"source" binding:"required"`
+				Target   string `json:"target" binding:"required"`
+				Remark   string `json:"remark"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			rec, err := service.CreateMailAlias(req.DomainID, req.Source, req.Target, req.Remark)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.alias.add", "添加邮箱别名: "+rec.Source+"@"+rec.Domain, "success")
+			utils.Ok(c, rec)
+		})
+
+		aliases.PATCH("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			var req struct {
+				Target  *string `json:"target"`
+				Enabled *bool   `json:"enabled"`
+				Remark  *string `json:"remark"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			patch := map[string]interface{}{}
+			if req.Target != nil {
+				patch["target"] = *req.Target
+			}
+			if req.Enabled != nil {
+				patch["enabled"] = *req.Enabled
+			}
+			if req.Remark != nil {
+				patch["remark"] = *req.Remark
+			}
+			if err := service.UpdateMailAlias(uint(id), patch); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, nil)
+		})
+
+		aliases.DELETE("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.DeleteMailAlias(uint(id)); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.alias.delete", "删除邮箱别名 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, nil)
+		})
+	}
+
+	// ===== 外发队列 =====
+	outbox := mail.Group("/outbox")
+	{
+		outbox.GET("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			limit, _ := strconv.Atoi(c.Query("limit"))
+			list, err := service.ListMailOutbox(service.MailOutboxFilter{
+				Status: c.Query("status"), Limit: limit,
+			})
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, gin.H{"list": list, "pending": service.CountOutboxPending()})
+		})
+
+		outbox.POST("/:id/retry", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.RetryOutboxNow(uint(id)); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, nil)
+		})
+
+		outbox.DELETE("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.DeleteOutbox(uint(id)); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.outbox.delete", "删除外发队列任务 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, nil)
+		})
+	}
+
+	// ===== 收发信日志 =====
+	mail.GET("/logs", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		mbID, _ := strconv.Atoi(c.Query("mailbox_id"))
+		list, err := service.ListMailLogs(service.MailLogFilter{
+			Direction: c.Query("direction"), Domain: c.Query("domain"),
+			MailboxID: uint(mbID), Status: c.Query("status"),
+			Keyword: c.Query("keyword"), Limit: limit,
+		})
+		if err != nil {
+			utils.Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		utils.Ok(c, list)
+	})
+
+	mail.GET("/logs/stats", func(c *gin.Context) {
+		if !requireSuperAdmin(c) {
+			return
+		}
+		utils.Ok(c, service.MailLogSummary(c.Query("domain")))
+	})
+
+	// ===== 对外 API 令牌 =====
+	apiTokens := mail.Group("/api-tokens")
+	{
+		apiTokens.GET("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			did, _ := strconv.Atoi(c.Query("domain_id"))
+			if did <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "缺少域名参数")
+				return
+			}
+			utils.Ok(c, service.ListMailApiKeys(uint(did)))
+		})
+
+		apiTokens.POST("", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			var req struct {
+				DomainID uint   `json:"domain_id" binding:"required"`
+				Name     string `json:"name"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			plain, view, err := service.CreateMailApiKey(req.DomainID, req.Name)
+			if err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.apikey.create", "创建邮件 API 令牌: "+view.Domain, "success")
+			// 明文仅此一次返回
+			utils.Ok(c, gin.H{"token": plain, "key": view})
+		})
+
+		apiTokens.PATCH("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			var req struct {
+				Enabled *bool `json:"enabled"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.SetMailApiKeyEnabled(uint(id), *req.Enabled); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			utils.Ok(c, nil)
+		})
+
+		apiTokens.DELETE("/:id", func(c *gin.Context) {
+			if !requireSuperAdmin(c) {
+				return
+			}
+			id, err := strconv.Atoi(c.Param("id"))
+			if err != nil || id <= 0 {
+				utils.Fail(c, http.StatusBadRequest, "参数错误")
+				return
+			}
+			if err := service.DeleteMailApiKey(uint(id)); err != nil {
+				utils.Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			recordOpForCtx(c, "mail.apikey.delete", "删除邮件 API 令牌 #"+strconv.Itoa(id), "success")
+			utils.Ok(c, nil)
+		})
 	}
 
 	// 收件箱（消息）

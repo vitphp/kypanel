@@ -61,12 +61,14 @@ func UpdateMailDomain(id uint, patch map[string]interface{}) error {
 	return model.DB.Model(&model.MailDomain{}).Where("id = ?", id).Updates(patch).Error
 }
 
-// DeleteMailDomain 删除邮箱域名
+// DeleteMailDomain 删除邮箱域名（连带清理账号/别名/令牌/邮件与磁盘目录）
 func DeleteMailDomain(id uint) error {
 	// 先清理该域名已开启的邮箱门户站点（站点 + nginx 配置 + 片段）
 	if dom, err := MailDomainByID(id); err == nil {
 		DeleteMailPortalForDomain(dom)
+		CleanupDomainStorage(dom.Domain)
 	}
+	model.DB.Where("domain_id = ?", id).Delete(&model.MailOutbox{})
 	res := model.DB.Delete(&model.MailDomain{}, id)
 	if res.Error != nil {
 		return res.Error
@@ -138,14 +140,19 @@ func BuildMailDnsGuide(domain string) (*model.MailDnsGuide, error) {
 	srv := MailDomainDNSServer() // 自动检测，面板已填值，用户不需要手填
 	// SPF 直接声明本服务器 IP（比 "mx ~all" 更精确：本面板是直接发信，不是 MX 中继）
 	spf := "v=spf1 ip4:" + srv + " ~all"
+	// DKIM：取该域名已生成的公钥；未生成时给出明确引导（后台点一下即可生成）
+	selector, generated, dkimTXT := MailDkimInfo(rec.ID)
+	if !generated {
+		dkimTXT = "（未生成）请先在下方点「生成 DKIM 密钥」，生成后此处会自动显示公钥"
+	}
 	g := &model.MailDnsGuide{
 		Domain:     rec.Domain,
 		MailServer: srv,
 		MxHost:     "@",
 		MxValue:    fmt.Sprintf("mail.%s", rec.Domain),
 		SpfValue:   spf,
-		DkimHost:   "default._domainkey",
-		DkimValue:  "v=DKIM1; k=rsa; p=<生成后自动填写>",
+		DkimHost:   DkimDnsHost(rec.Domain, selector),
+		DkimValue:  dkimTXT,
 		DmarcHost:  "_dmarc",
 		DmarcValue: "v=DMARC1; p=quarantine; rua=mailto:postmaster@" + rec.Domain,
 	}
@@ -153,8 +160,9 @@ func BuildMailDnsGuide(domain string) (*model.MailDnsGuide, error) {
 		"1) A 记录：mail." + rec.Domain + " 解析到本服务器（主机 mail，类型 A，值 " + srv + "）",
 		"2) MX 记录：主机 @，值 mail." + rec.Domain + "，优先级 10",
 		"3) SPF 记录：TXT，主机 @，值 " + spf + "（声明本服务器 " + srv + " 是唯一代发方）",
-		"4) DKIM 与 DMARC 可后续补",
-		"5) 生效通常需几分钟到数小时，可点页面上的「检测解析是否生效」自动查 MX",
+		"4) DKIM 记录：TXT，主机 " + DkimDnsHost(rec.Domain, selector) + "（需先在后台生成密钥）",
+		"5) DMARC 记录：TXT，主机 _dmarc，建议先 p=none 观察，稳定后再调 p=quarantine",
+		"6) 生效通常需几分钟到数小时，可点页面上的「检测解析是否生效」自动查 MX",
 	}
 	return g, nil
 }
